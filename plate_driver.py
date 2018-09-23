@@ -5,7 +5,10 @@ sys.path.append('/Users/Simon/GIT/GPlatesClassStruggle/')
 from reconstruction_classes import *
 
 from ptt.subduction_convergence import find_overriding_and_subducting_plates
+from ptt import separate_ridge_transform_segments
 
+
+transform_segment_deviation_in_radians = separate_ridge_transform_segments.DEFAULT_TRANSFORM_SEGMENT_DEVIATION_RADIANS
 
 
 
@@ -49,16 +52,16 @@ def get_torque_for_segment(segment, subducting_normal_reversal):
 
 
 def get_torques_for_plate_snapshot(snapshot, reconstruction_time, delta_time,
-                                   forces = ['slab_pull','slap_suction'], 
-                                   slab_suction_to_slab_pull_ratio = 0.25):
+                                   forces = ['slab_pull','slap_suction']):
 
     computed_plate_motions = []
     
     # loop over each plate, calling function to 
     for target_plate_id in snapshot.plate_ids:
         
-        torque_for_plate = get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time, delta_time,
-                                                        forces, slab_suction_to_slab_pull_ratio)
+        torque_for_plate = get_torque_for_plate_polygon(snapshot, target_plate_id, 
+                                                        reconstruction_time, delta_time,
+                                                        forces)
         
         computed_plate_motions.append(torque_for_plate)
         
@@ -67,8 +70,7 @@ def get_torques_for_plate_snapshot(snapshot, reconstruction_time, delta_time,
 
         
 def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time, delta_time,
-                                 forces = ['slab_pull','slab_suction'], 
-                                 slab_suction_to_slab_pull_ratio = 0.25):
+                                 forces = ['slab_pull','slab_suction']):
 
     net_torque = pygplates.Vector3D(0, 0, 0)
 
@@ -115,7 +117,7 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                             for segment in shared_sub_segment.get_resolved_feature().get_geometry().get_segments():
                                 segment_torque = get_torque_for_segment(segment, subducting_normal_reversal)
 
-                                net_torque = net_torque + segment_torque
+                                net_torque = net_torque + segment_torque * forces['slab_pull']
 
                     if overriding_plate.get_resolved_feature().get_reconstruction_plate_id() == target_plate_id:
 
@@ -129,8 +131,53 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                             for segment in shared_sub_segment.get_resolved_feature().get_geometry().get_segments():
                                 segment_torque = get_torque_for_segment(segment, subducting_normal_reversal)
 
-                                net_torque = net_torque + segment_torque * slab_suction_to_slab_pull_ratio
+                                net_torque = net_torque + segment_torque * forces['slab_suction']
+                    
+                    
+                elif shared_sub_segment.get_resolved_feature().get_feature_type() == pygplates.FeatureType.gpml_mid_ocean_ridge:
 
+                    if 'ridge_push' in forces:
+
+                        for plate_polygon, geometry_reversal_flag in zip(shared_sub_segment.get_sharing_resolved_topologies(),
+                                                                         shared_sub_segment.get_sharing_resolved_topology_geometry_reversal_flags()):
+                            if plate_polygon.get_feature().get_reconstruction_plate_id()==target_plate_id:
+                                plate_polygon_orientation = plate_polygon.get_resolved_geometry().get_orientation()
+                                if plate_polygon_orientation == pygplates.PolygonOnSphere.Orientation.clockwise:
+                                    if geometry_reversal_flag:
+                                        mor_normal_reversal = 1
+                                    else:
+                                        mor_normal_reversal = -1
+                                else:
+                                    if geometry_reversal_flag:
+                                        mor_normal_reversal = -1
+                                    else:
+                                        mor_normal_reversal = 1
+                            
+
+                        spreading_feature = shared_sub_segment.get_feature()
+
+                        spreading_stage_rotation = separate_ridge_transform_segments.get_stage_rotation_for_reconstructed_geometry(
+                                spreading_feature, snapshot.rotation_model, reconstruction_time)
+                        if not spreading_stage_rotation:
+                            # Skip current feature - it's not a spreading feature.
+                            continue
+
+                        ridge_and_transform_segment_geometries = separate_ridge_transform_segments.separate_geometry_into_ridges_and_transforms(
+                                spreading_stage_rotation,
+                                shared_sub_segment.get_resolved_geometry(),
+                                transform_segment_deviation_in_radians)
+                        if not ridge_and_transform_segment_geometries:
+                            # Skip shared sub segment - it's not a polyline (or polygon).
+                            continue
+
+                        ridge_sub_segment_geometries, _ = ridge_and_transform_segment_geometries
+
+                        for ridge_sub_segment_geometry in ridge_sub_segment_geometries:
+                            for segment in ridge_sub_segment_geometry.get_segments():
+                                segment_torque = get_torque_for_segment(segment, mor_normal_reversal)
+
+                                net_torque = net_torque + segment_torque * forces['ridge_push']
+                        
                     # TODO add more forces here, depending on plate boundary type
 
 
