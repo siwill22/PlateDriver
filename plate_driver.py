@@ -1,7 +1,7 @@
 import pygplates
 import numpy as np
 import sys
-sys.path.append('/Users/Simon/GIT/GPlatesClassStruggle/')
+sys.path.append('/Users/Simon/GIT/GPlatesReconstructionModel/')
 from reconstruction_classes import *
 
 from ptt.subduction_convergence import find_overriding_and_subducting_plates
@@ -13,7 +13,7 @@ transform_segment_deviation_in_radians = separate_ridge_transform_segments.DEFAU
 
 
 def get_velocity_vector_at_centroid(equivalent_stage_rotation, centroid_point, delta_time):
-    
+
     velocity_vectors = pygplates.calculate_velocities(
                                         [centroid_point],
                                         equivalent_stage_rotation,
@@ -23,16 +23,16 @@ def get_velocity_vector_at_centroid(equivalent_stage_rotation, centroid_point, d
     velocity_ne = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down(
         [centroid_point],
         velocity_vectors)[0]
-    
+
     return velocity_ne
 
-        
+
 def get_torque_for_segment(segment, subducting_normal_reversal):
-    
+
     # If segment is zero length, assume that the torque is zero
     if segment.is_zero_length():
         segment_torque = pygplates.Vector3D(0, 0, 0)
-    
+
     else:
         normal = -subducting_normal_reversal * segment.get_great_circle_normal()
 
@@ -55,20 +55,20 @@ def get_torques_for_plate_snapshot(snapshot, reconstruction_time, delta_time,
                                    forces = ['slab_pull','slap_suction']):
 
     computed_plate_motions = []
-    
-    # loop over each plate, calling function to 
+
+    # loop over each plate, calling function to
     for target_plate_id in snapshot.plate_ids:
-        
-        torque_for_plate = get_torque_for_plate_polygon(snapshot, target_plate_id, 
+
+        torque_for_plate = get_torque_for_plate_polygon(snapshot, target_plate_id,
                                                         reconstruction_time, delta_time,
                                                         forces)
-        
-        computed_plate_motions.append(torque_for_plate)
-        
-    return computed_plate_motions
-        
 
-        
+        computed_plate_motions.append(torque_for_plate)
+
+    return computed_plate_motions
+
+
+
 def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time, delta_time,
                                  forces = ['slab_pull','slab_suction']):
 
@@ -79,7 +79,7 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
         shared_sub_segments = topology.get_shared_sub_segments()
         for shared_sub_segment in shared_sub_segments:
 
-            # if the segment is not topologically correct, skip it 
+            # if the segment is not topologically correct, skip it
             if len(shared_sub_segment.get_sharing_resolved_topologies()) != 2:
                 #print 'skipping segment without exactly 2 shared polygons'
                 continue
@@ -87,21 +87,21 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                 continue
 
             # check if the segment is part of the boundary of the target plate
-            if target_plate_id in [resolved_topology.get_feature().get_reconstruction_plate_id() for resolved_topology in shared_sub_segment.get_sharing_resolved_topologies()]:            
+            if target_plate_id in [resolved_topology.get_feature().get_reconstruction_plate_id() for resolved_topology in shared_sub_segment.get_sharing_resolved_topologies()]:
 
                 # check if it is a subduction zone
                 if shared_sub_segment.get_resolved_feature().get_feature_type() == pygplates.FeatureType.gpml_subduction_zone:
 
                     # find which of the plate pair is the overriding plate, and identify polarity
                     try:
-                        (overriding_plate, 
-                         subducting_plate, 
+                        (overriding_plate,
+                         subducting_plate,
                          subduction_polarity) = find_overriding_and_subducting_plates(shared_sub_segment, reconstruction_time)
                     except:
                         #print shared_sub_segment.get_geometry()
                         break
 
-                    # not necessary if the same topological error is caught previously? 
+                    # not necessary if the same topological error is caught previously?
                     if overriding_plate is None:
                         continue
 
@@ -132,8 +132,8 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                                 segment_torque = get_torque_for_segment(segment, subducting_normal_reversal)
 
                                 net_torque = net_torque + segment_torque * forces['slab_suction']
-                    
-                    
+
+
                 elif shared_sub_segment.get_resolved_feature().get_feature_type() == pygplates.FeatureType.gpml_mid_ocean_ridge:
 
                     if 'ridge_push' in forces:
@@ -152,7 +152,7 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                                         mor_normal_reversal = -1
                                     else:
                                         mor_normal_reversal = 1
-                            
+
 
                         spreading_feature = shared_sub_segment.get_feature()
 
@@ -177,11 +177,11 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                                 segment_torque = get_torque_for_segment(segment, mor_normal_reversal)
 
                                 net_torque = net_torque + segment_torque * forces['ridge_push']
-                        
+
                     # TODO add more forces here, depending on plate boundary type
 
 
-    # Now get the centroid of the plate polygon, and evaluate the computed rotation at the centroid   
+    # Now get the centroid of the plate polygon, and evaluate the computed rotation at the centroid
     # also, evaluate the absolute rotation from the reconstruction model for comparison
     for topology in snapshot.resolved_topologies:
         if topology.get_resolved_feature().get_reconstruction_plate_id() == target_plate_id:
@@ -202,9 +202,8 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                                                                          from_time=reconstruction_time+delta_time,
                                                                          anchor_plate_id=0)
     recontruction_velocity_ne = get_velocity_vector_at_centroid(reconstruction_stage_rotation, centroid_point, delta_time)
-    
-    
-    return [target_plate_id, centroid_point, net_torque, 
-            computed_stage_rotation, computed_velocity_ne, 
-            reconstruction_stage_rotation, recontruction_velocity_ne]
 
+
+    return [target_plate_id, centroid_point, net_torque,
+            computed_stage_rotation, computed_velocity_ne,
+            reconstruction_stage_rotation, recontruction_velocity_ne]
