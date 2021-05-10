@@ -1,8 +1,7 @@
 import pygplates
 import numpy as np
 import sys
-sys.path.append('/Users/Simon/GIT/GPlatesReconstructionModel/')
-from reconstruction_classes import *
+from gprm import ReconstructionModel
 
 from ptt.subduction_convergence import find_overriding_and_subducting_plates
 from ptt import separate_ridge_transform_segments
@@ -78,6 +77,8 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
 
         shared_sub_segments = topology.get_shared_sub_segments()
         for shared_sub_segment in shared_sub_segments:
+            
+            #print(shared_sub_segment.get_resolved_feature().get_feature_type())
 
             # if the segment is not topologically correct, skip it
             if len(shared_sub_segment.get_sharing_resolved_topologies()) != 2:
@@ -85,7 +86,7 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                 continue
             if shared_sub_segment.get_resolved_feature().get_geometry() is None:
                 continue
-
+            
             # check if the segment is part of the boundary of the target plate
             if target_plate_id in [resolved_topology.get_feature().get_reconstruction_plate_id() for resolved_topology in shared_sub_segment.get_sharing_resolved_topologies()]:
 
@@ -96,11 +97,11 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                     try:
                         (overriding_plate,
                          subducting_plate,
-                         subduction_polarity) = find_overriding_and_subducting_plates(shared_sub_segment, reconstruction_time)
+                         subduction_polarity) = find_overriding_and_subducting_plates(shared_sub_segment)
                     except:
                         #print shared_sub_segment.get_geometry()
                         break
-
+                    
                     # not necessary if the same topological error is caught previously?
                     if overriding_plate is None:
                         continue
@@ -202,8 +203,7 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                                                                          from_time=reconstruction_time+delta_time,
                                                                          anchor_plate_id=0)
     recontruction_velocity_ne = get_velocity_vector_at_centroid(reconstruction_stage_rotation, centroid_point, delta_time)
-
-
+    
     return [target_plate_id, centroid_point, net_torque,
             computed_stage_rotation, computed_velocity_ne,
             reconstruction_stage_rotation, recontruction_velocity_ne]
