@@ -5,3 +5,5 @@
 plate_driver.pyc
 .ipynb_checkpoints/Eurasia_boundary_forces-checkpoint.ipynb
 .DS_Store
+.ipynb_checkpoints/plate_driver_SCNC-checkpoint.ipynb
+__pycache__/plate_driver.cpython-38.pyc
