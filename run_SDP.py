@@ -24,8 +24,8 @@ reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/at
 
 
 reconstruction_time = 0
-delta_time = 10.
-forces = {'slab_pull': 100,'slab_suction': 50}
+delta_time = 1.
+forces = {'slab_pull': 20,'slab_suction': 10}
 #forces = {'ridge_push':1}
 
 
@@ -48,7 +48,8 @@ rpolygons = sdp.nudge_topological_polygons(snapshot,
                                            delta_time=delta_time)
 
 (new_plate_polygons, 
- stage_pole_dict) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time)
+ stage_pole_dict,
+ rasters) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time)
 
 #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
@@ -61,15 +62,24 @@ for t in range(50):
         stage_pole_dict)
 
     (new_plate_polygons, 
-     stage_pole_dict) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time)
+     stage_pole_dict,
+     rasters) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time)
 
-    #print(stage_pole_dict)
-    
     fig = pygmt.Figure()
     fig.coast(land='grey', projection='W10i', region='d')
     #fig.plot(data=clipped_polygons, fill='blue', transparency=50)
-    fig.plot(data=new_plate_polygons.iloc[:], pen='red')
-    #fig.show(width=1000)
+    pygmt.makecpt(cmap='polar', series=[-0.001,0.001], background='o')
+    fig.grdimage(rasters['divergence'], cmap=True)
+    fig.plot(data=new_plate_polygons.iloc[:], pen='1p,black', transparency=50)
+    glon,glat = np.meshgrid(rasters.lon, rasters.lat)
+    stride=5
+    magnitude = np.sqrt(rasters['velocity_east'].data[::stride,::stride].flatten()**2 + rasters['velocity_north'].data[::stride,::stride].flatten()**2)
+    azimuth = np.degrees(np.arctan2(rasters['velocity_east'].data[::stride,::stride].flatten(), rasters['velocity_north'].data[::stride,::stride].flatten())) % 360
+    fig.plot(data={'x': glon[::stride,::stride].flatten(),
+                'y': glat[::stride,::stride].flatten(),
+                'azimuth': azimuth,
+                'magnitude': magnitude/(2000.*delta_time)},
+            style="V0.1c+e", pen="0.1p,black", fill="black")
     fig.savefig('./output/test_plot_{:d}.png'.format(t))
     
     
