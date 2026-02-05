@@ -7,6 +7,7 @@ import numpy as np
 from shapely.ops import unary_union
 from shapely.geometry import box
 import pygmt
+import metpy.calc as mpcalc
 
 import topojson as tp
 from xrspatial.experimental.polygonize import polygonize
@@ -270,6 +271,34 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
         stage_pole_dict[plate.get_reconstruction_plate_id()] = computed_stage_rotation
         
     return stage_pole_dict
+
+
+def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1):
+    
+    rp_gdf = plate_polygons_to_wrapped_gdf(rpolygons)
+
+    clipped_polygons = resolve_overlaps(rp_gdf, priority_col='PLATEID1')
+
+    plate_id_raster = update_plate_id_raster(clipped_polygons)
+
+    new_plate_polygons = update_plate_polygons(plate_id_raster)
+    new_plate_polygons = new_plate_polygons.explode(index_parts=False).reset_index(drop=True)
+    new_plate_polygons = new_plate_polygons[new_plate_polygons.geometry.geom_type.isin(['Polygon'])]
+    #print(new_plate_polygons)
+
+    velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time)
+    #
+    div = mpcalc.divergence(velocity_grid_east, velocity_grid_north)
+    #
+    stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, div, plate_id_raster, forces)
+    #
+    #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
+
+    
+    return new_plate_polygons, stage_pole_dict
+
+
+
 
 
 
