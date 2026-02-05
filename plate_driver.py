@@ -3,7 +3,7 @@ import numpy as np
 import sys
 from gprm import ReconstructionModel
 
-from ptt.subduction_convergence import find_overriding_and_subducting_plates
+from gprm.utils.geometry import find_overriding_and_subducting_plates
 from ptt import separate_ridge_transform_segments
 
 
@@ -26,7 +26,7 @@ def get_velocity_vector_at_centroid(equivalent_stage_rotation, centroid_point, d
     return velocity_ne
 
 
-def get_torque_for_segment(segment, subducting_normal_reversal):
+def get_torque_for_segment(segment, subducting_normal_reversal=1):
 
     # If segment is zero length, assume that the torque is zero
     if segment.is_zero_length():
@@ -94,13 +94,13 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
                 if shared_sub_segment.get_resolved_feature().get_feature_type() == pygplates.FeatureType.gpml_subduction_zone:
 
                     # find which of the plate pair is the overriding plate, and identify polarity
-                    try:
-                        (overriding_plate,
-                         subducting_plate,
-                         subduction_polarity) = find_overriding_and_subducting_plates(shared_sub_segment)
-                    except:
-                        #print shared_sub_segment.get_geometry()
-                        break
+                    #try:
+                    (overriding_plate,
+                     subducting_plate,
+                     subduction_polarity) = find_overriding_and_subducting_plates(shared_sub_segment, reconstruction_time)
+                    #except:
+                    #    print(shared_sub_segment.get_geometry())
+                    #    break
                     
                     # not necessary if the same topological error is caught previously?
                     if overriding_plate is None:
