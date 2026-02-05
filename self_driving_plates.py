@@ -4,6 +4,7 @@ from gprm.utils.proximity import rasterize_polygons
 from gprm.utils.geometry import wrap_polygon_feature, wrap_polygon_features
 import plate_driver as pdriver
 import numpy as np
+import xarray as xr
 from shapely.ops import unary_union
 from shapely.geometry import box
 import pygmt
@@ -293,9 +294,14 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1):
     stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, div, plate_id_raster, forces)
     #
     #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
-
     
-    return new_plate_polygons, stage_pole_dict
+    return new_plate_polygons, \
+           stage_pole_dict, \
+           xr.Dataset(
+               {'plate_id': plate_id_raster.rename({'x':'lon', 'y':'lat'}),
+                'velocity_east': velocity_grid_east,
+                'velocity_north': velocity_grid_north,
+                'divergence': div})
 
 
 
