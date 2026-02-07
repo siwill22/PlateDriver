@@ -17,16 +17,21 @@ import self_driving_plates as sdp
 
 
 reconstruction_model = ReconstructionModel('')
-reconstruction_model.add_rotation_model('/Users/simon/GIT/octopus/Atlantis3/atlantis3_rotations.rot')
-reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis4_topologies.gpml')
-reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis4_topological_polygons.gpml')
 
+#reconstruction_model.add_rotation_model('/Users/simon/GIT/octopus/Atlantis3/atlantis3_rotations.rot')
+#reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis4_topologies.gpml')
+#reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis4_topological_polygons.gpml')
+#cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlantis4_cratons.geojson')
+
+reconstruction_model.add_rotation_model('/Users/simon/GIT/octopus/Atlantis3/atlantis3_rotations.rot')
+reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis5_topologies.gpml')
+reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis5_topological_polygons.gpml')
+cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlantis5_cratons.geojson')
 
 
 reconstruction_time = 0
 delta_time = 1.
-forces = {'slab_pull': 20,'slab_suction': 10}
-#forces = {'ridge_push':1}
+forces = {'slab_pull': 20,'slab_suction': 10, 'ridge_push':5}
 
 
 # The first time step is based on topologies (And plate boundary types)
@@ -34,13 +39,16 @@ snapshot = reconstruction_model.plate_snapshot(reconstruction_time)
 
 result = pdriver.get_torques_for_plate_snapshot(snapshot, reconstruction_time, delta_time, forces)
 
+
 stage_pole_dict = {}
 
 for res in result:
     stage_pole_dict[res[0]] = res[3]
+    print(res[0], res[3])
 
 print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
+cratons = sdp.nudge_polygons(cratons, stage_pole_dict)
 
 rpolygons = sdp.nudge_topological_polygons(snapshot, 
                                            forces=forces, 
@@ -60,10 +68,13 @@ for t in range(50):
     rpolygons = sdp.nudge_polygons(
         new_plate_polygons.explode(index_parts=False).reset_index(drop=True), 
         stage_pole_dict)
+    
+    cratons = sdp.nudge_polygons(cratons, stage_pole_dict)
+
 
     (new_plate_polygons, 
      stage_pole_dict,
-     rasters) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time)
+     rasters) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, cratons=cratons)
 
     fig = pygmt.Figure()
     fig.coast(land='grey', projection='W10i', region='d')
@@ -79,7 +90,10 @@ for t in range(50):
                 'y': glat[::stride,::stride].flatten(),
                 'azimuth': azimuth,
                 'magnitude': magnitude/(2000.*delta_time)},
-            style="V0.1c+e", pen="0.1p,black", fill="black")
+            style='V0.15c+e+a45+ggray40+n', pen="0.1p,black", fill="black")
+    fig.plot(data=gpml2gdf(cratons), pen='1p,black', fill='red', transparency=50)
+    fig.text(x=new_plate_polygons.centroid.x, y=new_plate_polygons.centroid.y, 
+             text=new_plate_polygons['PLATEID1'], font='10p,Helvetica-Bold,black', justify='CM')
     fig.savefig('./output/test_plot_{:d}.png'.format(t))
     
     
