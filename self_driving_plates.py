@@ -5,6 +5,7 @@ from gprm.utils.geometry import wrap_polygon_feature, wrap_polygon_features
 import plate_driver as pdriver
 import numpy as np
 import xarray as xr
+import geopandas as gpd
 from shapely.ops import unary_union
 from shapely.geometry import box
 import pygmt
@@ -47,9 +48,10 @@ def nudge_topological_polygons(snapshot, forces=None, reconstruction_time=0, del
     return rpolygons
 
 
-def nudge_polygons(polygon_gdf, stage_pole_dict):
+def nudge_polygons(polygon_features, stage_pole_dict):
     
-    polygon_features = gdf2gpml(polygon_gdf.set_crs(epsg=4326))
+    if isinstance(polygon_features, gpd.GeoDataFrame):
+        polygon_features = gdf2gpml(polygon_features.set_crs(epsg=4326))
     
     rpolygons = []
     for polygon_feature in polygon_features:
@@ -175,6 +177,7 @@ def velocity_grid(plate_id_raster, plate_parameters, delta_time=1):
 
 
 def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, forces,
+                            craton_raster=None,
                             divergence_threshold_for_subduction = -0.00025,
                             divergence_threshold_for_ridge_push = 0.00025):
     
@@ -217,10 +220,27 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
                 # This tells us if boundary is divergent or 
                 divergence_value = divergence_raster.interp(lon=arc_point[1], lat=arc_point[0]).item()
 
+                continental_collision = False
+                if craton_raster is not None:
+                    craton_id1, craton_id2 = get_two_nearest_ids(arc_point, 
+                                                craton_raster.rename({k: v for k, v in {'x': 'lon', 'y': 'lat'}.items() if k in craton_raster.dims}),
+                                                radius_deg=2)
+                    if craton_id1 and craton_id2 and craton_id1 > 0 and craton_id2 > 0:
+                        print(craton_id1, craton_id2)
+                        continental_collision = True
+
+
                 segment_torque = None
                 if divergence_value<divergence_threshold_for_subduction:
 
-                    if downgoing_plate:
+                    if continental_collision:
+
+                        normal_reversal = -1 * clockwise_flag
+                        segment_torque = pdriver.get_torque_for_segment(segment, normal_reversal)
+
+                        net_torque = net_torque - segment_torque * 20
+
+                    elif downgoing_plate:
 
                         if 'slab_pull' in forces:
 
@@ -274,7 +294,16 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
     return stage_pole_dict
 
 
-def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1):
+def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None):
+    '''
+    Docstring for compute_timestep
+    
+    :param rpolygons: the polygons to nudge forward in time
+    :param forces: dictionary of forces to apply at plate boundaries. Supported keys are 'slab_pull', 'slab_suction', and 'ridge_push'
+    :param stage_pole_dict: dictionary of stage poles for each plate at the current time step, which will be updated by this function based on the forces applied at plate boundaries. Keys are plate ids, values are pygplates.FiniteRotation objects representing the stage pole rotation from 'time + delta_time' to 'time'.
+    :param delta_time: the amount of time to nudge forward in Myr
+    :param cratons: a pygplates.FeatureCollection of cratonic regions to nudge forward in time along with the plates. If None, no cratons will be included in the output.
+    '''
     
     rp_gdf = plate_polygons_to_wrapped_gdf(rpolygons)
 
@@ -282,16 +311,27 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1):
 
     plate_id_raster = update_plate_id_raster(clipped_polygons)
 
+    # Force values within cratons to overrule any plate polygon changes
+    # (from a geological perspective, cratons will overide subduction zones).
+    if cratons is not None:
+        craton_raster = rasterize_polygons(gpml2gdf(cratons), zval_field='PLATEID1')
+        plate_id_raster = craton_raster.where(craton_raster>0, plate_id_raster)
+    else:
+        craton_raster = None
+
     new_plate_polygons = update_plate_polygons(plate_id_raster)
     new_plate_polygons = new_plate_polygons.explode(index_parts=False).reset_index(drop=True)
     new_plate_polygons = new_plate_polygons[new_plate_polygons.geometry.geom_type.isin(['Polygon'])]
     #print(new_plate_polygons)
 
+
     velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time)
     #
     div = mpcalc.divergence(velocity_grid_east, velocity_grid_north)
+
     #
-    stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, div, plate_id_raster, forces)
+    stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, div, plate_id_raster, forces,
+                                              craton_raster)
     #
     #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
     
