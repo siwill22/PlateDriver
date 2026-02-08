@@ -286,7 +286,7 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
             computed_stage_rotation = pygplates.FiniteRotation(pygplates.PointOnSphere(net_torque.to_normalised().to_xyz()).to_lat_lon(),
                                                                net_torque.get_magnitude())
         else:
-            computed_stage_rotation = None
+            computed_stage_rotation = pygplates.FiniteRotation()
         
         torque_dict[plate.get_reconstruction_plate_id()] = net_torque
         stage_pole_dict[plate.get_reconstruction_plate_id()] = computed_stage_rotation
@@ -305,11 +305,34 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     :param cratons: a pygplates.FeatureCollection of cratonic regions to nudge forward in time along with the plates. If None, no cratons will be included in the output.
     '''
     
-    rp_gdf = plate_polygons_to_wrapped_gdf(rpolygons)
+    new_features = []
+    for feature in rpolygons:
+        new_feature = feature.clone()
+        new_feature.set_geometry(feature.get_geometry().to_tessellated(np.radians(.2)))
+        new_features.append(new_feature)
+
+    rp_gdf = plate_polygons_to_wrapped_gdf(new_features)
 
     clipped_polygons = resolve_overlaps(rp_gdf, priority_col='PLATEID1')
+    clipped_polygons = clipped_polygons.explode(index_parts=False).reset_index(drop=True)
+    # Line to densify line segments along great circle arcs (but seems not working)
+    #clipped_polygons['geometry'] = clipped_polygons.geometry.apply(lambda g: densify_polygon(g, max_dist_deg=1.0))
 
+    #clipped_polygons = gdf2gpml(clipped_polygons)
+    #new_features = []
+    #for feature in clipped_polygons:
+    #    new_feature = feature.clone()
+    #    new_feature.set_geometry(feature.get_geometry().to_tessellated(np.radians(1)))
+    #    new_features.append(new_feature)
+    #clipped_polygons = gpml2gdf(new_features)
+    
     plate_id_raster = update_plate_id_raster(clipped_polygons)
+    
+    #import matplotlib.pyplot as plt
+    #fig,ax = plt.subplots()
+    #plate_id_raster.plot(ax=ax)
+    #clipped_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
+    #fig.savefig('./output/plate_id_raster_{:d}.png'.format(np.random.randint(0,100000)))
 
     # Force values within cratons to overrule any plate polygon changes
     # (from a geological perspective, cratons will overide subduction zones).
@@ -324,6 +347,13 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     new_plate_polygons = new_plate_polygons[new_plate_polygons.geometry.geom_type.isin(['Polygon'])]
     #print(new_plate_polygons)
 
+    # Handle polygon splitting
+    # TODO make sure that polygon splits retain consistency with craton polygons
+    new_plate_polygons = resolve_duplicate_plateids(new_plate_polygons, next_plateid=None)
+
+    # Handle reduction in forces for plates with continents?
+    # BUT we should do that in 'polygons_to_stage_poles'?
+
 
     velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time)
     #
@@ -334,6 +364,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                               craton_raster)
     #
     #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
+    #print([(key,item) for key,item in stage_pole_dict.items()])
     
     return new_plate_polygons, \
            stage_pole_dict, \
@@ -347,6 +378,104 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
 
 
 
+
+
+
+
+
+def touches_dateline(geom, tol=1e-6):
+    """Check if polygon has vertices at lon ≈ ±180"""
+    coords = np.array(geom.exterior.coords)
+    return np.any(np.abs(np.abs(coords[:, 0]) - 180) < tol)
+
+def resolve_duplicate_plateids(gdf, next_plateid=None):
+    if next_plateid is None:
+        next_plateid = gdf['PLATEID1'].max() + 1
+    
+    gdf = gdf.copy()
+    
+    for plateid, group in gdf.groupby('PLATEID1'):
+        if len(group) <= 1:
+            continue
+        
+        # Identify which can be reassigned (not touching dateline)
+        for idx in group.index:
+            geom = gdf.loc[idx, 'geometry']
+            if geom.geom_type == 'MultiPolygon':
+                on_dateline = any(touches_dateline(p) for p in geom.geoms)
+            else:
+                on_dateline = touches_dateline(geom)
+            
+            gdf.loc[idx, '_on_dateline'] = on_dateline
+        
+        # Reassign all but one (prefer keeping dateline polygons unchanged)
+        candidates = group.index[~gdf.loc[group.index, '_on_dateline']]
+        keep_one = True
+        
+        for idx in candidates:
+            if keep_one:
+                keep_one = False
+                continue
+            gdf.loc[idx, 'PLATEID1'] = next_plateid
+            next_plateid += 1
+    
+    gdf = gdf.drop(columns=['_on_dateline'], errors='ignore')
+    return gdf
+
+
+
+from pyproj import Geod
+from shapely.geometry import Polygon, MultiPolygon
+from shapely import get_coordinates, set_coordinates
+import numpy as np
+
+geod = Geod(ellps='WGS84')
+
+def densify_great_circle(coords, max_dist_deg):
+    if len(coords) < 2:
+        return coords
+    
+    max_dist_m = max_dist_deg * 111_320
+    
+    new_coords = []
+    for i in range(len(coords) - 1):
+        lon1, lat1 = coords[i]
+        lon2, lat2 = coords[i + 1]
+        
+        # Skip degenerate segments
+        if (lon1, lat1) == (lon2, lat2):
+            new_coords.append((lon1, lat1))
+            continue
+        
+        _, _, dist = geod.inv(lon1, lat1, lon2, lat2)
+        
+        if dist <= max_dist_m:
+            new_coords.append((lon1, lat1))
+        else:
+            n_segments = int(np.ceil(dist / max_dist_m))
+            points = geod.npts(lon1, lat1, lon2, lat2, n_segments - 1)
+            new_coords.append((lon1, lat1))
+            new_coords.extend(points)
+    
+    new_coords.append(coords[-1])
+    return new_coords
+
+def densify_polygon(geom, max_dist_deg=1.0):
+    if geom is None or geom.is_empty:
+        return geom
+    
+    if geom.geom_type == 'Polygon':
+        exterior = densify_great_circle(list(geom.exterior.coords), max_dist_deg)
+        interiors = []
+        for ring in geom.interiors:
+            if len(ring.coords) >= 4:  # valid ring needs at least 4 coords
+                interiors.append(densify_great_circle(list(ring.coords), max_dist_deg))
+        return Polygon(exterior, interiors)
+    
+    elif geom.geom_type == 'MultiPolygon':
+        return MultiPolygon([densify_polygon(p, max_dist_deg) for p in geom.geoms])
+    
+    return geom  # return unchanged for non-polygon types
 
 
 
