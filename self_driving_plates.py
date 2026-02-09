@@ -64,6 +64,17 @@ def nudge_polygons(polygon_features, stage_pole_dict):
     return rpolygons
 
 
+def tessellate_polygons(polygons, max_dist_deg=0.2):
+
+    new_features = []
+    for feature in polygons:
+        new_feature = feature.clone()
+        new_feature.set_geometry(feature.get_geometry().to_tessellated(np.radians(max_dist_deg)))
+        new_features.append(new_feature)
+
+    return new_features
+
+
 def plate_polygons_to_wrapped_gdf(polygons):
     rp_gdf = gpml2gdf(polygons)
 
@@ -305,26 +316,12 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     :param cratons: a pygplates.FeatureCollection of cratonic regions to nudge forward in time along with the plates. If None, no cratons will be included in the output.
     '''
     
-    new_features = []
-    for feature in rpolygons:
-        new_feature = feature.clone()
-        new_feature.set_geometry(feature.get_geometry().to_tessellated(np.radians(.2)))
-        new_features.append(new_feature)
+    new_features = tessellate_polygons(rpolygons, max_dist_deg=0.2)
 
     rp_gdf = plate_polygons_to_wrapped_gdf(new_features)
 
     clipped_polygons = resolve_overlaps(rp_gdf, priority_col='PLATEID1')
     clipped_polygons = clipped_polygons.explode(index_parts=False).reset_index(drop=True)
-    # Line to densify line segments along great circle arcs (but seems not working)
-    #clipped_polygons['geometry'] = clipped_polygons.geometry.apply(lambda g: densify_polygon(g, max_dist_deg=1.0))
-
-    #clipped_polygons = gdf2gpml(clipped_polygons)
-    #new_features = []
-    #for feature in clipped_polygons:
-    #    new_feature = feature.clone()
-    #    new_feature.set_geometry(feature.get_geometry().to_tessellated(np.radians(1)))
-    #    new_features.append(new_feature)
-    #clipped_polygons = gpml2gdf(new_features)
     
     plate_id_raster = update_plate_id_raster(clipped_polygons)
     
