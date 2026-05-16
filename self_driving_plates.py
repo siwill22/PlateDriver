@@ -12,7 +12,7 @@ import pygmt
 import metpy.calc as mpcalc
 
 import topojson as tp
-from xrspatial.experimental.polygonize import polygonize
+from xrspatial.polygonize import polygonize
 
 
 
@@ -199,6 +199,7 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
 
     for i,plate in enumerate(gpml_plates):
         
+        # Dead variables?
         px = []
         py = []
         pe = []
@@ -279,7 +280,7 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
 
                         net_torque = net_torque + segment_torque * forces['ridge_push']
                     
-
+                # Deprecated section, not used
                 if segment_torque is not None:
                     if segment.is_zero_length():
                         continue
@@ -351,6 +352,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     # Handle reduction in forces for plates with continents?
     # BUT we should do that in 'polygons_to_stage_poles'?
 
+    boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons)
+
 
     velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time)
     #
@@ -374,7 +377,83 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
 
 
 
+def remove_boundary_segments(arc, lon_threshold=179.9, lat_threshold=89.9):
+    """Remove segments along dateline/poles but keep connecting segments"""
+    arc = np.asarray(arc)
+    
+    # Check which points are on boundaries
+    on_dateline = np.abs(np.abs(arc[:, 0]) - 180) < (180 - lon_threshold)
+    on_pole = np.abs(arc[:, 1]) > lat_threshold
+    on_boundary = on_dateline | on_pole
+    
+    # Keep segments where at least one endpoint is NOT on boundary
+    keep_segments = []
+    for i in range(len(arc) - 1):
+        if not (on_boundary[i] and on_boundary[i+1]):
+            keep_segments.append(i)
+    
+    if not keep_segments:
+        return []
+    
+    # Group consecutive segments into sub-arcs
+    sub_arcs = []
+    current = [arc[keep_segments[0]]]
+    
+    for i in range(len(keep_segments)):
+        current.append(arc[keep_segments[i] + 1])
+        if i < len(keep_segments) - 1 and keep_segments[i+1] != keep_segments[i] + 1:
+            sub_arcs.append(np.array(current))
+            current = [arc[keep_segments[i+1]]]
+    
+    sub_arcs.append(np.array(current))
+    return sub_arcs
 
+
+def topo_polygons_to_boundaries(plate_polygons):
+    
+    topo = tp.Topology(plate_polygons, prequantize=False, toposimplify=False)
+
+    topo_dict = topo.to_dict()
+    arcs = topo_dict['arcs']
+
+    # Build arc-to-polygon mapping with correct decoding
+    arc_to_polys = {}
+    feat_to_plateid = {}  # Store PLATEID1 for each feature
+
+    for obj_data in topo_dict['objects'].values():
+        for feat_idx, feat in enumerate(obj_data['geometries']):
+            # Store the PLATEID1 for this feature
+            feat_to_plateid[feat_idx] = feat['properties'].get('PLATEID1')
+
+            for ring in feat['arcs']:
+                for arc_idx in ring:
+                    # Decode TopoJSON arc index
+                    if arc_idx < 0:
+                        abs_idx = -arc_idx - 1
+                    else:
+                        abs_idx = arc_idx
+                    arc_to_polys.setdefault(abs_idx, []).append(feat_idx)
+
+    # Apply to all arcs with polygon IDs and PLATEID1
+    boundaries = []
+    for arc_idx, arc in enumerate(arcs):
+        sub_arcs = remove_boundary_segments(arc)
+
+        poly_list = arc_to_polys.get(arc_idx, [])
+        unique_polys = list(set(poly_list))
+
+        for sub_arc in sub_arcs:
+            boundaries.append({
+                'geometry': LineString(sub_arc),
+                'poly1': unique_polys[0] if len(unique_polys) > 0 else None,
+                'poly2': unique_polys[1] if len(unique_polys) > 1 else None,
+                'plateid1_poly1': feat_to_plateid.get(unique_polys[0]) if len(unique_polys) > 0 else None,
+                'plateid1_poly2': feat_to_plateid.get(unique_polys[1]) if len(unique_polys) > 1 else None
+            })
+
+    boundaries_gdf = gpd.GeoDataFrame(boundaries, geometry='geometry')
+    
+    return boundaries_gdf
 
 
 
@@ -769,7 +848,7 @@ def process_geodataframe(gdf, da, radius_deg=2.0, skip_dateline=True):
                 continue
 
             seg = LineString([p1, p2])
-            mid = segment.interpolate(0.5, normalized=True)
+            mid = seg.interpolate(0.5, normalized=True)
             id1, id2 = get_two_nearest_ids((mid.y,mid.x), da, radius_deg)
             results.append({
                 'polygon_idx': idx,
