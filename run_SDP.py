@@ -31,7 +31,7 @@ cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlant
 
 reconstruction_time = 0
 delta_time = 1.
-forces = {'slab_pull': 10,'slab_suction': 5, 'ridge_push':1}
+forces = {'slab_pull': 5,'slab_suction': 5, 'ridge_push':1}
 
 
 # The first time step is based on topologies (And plate boundary types)
