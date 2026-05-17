@@ -1,10 +1,12 @@
 import pygplates
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 #import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
 import metpy.calc as mpcalc
 import pygmt
+import geopandas as gpd
 
 from gprm import ReconstructionModel
 from gprm.utils.create_gpml import gpml2gdf, gdf2gpml
@@ -31,7 +33,7 @@ cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlant
 
 reconstruction_time = 0
 delta_time = 1.
-forces = {'slab_pull': 5,'slab_suction': 5, 'ridge_push':1}
+forces = {'slab_pull': 10,'slab_suction': 10, 'ridge_push':1}
 
 
 # The first time step is based on topologies (And plate boundary types)
@@ -55,13 +57,15 @@ rpolygons = sdp.nudge_topological_polygons(snapshot,
                                            reconstruction_time=0, 
                                            delta_time=delta_time)
 
-(new_plate_polygons, 
+(new_plate_polygons,
  stage_pole_dict,
- rasters) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time)
+ rasters, _) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time)
 
 #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
-for t in range(50):
+tracers = gpd.GeoDataFrame(columns=['geometry', 'active', 'age']).set_crs(epsg=4326)
+
+for t in range(100):
 
     print('Timestep {}'.format(t))
     
@@ -72,9 +76,15 @@ for t in range(50):
     cratons = sdp.nudge_polygons(cratons, stage_pole_dict)
 
 
-    (new_plate_polygons, 
+    (new_plate_polygons,
      stage_pole_dict,
-     rasters) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, cratons=cratons)
+     rasters,
+     boundaries_gdf) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, cratons=cratons)
+
+    new_tracers = sdp.seed_ridge_tracers(boundaries_gdf, rasters['divergence'])
+    tracers = pd.concat([tracers, new_tracers], ignore_index=True)
+    tracers = sdp.advect_tracers(tracers, rasters['plate_id'], stage_pole_dict)
+    tracers = sdp.deactivate_subducted_tracers(tracers, rasters['divergence'])
 
     fig = pygmt.Figure()
     fig.coast(land='grey', projection='W10i', region='d')
@@ -91,9 +101,15 @@ for t in range(50):
                 'azimuth': azimuth,
                 'magnitude': magnitude/(2000.*delta_time)},
             style='V0.15c+e+a45+ggray40+n', pen="0.1p,black", fill="black")
-    fig.plot(data=gpml2gdf(cratons), pen='1p,black', fill='red', transparency=50)
-    fig.text(x=new_plate_polygons.centroid.x, y=new_plate_polygons.centroid.y, 
+    fig.plot(data=gpml2gdf(cratons), pen='1p,black', fill='grey', transparency=50)
+    fig.text(x=new_plate_polygons.centroid.x, y=new_plate_polygons.centroid.y,
              text=new_plate_polygons['PLATEID1'], font='10p,Helvetica-Bold,black', justify='CM')
+    active_tracers = tracers[tracers.active.astype(bool)]
+    inactive_tracers = tracers[~tracers.active.astype(bool)]
+    if len(active_tracers):
+        fig.plot(data=active_tracers, style='c0.04c', fill='darkmagenta', pen='0.2p,darkmagenta')
+    if len(inactive_tracers):
+        fig.plot(data=inactive_tracers, style='c0.04c', fill='orange', pen='0.2p,orange')
     fig.savefig('./output/test_plot_{:d}.png'.format(t))
     
     
