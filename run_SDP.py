@@ -26,14 +26,26 @@ reconstruction_model = ReconstructionModel('')
 #cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlantis4_cratons.geojson')
 
 reconstruction_model.add_rotation_model('/Users/simon/GIT/octopus/Atlantis3/atlantis3_rotations.rot')
-reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis5_topologies.gpml')
-reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis5_topological_polygons.gpml')
-cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlantis5_cratons.geojson')
+reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis6_topologies.gpml')
+reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis6_topological_polygons.gpml')
+cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlantis6_cratons.geojson')
 
 
 reconstruction_time = 0
 delta_time = 1.
-forces = {'slab_pull': 10,'slab_suction': 10, 'ridge_push':1}
+forces = {'slab_pull': 10, 'slab_suction': 10, 'ridge_push': 3}
+
+params = {
+    'raster_spacing':              1,        # degrees; controls velocity grid resolution and polygon transform
+    'tessellation_deg':            0.2,      # polygon edge densification before rasterising
+    'topo_simplify_tolerance':     1,        # polygon smoothing tolerance after polygonise
+    'boundary_search_radius_deg':  2,        # plate ID neighbour search radius at boundaries
+    'continental_collision_force': 20,       # collision resistance scale factor
+    'div_threshold_subduction':   -0.00025,  # divergence below this → subduction zone
+    'div_threshold_ridge':         0.00025,  # divergence above this → ridge
+    'tracer_spacing_deg':          2.0,      # seed point spacing along ridge boundaries
+    'tracer_offset_deg':           0.6,      # perpendicular offset from ridge axis at seeding
+}
 
 
 # The first time step is based on topologies (And plate boundary types)
@@ -59,13 +71,13 @@ rpolygons = sdp.nudge_topological_polygons(snapshot,
 
 (new_plate_polygons,
  stage_pole_dict,
- rasters, _) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time)
+ rasters, _) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, params=params)
 
 #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
 tracers = gpd.GeoDataFrame(columns=['geometry', 'active', 'age']).set_crs(epsg=4326)
 
-for t in range(100):
+for t in range(50):
 
     print('Timestep {}'.format(t))
     
@@ -79,12 +91,17 @@ for t in range(100):
     (new_plate_polygons,
      stage_pole_dict,
      rasters,
-     boundaries_gdf) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, cratons=cratons)
+     boundaries_gdf) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
+                                             cratons=cratons, params=params)
 
-    new_tracers = sdp.seed_ridge_tracers(boundaries_gdf, rasters['divergence'])
+    new_tracers = sdp.seed_ridge_tracers(boundaries_gdf, rasters['divergence'],
+                                         spacing_deg=params['tracer_spacing_deg'],
+                                         threshold=params['div_threshold_ridge'],
+                                         offset_deg=params['tracer_offset_deg'])
     tracers = pd.concat([tracers, new_tracers], ignore_index=True)
     tracers = sdp.advect_tracers(tracers, rasters['plate_id'], stage_pole_dict)
-    tracers = sdp.deactivate_subducted_tracers(tracers, rasters['divergence'])
+    tracers = sdp.deactivate_subducted_tracers(tracers, rasters['divergence'],
+                                               threshold=params['div_threshold_subduction'])
 
     fig = pygmt.Figure()
     fig.coast(land='grey', projection='W10i', region='d')
