@@ -4,6 +4,7 @@ from gprm.utils.proximity import rasterize_polygons
 from gprm.utils.geometry import wrap_polygon_feature, wrap_polygon_features
 import plate_driver as pdriver
 import numpy as np
+import pandas as pd
 import xarray as xr
 import geopandas as gpd
 from shapely.ops import unary_union
@@ -372,9 +373,86 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                {'plate_id': plate_id_raster.rename({'x':'lon', 'y':'lat'}),
                 'velocity_east': velocity_grid_east,
                 'velocity_north': velocity_grid_north,
-                'divergence': div})
+                'divergence': div}), \
+           boundaries_gdf
 
 
+def seed_ridge_tracers(boundaries_gdf, divergence_raster, spacing_deg=2.0,
+                       threshold=0.00025, offset_deg=0.6):
+    """Seed tracer point pairs offset perpendicular to divergent boundary segments.
+
+    Two points are seeded per position (one on each side of the ridge axis) so
+    that after advection they are carried apart on their respective plates.
+    offset_deg must exceed half the plate_id raster cell size (~0.5 deg) so each
+    point clearly falls on one plate in the nearest-neighbour lookup.
+    """
+    new_points = []
+    for _, row in boundaries_gdf.iterrows():
+        seg = row.geometry
+        mid = seg.interpolate(0.5, normalized=True)
+        div_val = divergence_raster.interp(lon=mid.x, lat=mid.y).item()
+        if div_val <= threshold:
+            continue
+
+        # Perpendicular unit vector to the segment
+        coords = list(seg.coords)
+        dlon = coords[-1][0] - coords[0][0]
+        dlat = coords[-1][1] - coords[0][1]
+        norm = np.sqrt(dlon**2 + dlat**2)
+        if norm == 0:
+            continue
+        perp_lon = -dlat / norm
+        perp_lat = dlon / norm
+
+        length = seg.length
+        n = max(int(length / spacing_deg), 1)
+        for i in range(n + 1):
+            pt = seg.interpolate(i / n, normalized=True)
+            for sign in [+1, -1]:
+                new_lon = np.clip(pt.x + sign * offset_deg * perp_lon, -180, 180)
+                new_lat = np.clip(pt.y + sign * offset_deg * perp_lat, -90, 90)
+                new_points.append({'geometry': Point(new_lon, new_lat),
+                                   'active': True, 'age': 0})
+    if not new_points:
+        return gpd.GeoDataFrame(columns=['geometry', 'active', 'age']).set_crs(epsg=4326)
+    return gpd.GeoDataFrame(new_points).set_crs(epsg=4326)
+
+
+def advect_tracers(tracers, plate_id_raster, stage_pole_dict):
+    """Move active tracers one step using their plate's stage rotation."""
+    if tracers is None or len(tracers) == 0:
+        return tracers
+    active_mask = tracers.active.astype(bool)
+    active = tracers[active_mask].copy()
+    inactive = tracers[~active_mask]
+    rows = []
+    for _, row in active.iterrows():
+        lon, lat = row.geometry.x, row.geometry.y
+        pid = int(plate_id_raster.sel(lon=lon, lat=lat, method='nearest').item())
+        rotation = stage_pole_dict.get(pid, pygplates.FiniteRotation())
+        pt = rotation * pygplates.PointOnSphere(lat, lon)
+        new_lat, new_lon = pt.to_lat_lon()
+        r = row.to_dict()
+        r['geometry'] = Point(new_lon, new_lat)
+        r['age'] = row.age + 1
+        rows.append(r)
+    if not rows:
+        return tracers
+    updated = gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
+    return pd.concat([updated, inactive], ignore_index=True)
+
+
+def deactivate_subducted_tracers(tracers, divergence_raster, threshold=-0.00025):
+    """Mark active tracers as inactive where they have entered a subduction zone."""
+    if tracers is None or len(tracers) == 0:
+        return tracers
+    tracers = tracers.copy()
+    for idx, row in tracers[tracers.active.astype(bool)].iterrows():
+        div_val = divergence_raster.interp(
+            lon=row.geometry.x, lat=row.geometry.y).item()
+        if div_val < threshold:
+            tracers.loc[idx, 'active'] = False
+    return tracers
 
 
 def remove_boundary_segments(arc, lon_threshold=179.9, lat_threshold=89.9):
