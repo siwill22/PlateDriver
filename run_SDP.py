@@ -33,18 +33,21 @@ cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlant
 
 reconstruction_time = 0
 delta_time = 1.
-forces = {'slab_pull': 10, 'slab_suction': 10, 'ridge_push': 3}
+total_time = 60.
+forces = {'slab_pull': 8, 'slab_suction': 8, 'ridge_push': 3, 'continental_collision': 8}
 
 params = {
     'raster_spacing':              1,        # degrees; controls velocity grid resolution and polygon transform
     'tessellation_deg':            0.2,      # polygon edge densification before rasterising
     'topo_simplify_tolerance':     1,        # polygon smoothing tolerance after polygonise
     'boundary_search_radius_deg':  2,        # plate ID neighbour search radius at boundaries
-    'continental_collision_force': 20,       # collision resistance scale factor
     'div_threshold_subduction':   -0.00025,  # divergence below this → subduction zone
-    'div_threshold_ridge':         0.00025,  # divergence above this → ridge
-    'tracer_spacing_deg':          2.0,      # seed point spacing along ridge boundaries
+    'div_threshold_ridge':         0.0001,  # divergence above this → ridge
+    'tracer_spacing_deg':          1.0,      # seed point spacing along ridge boundaries
     'tracer_offset_deg':           0.6,      # perpendicular offset from ridge axis at seeding
+    'seafloor_spacing_deg':        1.0,      # grid spacing for initial seafloor age tracers
+    'spreading_rate_km_per_myr':   50.0,     # assumed spreading rate for age estimation
+    'csv_save_interval':           10,       # save active-tracer CSV every N timesteps
 }
 
 
@@ -71,15 +74,21 @@ rpolygons = sdp.nudge_topological_polygons(snapshot,
 
 (new_plate_polygons,
  stage_pole_dict,
- rasters, _) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, params=params)
+ rasters,
+ boundaries_gdf) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, params=params)
 
 #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
-tracers = gpd.GeoDataFrame(columns=['geometry', 'active', 'age']).set_crs(epsg=4326)
+tracers = sdp.generate_seafloor_age_tracers(
+    new_plate_polygons, boundaries_gdf, rasters['divergence'],
+    spacing_deg=params['seafloor_spacing_deg'],
+    spreading_rate_km_per_myr=params['spreading_rate_km_per_myr'],
+    div_threshold=params['div_threshold_ridge'])
 
-for t in range(50):
+for i in range(int(total_time / delta_time)):
+    t = i * delta_time
 
-    print('Timestep {}'.format(t))
+    print('t = {:.1f} Myr (step {})'.format(t, i))
     
     rpolygons = sdp.nudge_polygons(
         new_plate_polygons.explode(index_parts=False).reset_index(drop=True), 
@@ -99,7 +108,7 @@ for t in range(50):
                                          threshold=params['div_threshold_ridge'],
                                          offset_deg=params['tracer_offset_deg'])
     tracers = pd.concat([tracers, new_tracers], ignore_index=True)
-    tracers = sdp.advect_tracers(tracers, rasters['plate_id'], stage_pole_dict)
+    tracers = sdp.advect_tracers(tracers, rasters['plate_id'], stage_pole_dict, delta_time)
     tracers = sdp.deactivate_subducted_tracers(tracers, rasters['divergence'],
                                                threshold=params['div_threshold_subduction'])
 
@@ -122,11 +131,18 @@ for t in range(50):
     fig.text(x=new_plate_polygons.centroid.x, y=new_plate_polygons.centroid.y,
              text=new_plate_polygons['PLATEID1'], font='10p,Helvetica-Bold,black', justify='CM')
     active_tracers = tracers[tracers.active.astype(bool)]
-    inactive_tracers = tracers[~tracers.active.astype(bool)]
     if len(active_tracers):
-        fig.plot(data=active_tracers, style='c0.04c', fill='darkmagenta', pen='0.2p,darkmagenta')
-    if len(inactive_tracers):
-        fig.plot(data=inactive_tracers, style='c0.04c', fill='orange', pen='0.2p,orange')
-    fig.savefig('./output/test_plot_{:d}.png'.format(t))
+        vmax = 100 #max(float(active_tracers.age.max()), 1.0)
+        pygmt.makecpt(cmap='cubhelix', series=[0, vmax], reverse=True)
+        fig.plot(x=active_tracers.geometry.x.values, y=active_tracers.geometry.y.values,
+                 style='c0.08c', fill=active_tracers.age.values.astype(float),
+                 cmap=True, pen='0.1p,black')
+    fig.savefig('./output/test_plot_{:04d}.png'.format(i))
+
+    if i % params['csv_save_interval'] == 0:
+        active_tracers[['geometry', 'age']].assign(
+            lon=active_tracers.geometry.x,
+            lat=active_tracers.geometry.y
+        ).drop(columns='geometry').to_csv('./output/tracers_{:04d}.csv'.format(i), index=False)
     
     
