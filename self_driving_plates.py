@@ -4,6 +4,7 @@ from gprm.utils.proximity import rasterize_polygons
 from gprm.utils.geometry import wrap_polygon_feature, wrap_polygon_features
 import plate_driver as pdriver
 import numpy as np
+import pandas as pd
 import xarray as xr
 import geopandas as gpd
 from shapely.ops import unary_union
@@ -106,8 +107,8 @@ def resolve_overlaps(gdf, priority_col):
     return result
 
 
-def update_plate_id_raster(clipped_polygons):
-    plate_id_raster = rasterize_polygons(clipped_polygons, zval_field='PLATEID1')
+def update_plate_id_raster(clipped_polygons, raster_spacing=1):
+    plate_id_raster = rasterize_polygons(clipped_polygons, zval_field='PLATEID1', sampling=raster_spacing)
     plate_id_raster = plate_id_raster.where(plate_id_raster>0, np.nan)
 
     plate_id_raster = fill_nan_spherical(plate_id_raster)
@@ -115,15 +116,15 @@ def update_plate_id_raster(clipped_polygons):
     return plate_id_raster
 
 
-def update_plate_polygons(plate_id_raster):
-    # Build affine from your raster metadata
-    transform = (1, 0, -180.5,
-                 0, 1, -90.5)
-    new_plate_polygons = polygonize(plate_id_raster,#[1:,1:], 
+def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1):
+    # Origin offset by half a cell so polygon edges align with raster cell boundaries
+    transform = (raster_spacing, 0, -(180 + raster_spacing / 2),
+                 0, raster_spacing, -(90 + raster_spacing / 2))
+    new_plate_polygons = polygonize(plate_id_raster,
                                     return_type='geopandas', transform=transform)
 
     topo = tp.Topology(new_plate_polygons, prequantize=False)
-    new_plate_polygons_smooth = topo.toposimplify(1).to_gdf()  # adjust tolerance
+    new_plate_polygons_smooth = topo.toposimplify(topo_simplify).to_gdf()
 
     # Clip the GeoDataFrame
     new_plate_polygons_smooth = new_plate_polygons_smooth.clip(box(-180, -90, 180, 90))
@@ -133,7 +134,7 @@ def update_plate_polygons(plate_id_raster):
     return new_plate_polygons_smooth.set_crs(epsg=4326)
 
 
-def velocity_grid(plate_id_raster, plate_parameters, delta_time=1):
+def velocity_grid(plate_id_raster, plate_parameters, delta_time=1, raster_spacing=1):
     '''
     Given a raster defining the plateids around the margins of a deformation zone, extract rigid plate 
     velocities at these points
@@ -181,17 +182,31 @@ def velocity_grid(plate_id_raster, plate_parameters, delta_time=1):
     velpts['vel_east'] = vel_east
     velpts['vel_north'] = vel_north
     
-    velocity_grid_east = pygmt.xyz2grd(x=velpts.x, y=velpts.y, z=velpts.vel_east, region='d', spacing=1)
-    velocity_grid_north = pygmt.xyz2grd(x=velpts.x, y=velpts.y, z=velpts.vel_north, region='d', spacing=1) 
+    velocity_grid_east = pygmt.xyz2grd(x=velpts.x, y=velpts.y, z=velpts.vel_east, region='d', spacing=raster_spacing)
+    velocity_grid_north = pygmt.xyz2grd(x=velpts.x, y=velpts.y, z=velpts.vel_north, region='d', spacing=raster_spacing)
     
     return velocity_grid_east, velocity_grid_north
 
 
 def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, forces,
                             craton_raster=None,
-                            divergence_threshold_for_subduction = -0.00025,
-                            divergence_threshold_for_ridge_push = 0.00025):
-    
+                            divergence_threshold_for_subduction=-0.00025,
+                            divergence_threshold_for_ridge_push=0.00025,
+                            boundary_search_radius_deg=2,
+                            polarity_dict=None):
+
+    if polarity_dict is None:
+        polarity_dict = {}
+
+    # Craton pixel count per plate ID — used to determine overriding plate at new boundaries
+    craton_pixel_counts = {}
+    if craton_raster is not None:
+        vals = craton_raster.values.flatten()
+        valid = vals[vals > 0]
+        if len(valid):
+            unique, counts = np.unique(valid, return_counts=True)
+            craton_pixel_counts = {int(k): int(v) for k, v in zip(unique, counts)}
+
     stage_pole_dict = {}
     torque_dict = {}
     
@@ -221,9 +236,9 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
             for segment in geometry.get_segments():
                 arc_point = segment.get_arc_point(0.5).to_lat_lon()
                 #my,mx = arc_point
-                id1, id2 = get_two_nearest_ids(arc_point, 
+                id1, id2 = get_two_nearest_ids(arc_point,
                                                plate_id_raster.rename({k: v for k, v in {'x': 'lon', 'y': 'lat'}.items() if k in plate_id_raster.dims}),
-                                               radius_deg=2)
+                                               radius_deg=boundary_search_radius_deg)
                 #print(id1, id2)
                 # insert logic to determine overriding plate
                 downgoing_plate = id1
@@ -234,9 +249,9 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
 
                 continental_collision = False
                 if craton_raster is not None:
-                    craton_id1, craton_id2 = get_two_nearest_ids(arc_point, 
+                    craton_id1, craton_id2 = get_two_nearest_ids(arc_point,
                                                 craton_raster.rename({k: v for k, v in {'x': 'lon', 'y': 'lat'}.items() if k in craton_raster.dims}),
-                                                radius_deg=2)
+                                                radius_deg=boundary_search_radius_deg)
                     if craton_id1 and craton_id2 and craton_id1 > 0 and craton_id2 > 0:
                         print(craton_id1, craton_id2)
                         continental_collision = True
@@ -245,12 +260,27 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
                 segment_torque = None
                 if divergence_value<divergence_threshold_for_subduction:
 
+                    # Record overriding/downgoing polarity for this plate pair (sticky — only set once)
+                    if id1 and id2 and id1 > 0 and id2 > 0:
+                        pair = (min(id1, id2), max(id1, id2))
+                        if pair not in polarity_dict:
+                            area1 = craton_pixel_counts.get(id1, 0)
+                            area2 = craton_pixel_counts.get(id2, 0)
+                            if area1 > 0 and area2 == 0:
+                                polarity_dict[pair] = id2   # id1 continental → overriding; id2 downgoing
+                            elif area2 > 0 and area1 == 0:
+                                polarity_dict[pair] = id1   # id2 continental → overriding; id1 downgoing
+                            elif area1 > 0 and area2 > 0:
+                                polarity_dict[pair] = id2 if area1 >= area2 else id1  # larger craton = overriding
+                            else:
+                                polarity_dict[pair] = id1   # both oceanic: arbitrary
+
                     if continental_collision:
 
                         normal_reversal = -1 * clockwise_flag
                         segment_torque = pdriver.get_torque_for_segment(segment, normal_reversal)
 
-                        net_torque = net_torque - segment_torque * 20
+                        net_torque = net_torque - segment_torque * forces.get('continental_collision', 0)
 
                     elif downgoing_plate:
 
@@ -306,44 +336,60 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
     return stage_pole_dict
 
 
-def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None):
-    '''
-    Docstring for compute_timestep
-    
-    :param rpolygons: the polygons to nudge forward in time
-    :param forces: dictionary of forces to apply at plate boundaries. Supported keys are 'slab_pull', 'slab_suction', and 'ridge_push'
-    :param stage_pole_dict: dictionary of stage poles for each plate at the current time step, which will be updated by this function based on the forces applied at plate boundaries. Keys are plate ids, values are pygplates.FiniteRotation objects representing the stage pole rotation from 'time + delta_time' to 'time'.
-    :param delta_time: the amount of time to nudge forward in Myr
-    :param cratons: a pygplates.FeatureCollection of cratonic regions to nudge forward in time along with the plates. If None, no cratons will be included in the output.
-    '''
-    
-    new_features = tessellate_polygons(rpolygons, max_dist_deg=0.2)
+def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None, polarity_dict=None):
+    if params is None:
+        params = {}
+
+    tessellation_deg          = params.get('tessellation_deg',           0.2)
+    raster_spacing            = params.get('raster_spacing',             1)
+    topo_simplify             = params.get('topo_simplify_tolerance',    1)
+    div_thresh_sub            = params.get('div_threshold_subduction',  -0.00025)
+    div_thresh_ridge          = params.get('div_threshold_ridge',        0.00025)
+    boundary_search_radius    = params.get('boundary_search_radius_deg', 2)
+
+    new_features = tessellate_polygons(rpolygons, max_dist_deg=tessellation_deg)
 
     rp_gdf = plate_polygons_to_wrapped_gdf(new_features)
 
     clipped_polygons = resolve_overlaps(rp_gdf, priority_col='PLATEID1')
     clipped_polygons = clipped_polygons.explode(index_parts=False).reset_index(drop=True)
     
-    plate_id_raster = update_plate_id_raster(clipped_polygons)
+    plate_id_raster = update_plate_id_raster(clipped_polygons, raster_spacing=raster_spacing)
     
     #import matplotlib.pyplot as plt
     #fig,ax = plt.subplots()
     #plate_id_raster.plot(ax=ax)
     #clipped_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
-    #fig.savefig('./output/plate_id_raster_{:d}.png'.format(np.random.randint(0,100000)))
+    #fig.savefig('./output/plate_id_raster_1{:d}.png'.format(np.random.randint(0,100000)))
 
     # Force values within cratons to overrule any plate polygon changes
     # (from a geological perspective, cratons will overide subduction zones).
     if cratons is not None:
-        craton_raster = rasterize_polygons(gpml2gdf(cratons), zval_field='PLATEID1')
+        wrapped_cratons = plate_polygons_to_wrapped_gdf(cratons)
+        craton_raster = rasterize_polygons(wrapped_cratons, zval_field='PLATEID1', sampling=raster_spacing)
         plate_id_raster = craton_raster.where(craton_raster>0, plate_id_raster)
+
+        #fig,ax = plt.subplots()
+        #craton_raster.plot(ax=ax)
+        ##new_plate_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
+        #fig.savefig('./output/craton_raster_{:d}.png'.format(np.random.randint(0,100000)))
+
     else:
         craton_raster = None
 
-    new_plate_polygons = update_plate_polygons(plate_id_raster)
+    
+    new_plate_polygons = update_plate_polygons(plate_id_raster,
+                                               raster_spacing=raster_spacing,
+                                               topo_simplify=topo_simplify)
     new_plate_polygons = new_plate_polygons.explode(index_parts=False).reset_index(drop=True)
     new_plate_polygons = new_plate_polygons[new_plate_polygons.geometry.geom_type.isin(['Polygon'])]
     #print(new_plate_polygons)
+
+    #import matplotlib.pyplot as plt
+    #fig,ax = plt.subplots()
+    #plate_id_raster.plot(ax=ax)
+    #new_plate_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
+    #fig.savefig('./output/plate_id_raster_2{:d}.png'.format(np.random.randint(0,100000)))
 
     # Handle polygon splitting
     # TODO make sure that polygon splits retain consistency with craton polygons
@@ -355,26 +401,212 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons)
 
 
-    velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time)
+    velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time,
+                                                             raster_spacing=raster_spacing)
     #
     div = mpcalc.divergence(velocity_grid_east, velocity_grid_north)
 
     #
     stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, div, plate_id_raster, forces,
-                                              craton_raster)
+                                              craton_raster,
+                                              divergence_threshold_for_subduction=div_thresh_sub,
+                                              divergence_threshold_for_ridge_push=div_thresh_ridge,
+                                              boundary_search_radius_deg=boundary_search_radius,
+                                              polarity_dict=polarity_dict)
     #
     #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
     #print([(key,item) for key,item in stage_pole_dict.items()])
     
+    rasters_dict = {
+        'plate_id':        plate_id_raster.rename({'x': 'lon', 'y': 'lat'}),
+        'velocity_east':   velocity_grid_east,
+        'velocity_north':  velocity_grid_north,
+        'divergence':      div,
+    }
+    if craton_raster is not None:
+        rasters_dict['craton'] = craton_raster.rename({'x': 'lon', 'y': 'lat'})
+
     return new_plate_polygons, \
            stage_pole_dict, \
-           xr.Dataset(
-               {'plate_id': plate_id_raster.rename({'x':'lon', 'y':'lat'}),
-                'velocity_east': velocity_grid_east,
-                'velocity_north': velocity_grid_north,
-                'divergence': div})
+           xr.Dataset(rasters_dict), \
+           boundaries_gdf
 
 
+def seed_ridge_tracers(boundaries_gdf, divergence_raster, spacing_deg=2.0,
+                       threshold=0.00025, offset_deg=0.6):
+    """Seed tracer point pairs offset perpendicular to divergent boundary segments.
+
+    Two points are seeded per position (one on each side of the ridge axis) so
+    that after advection they are carried apart on their respective plates.
+    offset_deg must exceed half the plate_id raster cell size (~0.5 deg) so each
+    point clearly falls on one plate in the nearest-neighbour lookup.
+    """
+    new_points = []
+    for _, row in boundaries_gdf.iterrows():
+        seg = row.geometry
+        mid = seg.interpolate(0.5, normalized=True)
+        div_val = divergence_raster.interp(lon=mid.x, lat=mid.y).item()
+        if div_val <= threshold:
+            continue
+
+        # Perpendicular unit vector to the segment
+        coords = list(seg.coords)
+        dlon = coords[-1][0] - coords[0][0]
+        dlat = coords[-1][1] - coords[0][1]
+        norm = np.sqrt(dlon**2 + dlat**2)
+        if norm == 0:
+            continue
+        perp_lon = -dlat / norm
+        perp_lat = dlon / norm
+
+        length = seg.length
+        n = max(int(length / spacing_deg), 1)
+        for i in range(n + 1):
+            pt = seg.interpolate(i / n, normalized=True)
+            for sign in [+1, -1]:
+                new_lon = np.clip(pt.x + sign * offset_deg * perp_lon, -180, 180)
+                new_lat = np.clip(pt.y + sign * offset_deg * perp_lat, -90, 90)
+                new_points.append({'geometry': Point(new_lon, new_lat),
+                                   'active': True, 'age': 0})
+    if not new_points:
+        return gpd.GeoDataFrame(columns=['geometry', 'active', 'age']).set_crs(epsg=4326)
+    return gpd.GeoDataFrame(new_points).set_crs(epsg=4326)
+
+
+def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf, divergence_raster,
+                                   spacing_deg=5.0, spreading_rate_km_per_myr=50.0,
+                                   div_threshold=0.00025):
+    """Seed initial tracers inside each plate polygon with age estimated from ridge distance.
+
+    For each polygon, finds its own divergent boundary segments, builds a BallTree from
+    densified ridge points, then assigns age = haversine_dist_km / spreading_rate to each
+    interior grid point.  Points with no divergent boundary on their plate are skipped.
+    """
+    from sklearn.neighbors import BallTree
+    from shapely.geometry import Point
+
+    EARTH_RADIUS_KM = 6371.0
+    all_points = []
+
+    for _, poly_row in plate_polygons.iterrows():
+        pid = poly_row['PLATEID1']
+        geom = poly_row.geometry
+        if geom is None or geom.is_empty:
+            continue
+
+        # Divergent segments that border this plate
+        div_ridge_pts = []
+        for _, brow in boundaries_gdf.iterrows():
+            if brow['plateid1_poly1'] != pid and brow['plateid1_poly2'] != pid:
+                continue
+            seg = brow.geometry
+            mid = seg.interpolate(0.5, normalized=True)
+            div_val = divergence_raster.interp(lon=mid.x, lat=mid.y).item()
+            if div_val <= div_threshold:
+                continue
+            # Densify segment for accurate distance queries
+            seg_len = seg.length
+            n = max(int(seg_len / (spacing_deg / 2)), 2)
+            for i in range(n + 1):
+                pt = seg.interpolate(i / n, normalized=True)
+                div_ridge_pts.append([pt.y, pt.x])  # (lat, lon) for haversine
+
+        if not div_ridge_pts:
+            continue
+
+        ridge_arr = np.deg2rad(np.array(div_ridge_pts))
+        tree = BallTree(ridge_arr, metric='haversine')
+
+        # Equal-area grid: uniform in (lon, sin(lat)) so density is ~constant on the sphere
+        minx, miny, maxx, maxy = geom.bounds
+        lons = np.arange(minx + spacing_deg / 2, maxx, spacing_deg)
+        sin_step = np.sin(np.deg2rad(spacing_deg))
+        sin_min = np.sin(np.deg2rad(miny))
+        sin_max = np.sin(np.deg2rad(maxy))
+        sins = np.arange(sin_min + sin_step / 2, sin_max, sin_step)
+        lats = np.degrees(np.arcsin(np.clip(sins, -1.0, 1.0)))
+
+        for lat in lats:
+            for lon in lons:
+                pt = Point(lon, lat)
+                if not geom.contains(pt):
+                    continue
+                query = np.deg2rad([[lat, lon]])
+                dist_rad, _ = tree.query(query, k=1)
+                dist_km = dist_rad[0, 0] * EARTH_RADIUS_KM
+                age = dist_km / spreading_rate_km_per_myr
+                all_points.append({'geometry': pt, 'active': True, 'age': age})
+
+    if not all_points:
+        return gpd.GeoDataFrame(columns=['geometry', 'active', 'age']).set_crs(epsg=4326)
+    return gpd.GeoDataFrame(all_points).set_crs(epsg=4326)
+
+
+def advect_tracers(tracers, plate_id_raster, stage_pole_dict, delta_time=1):
+    """Move active tracers one step using their plate's stage rotation."""
+    if tracers is None or len(tracers) == 0:
+        return tracers
+    active_mask = tracers.active.astype(bool)
+    active = tracers[active_mask].copy()
+    inactive = tracers[~active_mask]
+    rows = []
+    for _, row in active.iterrows():
+        lon, lat = row.geometry.x, row.geometry.y
+        pid = int(plate_id_raster.sel(lon=lon, lat=lat, method='nearest').item())
+        rotation = stage_pole_dict.get(pid, pygplates.FiniteRotation())
+        pt = rotation * pygplates.PointOnSphere(lat, lon)
+        new_lat, new_lon = pt.to_lat_lon()
+        r = row.to_dict()
+        r['geometry'] = Point(new_lon, new_lat)
+        r['age'] = row.age + delta_time
+        rows.append(r)
+    if not rows:
+        return tracers
+    updated = gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
+    return pd.concat([updated, inactive], ignore_index=True)
+
+
+def deactivate_subducted_tracers(tracers, divergence_raster, threshold=-0.00025):
+    """Mark active tracers as inactive where they have entered a subduction zone."""
+    if tracers is None or len(tracers) == 0:
+        return tracers
+    tracers = tracers.copy()
+    for idx, row in tracers[tracers.active.astype(bool)].iterrows():
+        div_val = divergence_raster.interp(
+            lon=row.geometry.x, lat=row.geometry.y).item()
+        if div_val < threshold:
+            tracers.loc[idx, 'active'] = False
+    return tracers
+
+
+def write_rotation_file(rotation_records, path, fixed_plate_id=0):
+    """Write accumulated finite rotations to a GPlates .rot file.
+
+    rotation_records is a list of (time_myr, plate_id, FiniteRotation) tuples
+    produced by accumulating stage poles across timesteps.  A t=0 identity
+    entry is written automatically for every plate that appears in the records.
+    """
+    from collections import defaultdict
+
+    by_plate = defaultdict(list)
+    for time_myr, pid, rot in rotation_records:
+        by_plate[pid].append((time_myr, rot))
+
+    lines = []
+    for pid in sorted(by_plate.keys()):
+        # t=0 identity line (required by GPlates)
+        lines.append('{:d}   {:8.4f}   {:9.4f}   {:10.4f}   {:9.4f}   {:d}'.format(
+            pid, 0.0, 0.0, 0.0, 0.0, fixed_plate_id))
+        for time_myr, rot in sorted(by_plate[pid], key=lambda x: x[0]):
+            if rot.represents_identity_rotation():
+                lat, lon, angle = 0.0, 0.0, 0.0
+            else:
+                lat, lon, angle = rot.get_lat_lon_euler_pole_and_angle_degrees()
+            lines.append('{:d}   {:8.4f}   {:9.4f}   {:10.4f}   {:9.4f}   {:d}'.format(
+                pid, time_myr, lat, lon, angle, fixed_plate_id))
+
+    with open(path, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
 
 
 def remove_boundary_segments(arc, lon_threshold=179.9, lat_threshold=89.9):
