@@ -59,11 +59,10 @@ result = pdriver.get_torques_for_plate_snapshot(snapshot, reconstruction_time, d
 
 stage_pole_dict = {}
 
-for res in result:
-    stage_pole_dict[res[0]] = res[3]
-    print(res[0], res[3])
-
-print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
+#for res in result:
+#    stage_pole_dict[res[0]] = res[3]
+#    print(res[0], res[3])
+#print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
 cratons = sdp.nudge_polygons(cratons, stage_pole_dict)
 
@@ -141,7 +140,8 @@ for i in range(1, int(total_time / delta_time) + 1):
                 'magnitude': magnitude/(2000.*delta_time)},
             style='V0.15c+e+a45+ggray40+n', pen="0.1p,black", fill="black")
     fig.plot(data=gpml2gdf(cratons), pen='1p,black', fill='grey', transparency=50)
-    fig.text(x=new_plate_polygons.centroid.x, y=new_plate_polygons.centroid.y,
+    label_pts = new_plate_polygons.representative_point()
+    fig.text(x=label_pts.x, y=label_pts.y,
              text=new_plate_polygons['PLATEID1'], font='10p,Helvetica-Bold,black', justify='CM')
     active_tracers = tracers[tracers.active.astype(bool)]
     if len(active_tracers):
@@ -157,5 +157,9 @@ for i in range(1, int(total_time / delta_time) + 1):
             lon=active_tracers.geometry.x,
             lat=active_tracers.geometry.y
         ).drop(columns='geometry').to_csv('./output/tracers_{:04d}.csv'.format(i), index=False)
+        rasters['divergence'].to_netcdf('./output/divergence_{:04d}.nc'.format(i))
+        rasters['plate_id'].to_netcdf('./output/plate_id_{:04d}.nc'.format(i))
+        if 'craton' in rasters:
+            rasters['craton'].to_netcdf('./output/craton_{:04d}.nc'.format(i))
 
 sdp.write_rotation_file(rotation_records, './output/synthetic_rotations.rot')

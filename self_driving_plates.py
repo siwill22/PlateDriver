@@ -417,13 +417,18 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
     #print([(key,item) for key,item in stage_pole_dict.items()])
     
+    rasters_dict = {
+        'plate_id':        plate_id_raster.rename({'x': 'lon', 'y': 'lat'}),
+        'velocity_east':   velocity_grid_east,
+        'velocity_north':  velocity_grid_north,
+        'divergence':      div,
+    }
+    if craton_raster is not None:
+        rasters_dict['craton'] = craton_raster.rename({'x': 'lon', 'y': 'lat'})
+
     return new_plate_polygons, \
            stage_pole_dict, \
-           xr.Dataset(
-               {'plate_id': plate_id_raster.rename({'x':'lon', 'y':'lat'}),
-                'velocity_east': velocity_grid_east,
-                'velocity_north': velocity_grid_north,
-                'divergence': div}), \
+           xr.Dataset(rasters_dict), \
            boundaries_gdf
 
 
