@@ -43,9 +43,9 @@ params = {
     'boundary_search_radius_deg':  2,        # plate ID neighbour search radius at boundaries
     'div_threshold_subduction':   -0.00025,  # divergence below this → subduction zone
     'div_threshold_ridge':         0.0001,  # divergence above this → ridge
-    'tracer_spacing_deg':          1.0,      # seed point spacing along ridge boundaries
+    'tracer_spacing_deg':          2.0,      # seed point spacing along ridge boundaries
     'tracer_offset_deg':           0.6,      # perpendicular offset from ridge axis at seeding
-    'seafloor_spacing_deg':        1.0,      # grid spacing for initial seafloor age tracers
+    'seafloor_spacing_deg':        2.0,      # grid spacing for initial seafloor age tracers
     'spreading_rate_km_per_myr':   50.0,     # assumed spreading rate for age estimation
     'csv_save_interval':           10,       # save active-tracer CSV every N timesteps
 }
@@ -72,10 +72,15 @@ rpolygons = sdp.nudge_topological_polygons(snapshot,
                                            reconstruction_time=0, 
                                            delta_time=delta_time)
 
+polarity_dict = {}
+cumulative_rotation_dict = {}
+rotation_records = []
+
 (new_plate_polygons,
  stage_pole_dict,
  rasters,
- boundaries_gdf) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, params=params)
+ boundaries_gdf) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
+                                         params=params, polarity_dict=polarity_dict)
 
 #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
@@ -85,7 +90,7 @@ tracers = sdp.generate_seafloor_age_tracers(
     spreading_rate_km_per_myr=params['spreading_rate_km_per_myr'],
     div_threshold=params['div_threshold_ridge'])
 
-for i in range(int(total_time / delta_time)):
+for i in range(1, int(total_time / delta_time) + 1):
     t = i * delta_time
 
     print('t = {:.1f} Myr (step {})'.format(t, i))
@@ -101,7 +106,15 @@ for i in range(int(total_time / delta_time)):
      stage_pole_dict,
      rasters,
      boundaries_gdf) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
-                                             cratons=cratons, params=params)
+                                             cratons=cratons, params=params,
+                                             polarity_dict=polarity_dict)
+
+    # Accumulate finite rotations: F(t) = S_t * F(t-dt)
+    t_record = t
+    for pid, stage_rot in stage_pole_dict.items():
+        prev = cumulative_rotation_dict.get(pid, pygplates.FiniteRotation())
+        cumulative_rotation_dict[pid] = stage_rot * prev
+        rotation_records.append((t_record, pid, cumulative_rotation_dict[pid]))
 
     new_tracers = sdp.seed_ridge_tracers(boundaries_gdf, rasters['divergence'],
                                          spacing_deg=params['tracer_spacing_deg'],
@@ -144,5 +157,5 @@ for i in range(int(total_time / delta_time)):
             lon=active_tracers.geometry.x,
             lat=active_tracers.geometry.y
         ).drop(columns='geometry').to_csv('./output/tracers_{:04d}.csv'.format(i), index=False)
-    
-    
+
+sdp.write_rotation_file(rotation_records, './output/synthetic_rotations.rot')

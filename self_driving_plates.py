@@ -192,8 +192,21 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
                             craton_raster=None,
                             divergence_threshold_for_subduction=-0.00025,
                             divergence_threshold_for_ridge_push=0.00025,
-                            boundary_search_radius_deg=2):
-    
+                            boundary_search_radius_deg=2,
+                            polarity_dict=None):
+
+    if polarity_dict is None:
+        polarity_dict = {}
+
+    # Craton pixel count per plate ID — used to determine overriding plate at new boundaries
+    craton_pixel_counts = {}
+    if craton_raster is not None:
+        vals = craton_raster.values.flatten()
+        valid = vals[vals > 0]
+        if len(valid):
+            unique, counts = np.unique(valid, return_counts=True)
+            craton_pixel_counts = {int(k): int(v) for k, v in zip(unique, counts)}
+
     stage_pole_dict = {}
     torque_dict = {}
     
@@ -246,6 +259,21 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
 
                 segment_torque = None
                 if divergence_value<divergence_threshold_for_subduction:
+
+                    # Record overriding/downgoing polarity for this plate pair (sticky — only set once)
+                    if id1 and id2 and id1 > 0 and id2 > 0:
+                        pair = (min(id1, id2), max(id1, id2))
+                        if pair not in polarity_dict:
+                            area1 = craton_pixel_counts.get(id1, 0)
+                            area2 = craton_pixel_counts.get(id2, 0)
+                            if area1 > 0 and area2 == 0:
+                                polarity_dict[pair] = id2   # id1 continental → overriding; id2 downgoing
+                            elif area2 > 0 and area1 == 0:
+                                polarity_dict[pair] = id1   # id2 continental → overriding; id1 downgoing
+                            elif area1 > 0 and area2 > 0:
+                                polarity_dict[pair] = id2 if area1 >= area2 else id1  # larger craton = overriding
+                            else:
+                                polarity_dict[pair] = id1   # both oceanic: arbitrary
 
                     if continental_collision:
 
@@ -308,7 +336,7 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
     return stage_pole_dict
 
 
-def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None):
+def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None, polarity_dict=None):
     if params is None:
         params = {}
 
@@ -383,7 +411,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                               craton_raster,
                                               divergence_threshold_for_subduction=div_thresh_sub,
                                               divergence_threshold_for_ridge_push=div_thresh_ridge,
-                                              boundary_search_radius_deg=boundary_search_radius)
+                                              boundary_search_radius_deg=boundary_search_radius,
+                                              polarity_dict=polarity_dict)
     #
     #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
     #print([(key,item) for key,item in stage_pole_dict.items()])
@@ -543,6 +572,36 @@ def deactivate_subducted_tracers(tracers, divergence_raster, threshold=-0.00025)
         if div_val < threshold:
             tracers.loc[idx, 'active'] = False
     return tracers
+
+
+def write_rotation_file(rotation_records, path, fixed_plate_id=0):
+    """Write accumulated finite rotations to a GPlates .rot file.
+
+    rotation_records is a list of (time_myr, plate_id, FiniteRotation) tuples
+    produced by accumulating stage poles across timesteps.  A t=0 identity
+    entry is written automatically for every plate that appears in the records.
+    """
+    from collections import defaultdict
+
+    by_plate = defaultdict(list)
+    for time_myr, pid, rot in rotation_records:
+        by_plate[pid].append((time_myr, rot))
+
+    lines = []
+    for pid in sorted(by_plate.keys()):
+        # t=0 identity line (required by GPlates)
+        lines.append('{:d}   {:8.4f}   {:9.4f}   {:10.4f}   {:9.4f}   {:d}'.format(
+            pid, 0.0, 0.0, 0.0, 0.0, fixed_plate_id))
+        for time_myr, rot in sorted(by_plate[pid], key=lambda x: x[0]):
+            if rot.represents_identity_rotation():
+                lat, lon, angle = 0.0, 0.0, 0.0
+            else:
+                lat, lon, angle = rot.get_lat_lon_euler_pole_and_angle_degrees()
+            lines.append('{:d}   {:8.4f}   {:9.4f}   {:10.4f}   {:9.4f}   {:d}'.format(
+                pid, time_myr, lat, lon, angle, fixed_plate_id))
+
+    with open(path, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
 
 
 def remove_boundary_segments(arc, lon_threshold=179.9, lat_threshold=89.9):
