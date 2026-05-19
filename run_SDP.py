@@ -37,15 +37,15 @@ total_time = 60.
 forces = {'slab_pull': 8, 'slab_suction': 8, 'ridge_push': 3, 'continental_collision': 8}
 
 params = {
-    'raster_spacing':              1,        # degrees; controls velocity grid resolution and polygon transform
+    'raster_spacing':              0.5,        # degrees; controls velocity grid resolution and polygon transform
     'tessellation_deg':            0.2,      # polygon edge densification before rasterising
-    'topo_simplify_tolerance':     1,        # polygon smoothing tolerance after polygonise
+    'topo_simplify_tolerance':     0.5,        # polygon smoothing tolerance after polygonise
     'boundary_search_radius_deg':  2,        # plate ID neighbour search radius at boundaries
-    'div_threshold_subduction':   -1.0,   # cm/yr relative normal velocity below this → subduction
-    'div_threshold_ridge':         1.0,   # cm/yr relative normal velocity above this → ridge
-    'tracer_spacing_deg':          2.0,      # seed point spacing along ridge boundaries
+    'div_threshold_subduction':   -0.0001,   # cm/yr relative normal velocity below this → subduction
+    'div_threshold_ridge':         0.2,   # cm/yr relative normal velocity above this → ridge
+    'tracer_spacing_deg':          1.0,      # seed point spacing along ridge boundaries
     'tracer_offset_deg':           0.6,      # perpendicular offset from ridge axis at seeding
-    'seafloor_spacing_deg':        2.0,      # grid spacing for initial seafloor age tracers
+    'seafloor_spacing_deg':        1.0,      # grid spacing for initial seafloor age tracers
     'spreading_rate_km_per_myr':   50.0,     # assumed spreading rate for age estimation
     'csv_save_interval':           10,       # save active-tracer CSV every N timesteps
 }
@@ -61,7 +61,7 @@ stage_pole_dict = {}
 
 for res in result:
     stage_pole_dict[res[0]] = res[3]
-#    print(res[0], res[3])
+    print(res[0], res[3])
 #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
 cratons = sdp.nudge_polygons(cratons, stage_pole_dict)
@@ -107,6 +107,9 @@ for i in range(1, int(total_time / delta_time) + 1):
      boundaries_gdf) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
                                              cratons=cratons, params=params,
                                              polarity_dict=polarity_dict)
+    
+    for key,item in stage_pole_dict.items():
+        print(key,item.get_lat_lon_euler_pole_and_angle_degrees())
 
     # Accumulate finite rotations: F(t) = S_t * F(t-dt)
     t_record = t
@@ -120,16 +123,32 @@ for i in range(1, int(total_time / delta_time) + 1):
                                          threshold=params['div_threshold_ridge'],
                                          offset_deg=params['tracer_offset_deg'])
     tracers = pd.concat([tracers, new_tracers], ignore_index=True)
-    tracers = sdp.advect_tracers(tracers, rasters['plate_id'], stage_pole_dict, delta_time)
+    tracers = sdp.advect_tracers(tracers, rasters['plate_id'], stage_pole_dict, delta_time,
+                                  boundaries_gdf=boundaries_gdf,
+                                  div_threshold=params['div_threshold_subduction'])
     tracers = sdp.deactivate_subducted_tracers(tracers, boundaries_gdf,
                                                threshold=params['div_threshold_subduction'])
 
     fig = pygmt.Figure()
-    fig.coast(land='grey', projection='W10i', region='d')
+    fig.basemap(frame='f', projection='W10i', region='d')
     #fig.plot(data=clipped_polygons, fill='blue', transparency=50)
     pygmt.makecpt(cmap='polar', series=[-0.001,0.001], background='o')
-    fig.grdimage(rasters['divergence'], cmap=True)
+    #fig.grdimage(rasters['divergence'], cmap=True)
     fig.plot(data=new_plate_polygons.iloc[:], pen='1p,black', transparency=50)
+    # Overlay per-segment boundary type: red=ridge, blue=subduction, black=conservative
+    if 'divergence' in boundaries_gdf.columns:
+        ridge_bounds = boundaries_gdf[boundaries_gdf['divergence'] > params['div_threshold_ridge']]
+        sub_bounds   = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
+        cons_bounds  = boundaries_gdf[
+            (boundaries_gdf['divergence'] >= params['div_threshold_subduction']) &
+            (boundaries_gdf['divergence'] <= params['div_threshold_ridge'])
+        ]
+        if len(cons_bounds):
+            fig.plot(data=cons_bounds, pen='1p,black')
+        if len(ridge_bounds):
+            fig.plot(data=ridge_bounds, pen='2p,red')
+        if len(sub_bounds):
+            fig.plot(data=sub_bounds, pen='2p,blue')
     glon,glat = np.meshgrid(rasters.lon, rasters.lat)
     stride=5
     magnitude = np.sqrt(rasters['velocity_east'].data[::stride,::stride].flatten()**2 + rasters['velocity_north'].data[::stride,::stride].flatten()**2)
