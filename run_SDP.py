@@ -33,7 +33,7 @@ cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlant
 
 reconstruction_time = 0
 delta_time = 1.
-total_time = 60.
+total_time = 12.
 forces = {'slab_pull': 8, 'slab_suction': 8, 'ridge_push': 3, 'continental_collision': 8}
 
 params = {
@@ -45,9 +45,16 @@ params = {
     'div_threshold_ridge':         0.2,   # cm/yr relative normal velocity above this → ridge
     'tracer_spacing_deg':          1.0,      # seed point spacing along ridge boundaries
     'tracer_offset_deg':           0.6,      # perpendicular offset from ridge axis at seeding
-    'seafloor_spacing_deg':        1.0,      # grid spacing for initial seafloor age tracers
+    'seafloor_spacing_deg':        2.0,      # grid spacing for initial seafloor age tracers
     'spreading_rate_km_per_myr':   50.0,     # assumed spreading rate for age estimation
     'csv_save_interval':           10,       # save active-tracer CSV every N timesteps
+    'eq_n_candidates':             100000,   # random sphere points sampled for earthquake generation
+    'eq_ridge_max_dist_deg':       1.0,      # max distance from ridge axis for ridge earthquakes
+    'eq_ridge_max_depth_km':       50.0,     # max depth for ridge earthquakes (km)
+    'eq_slab_dip_deg':             45.0,     # slab dip angle (degrees)
+    'eq_slab_max_depth_km':        650.0,    # maximum slab depth (km)
+    'eq_ridge_prob':               0.15,      # fraction of ridge candidates accepted (controls density)
+    'eq_subduction_prob':          1.0,      # fraction of subduction candidates accepted
 }
 
 
@@ -180,5 +187,49 @@ for i in range(1, int(total_time / delta_time) + 1):
         rasters['plate_id'].to_netcdf('./output/plate_id_{:04d}.nc'.format(i))
         if 'craton' in rasters:
             rasters['craton'].to_netcdf('./output/craton_{:04d}.nc'.format(i))
+
+        # Craton pixel counts for authoritative polarity determination
+        craton_counts = sdp.craton_counts_from_raster(
+            rasters['craton'] if 'craton' in rasters else None)
+
+        # Save boundary segments with type and subduction polarity
+        if 'divergence' in boundaries_gdf.columns:
+            bdf = boundaries_gdf[['geometry', 'plateid1_poly1', 'plateid1_poly2',
+                                   'divergence']].copy()
+            def _btype(d):
+                if d > params['div_threshold_ridge']:      return 'ridge'
+                if d < params['div_threshold_subduction']: return 'subduction'
+                return 'conservative'
+            bdf['boundary_type'] = bdf['divergence'].map(_btype)
+
+            downgoing, overriding = [], []
+            for _, br in bdf.iterrows():
+                if br['boundary_type'] == 'subduction':
+                    p1, p2 = int(br['plateid1_poly1'] or 0), int(br['plateid1_poly2'] or 0)
+                    dg = sdp.resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)
+                    ov = p2 if dg == p1 else p1
+                else:
+                    dg, ov = 0, 0
+                downgoing.append(dg)
+                overriding.append(ov)
+            bdf['downgoing_plate']  = downgoing
+            bdf['overriding_plate'] = overriding
+
+            bdf.to_file('./output/boundaries_{:04d}.geojson'.format(i), driver='GeoJSON')
+
+        earthquakes = sdp.generate_synthetic_earthquakes(
+            boundaries_gdf, polarity_dict, new_plate_polygons,
+            craton_counts=craton_counts,
+            plate_id_raster=rasters['plate_id'],
+            n_candidates=params['eq_n_candidates'],
+            ridge_max_dist_deg=params['eq_ridge_max_dist_deg'],
+            ridge_max_depth_km=params['eq_ridge_max_depth_km'],
+            slab_dip_deg=params['eq_slab_dip_deg'],
+            slab_max_depth_km=params['eq_slab_max_depth_km'],
+            div_threshold_ridge=params['div_threshold_ridge'],
+            div_threshold_subduction=params['div_threshold_subduction'],
+            ridge_eq_prob=params['eq_ridge_prob'],
+            subduction_eq_prob=params['eq_subduction_prob'])
+        earthquakes.to_file('./output/earthquakes_{:04d}.geojson'.format(i), driver='GeoJSON')
 
 sdp.write_rotation_file(rotation_records, './output/synthetic_rotations.rot')

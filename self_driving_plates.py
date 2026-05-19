@@ -386,8 +386,11 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                 segment_torque = None
                 if divergence_value<divergence_threshold_for_subduction:
 
-                    # Record overriding/downgoing polarity for this plate pair (sticky — only set once)
-                    if id1 and id2 and id1 > 0 and id2 > 0:
+                    # Record overriding/downgoing polarity for this plate pair (sticky — only set once).
+                    # Skip when craton_raster is None (bootstrap step) so the craton rule is
+                    # not contaminated by an arbitrary oceanic fallback before craton info is available.
+                    if (id1 and id2 and id1 > 0 and id2 > 0
+                            and craton_raster is not None):
                         pair = (min(id1, id2), max(id1, id2))
                         if pair not in polarity_dict:
                             area1 = craton_pixel_counts.get(id1, 0)
@@ -798,6 +801,245 @@ def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_di
     deactivate_mask = dists_deg < max_dist_deg
     tracers.loc[active_tracers.index[deactivate_mask], 'active'] = False
     return tracers
+
+
+def craton_counts_from_raster(craton_raster):
+    """Return {plate_id: pixel_count} from a craton xarray DataArray.  Only counts pixels > 0."""
+    if craton_raster is None:
+        return {}
+    vals = craton_raster.values.flatten()
+    counts = {}
+    for v in vals[vals > 0]:
+        pid = int(v)
+        counts[pid] = counts.get(pid, 0) + 1
+    return counts
+
+
+def resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts=None):
+    """Return the downgoing plate ID for a convergent boundary between p1 and p2.
+
+    Priority:
+      1. Craton rule: plate with cratons is overriding; the other is downgoing.
+         If both have cratons, the one with more pixels is overriding.
+      2. polarity_dict (sticky result from previous steps).
+      3. Fallback: p1 downgoing (arbitrary, consistent).
+    """
+    if p1 == 0 or p2 == 0:
+        return p1
+    if craton_counts:
+        a1 = craton_counts.get(p1, 0)
+        a2 = craton_counts.get(p2, 0)
+        if a1 > 0 and a2 == 0:
+            return p2           # p1 continental → overriding; p2 downgoing
+        if a2 > 0 and a1 == 0:
+            return p1           # p2 continental → overriding; p1 downgoing
+        if a1 > 0 and a2 > 0:
+            return p2 if a1 >= a2 else p1   # larger craton is overriding
+    pair = (min(p1, p2), max(p1, p2))
+    return polarity_dict.get(pair, p1)
+
+
+def generate_synthetic_earthquakes(boundaries_gdf, polarity_dict=None, plate_polygons_gdf=None,
+                                    craton_counts=None, plate_id_raster=None,
+                                    n_candidates=100000,
+                                    ridge_max_dist_deg=2.0,
+                                    ridge_max_depth_km=50.0,
+                                    slab_dip_deg=45.0,
+                                    slab_max_depth_km=600.0,
+                                    div_threshold_ridge=0.1,
+                                    div_threshold_subduction=-0.1,
+                                    ridge_eq_prob=1.0,
+                                    subduction_eq_prob=1.0):
+    """Generate a synthetic earthquake catalog from plate boundary geometry.
+
+    Ridge earthquakes: random depth in [0, ridge_max_depth_km], symmetric about the
+    ridge axis within ridge_max_dist_deg.
+
+    Subduction earthquakes: overriding-plate side only (hemisphere test using
+    polarity_dict + arc normal).  Depth increases linearly with horizontal distance
+    from the boundary: depth = dist_km * tan(slab_dip_deg), capped at
+    slab_max_depth_km.  Maximum horizontal extent = slab_max_depth_km / tan(dip).
+
+    Returns a GeoDataFrame with columns:
+        geometry, depth_km, boundary_type, plateid1, plateid2,
+        downgoing_plate, overriding_plate
+    """
+    from sklearn.neighbors import BallTree
+
+    if boundaries_gdf is None or 'divergence' not in boundaries_gdf.columns:
+        return gpd.GeoDataFrame(
+            columns=['geometry', 'depth_km', 'boundary_type',
+                     'plateid1', 'plateid2', 'downgoing_plate', 'overriding_plate']
+        ).set_crs(epsg=4326)
+
+    if polarity_dict is None:
+        polarity_dict = {}
+
+    slab_dip_rad = np.radians(slab_dip_deg)
+    slab_max_dist_km  = slab_max_depth_km / np.tan(slab_dip_rad)
+    slab_max_dist_deg = slab_max_dist_km / 111.195
+    max_query_deg = max(ridge_max_dist_deg, slab_max_dist_deg)
+
+    # Centroid lookup for hemisphere test (which side is overriding plate)
+    pid_to_centroid_xyz = {}
+    if plate_polygons_gdf is not None:
+        for _, prow in plate_polygons_gdf.iterrows():
+            pid = prow.get('PLATEID1')
+            if pid and pid not in pid_to_centroid_xyz:
+                rep = prow.geometry.representative_point()
+                pid_to_centroid_xyz[pid] = pygplates.PointOnSphere(rep.y, rep.x).to_xyz()
+
+    # Tessellate active boundary segments; track iloc index into boundaries_gdf
+    SAMPLE_DEG = 0.3
+    pts_latlon = []
+    pts_seg_iloc = []
+
+    for iloc_i in range(len(boundaries_gdf)):
+        row = boundaries_gdf.iloc[iloc_i]
+        div = row.get('divergence', 0.0)
+        if not (div > div_threshold_ridge or div < div_threshold_subduction):
+            continue
+        coords = list(row.geometry.coords)
+        if len(coords) < 2:
+            continue
+        try:
+            p1 = pygplates.PointOnSphere(coords[0][1], coords[0][0])
+            p2 = pygplates.PointOnSphere(coords[1][1], coords[1][0])
+            for pt in pygplates.PolylineOnSphere([p1, p2]).to_tessellated(
+                    np.radians(SAMPLE_DEG)).get_points():
+                lat, lon = pt.to_lat_lon()
+                pts_latlon.append([lat, lon])
+                pts_seg_iloc.append(iloc_i)
+        except Exception:
+            pass
+
+    if not pts_latlon:
+        return gpd.GeoDataFrame(
+            columns=['geometry', 'depth_km', 'boundary_type',
+                     'plateid1', 'plateid2', 'downgoing_plate', 'overriding_plate']
+        ).set_crs(epsg=4326)
+
+    # Uniform random points on sphere — Marsaglia's method, vectorised
+    xyz_batches = []
+    total = 0
+    while total < n_candidates:
+        batch = max(n_candidates * 4, 10000)
+        x1 = np.random.uniform(-1, 1, batch)
+        x2 = np.random.uniform(-1, 1, batch)
+        s = x1**2 + x2**2
+        ok = s < 1
+        x1, x2, s = x1[ok], x2[ok], s[ok]
+        sq = np.sqrt(1 - s)
+        xyz_batches.append(np.column_stack([2*x1*sq, 2*x2*sq, 1 - 2*s]))
+        total += int(ok.sum())
+    xyz = np.vstack(xyz_batches)[:n_candidates]
+    lats = np.degrees(np.arcsin(np.clip(xyz[:, 2], -1, 1)))
+    lons = np.degrees(np.arctan2(xyz[:, 1], xyz[:, 0]))
+
+    # Find nearest active boundary point for every candidate
+    tree = BallTree(np.deg2rad(np.array(pts_latlon)), metric='haversine')
+    dists_rad, nn_idx = tree.query(np.deg2rad(np.column_stack([lats, lons])), k=1)
+    dists_deg = np.degrees(dists_rad.flatten())
+    nn_idx    = nn_idx.flatten()
+
+    earthquakes = []
+
+    for ci in np.where(dists_deg < max_query_deg)[0]:
+        lon_c    = float(lons[ci])
+        lat_c    = float(lats[ci])
+        dist_deg = float(dists_deg[ci])
+        dist_km  = dist_deg * 111.195
+
+        seg_row = boundaries_gdf.iloc[pts_seg_iloc[nn_idx[ci]]]
+        div     = seg_row.get('divergence', 0.0)
+
+        if div > div_threshold_ridge:
+            # Ridge: shallow, symmetric about axis
+            if dist_deg > ridge_max_dist_deg:
+                continue
+            if ridge_eq_prob < 1.0 and np.random.random() > ridge_eq_prob:
+                continue
+            earthquakes.append({
+                'geometry':       Point(lon_c, lat_c),
+                'depth_km':       round(float(np.random.uniform(0.0, ridge_max_depth_km)), 1),
+                'boundary_type':  'ridge',
+                'plateid1':       int(seg_row.get('plateid1_poly1', 0) or 0),
+                'plateid2':       int(seg_row.get('plateid1_poly2', 0) or 0),
+                'downgoing_plate':  0,
+                'overriding_plate': 0,
+            })
+
+        elif div < div_threshold_subduction:
+            # Subduction: overriding-plate side only, depth from slab dip
+            p1 = int(seg_row.get('plateid1_poly1', 0) or 0)
+            p2 = int(seg_row.get('plateid1_poly2', 0) or 0)
+            if p1 == 0 or p2 == 0:
+                continue
+
+            dg        = resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)
+            overriding = p2 if dg == p1 else p1
+
+            # Arc normal for hemisphere test
+            coords = list(seg_row.geometry.coords)
+            if len(coords) < 2:
+                continue
+            try:
+                arc = pygplates.GreatCircleArc(
+                    pygplates.PointOnSphere(coords[0][1], coords[0][0]),
+                    pygplates.PointOnSphere(coords[1][1], coords[1][0]))
+                seg_normal = arc.get_great_circle_normal()
+            except pygplates.IndeterminateGreatCircleArcNormalError:
+                continue
+
+            # Is this candidate on the overriding-plate side?
+            pt_xyz = pygplates.PointOnSphere(lat_c, lon_c).to_xyz()
+            dot_pt = (seg_normal.get_x()*pt_xyz[0]
+                    + seg_normal.get_y()*pt_xyz[1]
+                    + seg_normal.get_z()*pt_xyz[2])
+
+            if overriding in pid_to_centroid_xyz:
+                c      = pid_to_centroid_xyz[overriding]
+                dot_ov = (seg_normal.get_x()*c[0]
+                        + seg_normal.get_y()*c[1]
+                        + seg_normal.get_z()*c[2])
+                if (dot_pt > 0) != (dot_ov > 0):
+                    continue        # wrong side → downgoing plate, skip
+
+            depth_km = dist_km * np.tan(slab_dip_rad)
+            if depth_km > slab_max_depth_km:
+                continue
+
+            # Sanity check: reject if the point sits inside the downgoing plate's
+            # surface expression — the slab dips away from that plate, not under it.
+            if plate_id_raster is not None:
+                try:
+                    raster_pid = int(plate_id_raster.sel(
+                        lon=lon_c, lat=lat_c, method='nearest').item())
+                    if raster_pid == dg:
+                        continue
+                except Exception:
+                    pass
+
+            if subduction_eq_prob < 1.0 and np.random.random() > subduction_eq_prob:
+                continue
+
+            earthquakes.append({
+                'geometry':        Point(lon_c, lat_c),
+                'depth_km':        round(float(depth_km), 1),
+                'boundary_type':   'subduction',
+                'plateid1':        p1,
+                'plateid2':        p2,
+                'downgoing_plate':  dg,
+                'overriding_plate': overriding,
+            })
+
+    if not earthquakes:
+        return gpd.GeoDataFrame(
+            columns=['geometry', 'depth_km', 'boundary_type',
+                     'plateid1', 'plateid2', 'downgoing_plate', 'overriding_plate']
+        ).set_crs(epsg=4326)
+
+    return gpd.GeoDataFrame(earthquakes, geometry='geometry').set_crs(epsg=4326)
 
 
 def write_rotation_file(rotation_records, path, fixed_plate_id=0):
