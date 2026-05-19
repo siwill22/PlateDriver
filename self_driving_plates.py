@@ -108,7 +108,8 @@ def resolve_overlaps(gdf, priority_col):
 
 
 def update_plate_id_raster(clipped_polygons, raster_spacing=1):
-    valid = clipped_polygons[clipped_polygons.geometry.notna() & ~clipped_polygons.geometry.is_empty]
+    valid = clipped_polygons.dropna(subset=['geometry'])
+    valid = valid[~valid.geometry.is_empty]
     plate_id_raster = rasterize_polygons(valid, zval_field='PLATEID1', sampling=raster_spacing)
     plate_id_raster = plate_id_raster.where(plate_id_raster>0, np.nan)
 
@@ -495,7 +496,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     # (from a geological perspective, cratons will overide subduction zones).
     if cratons is not None:
         wrapped_cratons = plate_polygons_to_wrapped_gdf(cratons)
-        valid_cratons = wrapped_cratons[wrapped_cratons.geometry.notna() & ~wrapped_cratons.geometry.is_empty]
+        valid_cratons = wrapped_cratons.dropna(subset=['geometry'])
+        valid_cratons = valid_cratons[~valid_cratons.geometry.is_empty]
         craton_raster = rasterize_polygons(valid_cratons, zval_field='PLATEID1', sampling=raster_spacing)
         plate_id_raster = craton_raster.where(craton_raster>0, plate_id_raster)
 
@@ -1040,6 +1042,239 @@ def generate_synthetic_earthquakes(boundaries_gdf, polarity_dict=None, plate_pol
         ).set_crs(epsg=4326)
 
     return gpd.GeoDataFrame(earthquakes, geometry='geometry').set_crs(epsg=4326)
+
+
+def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
+                               polarity_dict=None, craton_counts=None,
+                               continental_base_m=500,
+                               noise_fraction=0.15,
+                               spectral_beta=2.0,
+                               andean_max_dist_deg=5.0,
+                               andean_arc_dist_deg=1.5,
+                               andean_peak_m=5000,
+                               himalayan_max_dist_deg=4.0,
+                               himalayan_peak_m=8000,
+                               div_threshold_subduction=-0.0001):
+    """Generate a synthetic elevation raster from tectonic setting.
+
+    Continental pixels (craton_raster > 0) receive:
+      - Background: continental_base_m + bandlimited Gaussian noise
+      - Andean zone: Gaussian elevation peak at andean_arc_dist_deg from the trench,
+        only on the overriding (continental) plate side of ocean-continent subduction
+      - Himalayan zone: linear ramp peaked at the collision boundary for
+        continent-continent convergent boundaries (both plates have cratons)
+    Ocean pixels remain at 0.  Returns an xr.DataArray with lon/lat dims.
+    """
+    from sklearn.neighbors import BallTree
+    import pyshtools as pysh
+    from scipy.interpolate import RegularGridInterpolator
+
+    if polarity_dict is None:
+        polarity_dict = {}
+    if craton_counts is None:
+        craton_counts = {}
+
+    def _ensure_lonlat(da):
+        return da.rename({k: v for k, v in {'x': 'lon', 'y': 'lat'}.items()
+                          if k in da.dims})
+
+    pid_r  = _ensure_lonlat(plate_id_raster)
+    crat_r = _ensure_lonlat(craton_raster)
+
+    lons = pid_r.lon.values
+    lats = pid_r.lat.values
+    raster_spacing = float(abs(lons[1] - lons[0]))
+
+    lon2d, lat2d = np.meshgrid(lons, lats)          # (nlat, nlon)
+    nlat, nlon   = lon2d.shape
+
+    craton_vals = np.nan_to_num(crat_r.values, nan=0.0).astype(float)
+    is_craton   = craton_vals > 0
+    elev        = np.zeros((nlat, nlon), dtype=float)
+
+    # --- Background continental elevation (flat; noise added after all zones) ---
+    elev[is_craton] = float(continental_base_m)
+
+    # --- Classify convergent segments: Andean vs Himalayan ---
+    andean_pts   = []   # (lat, lon)
+    andean_ovpid = []   # overriding plate ID for each Andean BallTree point
+    himalayan_pts = []
+
+    TESS_DEG = 0.5
+    if boundaries_gdf is not None and 'divergence' in boundaries_gdf.columns:
+        for iloc_i in range(len(boundaries_gdf)):
+            row = boundaries_gdf.iloc[iloc_i]
+            if row.get('divergence', 0.0) >= div_threshold_subduction:
+                continue
+            p1 = int(row.get('plateid1_poly1', 0) or 0)
+            p2 = int(row.get('plateid1_poly2', 0) or 0)
+            if p1 == 0 or p2 == 0:
+                continue
+
+            dg = resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)
+            ov = p2 if dg == p1 else p1
+            a_ov = craton_counts.get(ov, 0)
+            a_dg = craton_counts.get(dg, 0)
+            is_andean    = a_ov > 0
+            is_himalayan = a_ov > 0 and a_dg > 0
+
+            if not (is_andean or is_himalayan):
+                continue
+
+            coords = list(row.geometry.coords)
+            if len(coords) < 2:
+                continue
+            try:
+                pp1 = pygplates.PointOnSphere(coords[0][1], coords[0][0])
+                pp2 = pygplates.PointOnSphere(coords[1][1], coords[1][0])
+                seg_pts = (pygplates.PolylineOnSphere([pp1, pp2])
+                           .to_tessellated(np.radians(TESS_DEG)).get_points())
+                for pt in seg_pts:
+                    lat, lon = pt.to_lat_lon()
+                    if is_andean:
+                        andean_pts.append([lat, lon])
+                        andean_ovpid.append(ov)
+                    if is_himalayan:
+                        himalayan_pts.append([lat, lon])
+            except Exception:
+                pass
+
+    # --- Andean elevation ---
+    if andean_pts:
+        tree = BallTree(np.deg2rad(andean_pts), metric='haversine')
+        ri, ci = np.where(is_craton)
+        pts_rad = np.deg2rad(np.column_stack([lat2d[ri, ci], lon2d[ri, ci]]))
+        dists_deg, nn_idx = tree.query(pts_rad, k=1)
+        dists_deg = np.degrees(dists_deg.flatten())
+        nn_idx    = nn_idx.flatten()
+
+        for k in np.where(dists_deg < andean_max_dist_deg)[0]:
+            if int(craton_vals[ri[k], ci[k]]) != andean_ovpid[nn_idx[k]]:
+                continue    # pixel is in the downgoing plate — skip
+            d = dists_deg[k]
+            arc_elev = andean_peak_m * np.exp(
+                -((d - andean_arc_dist_deg) / andean_arc_dist_deg) ** 2)
+            elev[ri[k], ci[k]] = max(elev[ri[k], ci[k]], arc_elev)
+
+    # --- Himalayan elevation ---
+    if himalayan_pts:
+        tree = BallTree(np.deg2rad(himalayan_pts), metric='haversine')
+        pts_rad = np.deg2rad(np.column_stack([lat2d.flatten(), lon2d.flatten()]))
+        dists_deg, _ = tree.query(pts_rad, k=1)
+        dists_deg = np.degrees(dists_deg.flatten()).reshape(nlat, nlon)
+
+        him_zone = (dists_deg < himalayan_max_dist_deg) & is_craton
+        him_elev = himalayan_peak_m * np.maximum(
+            0.0, 1.0 - dists_deg / himalayan_max_dist_deg)
+        elev[him_zone] = np.maximum(elev[him_zone], him_elev[him_zone])
+
+    # --- Elevation-scaled spherical noise via spherical harmonic synthesis ---
+    # lmax chosen so DH grid spacing ≈ raster_spacing: spacing = 90/(lmax+1)
+    lmax = max(int(90.0 / raster_spacing) - 1, 10)
+    l = np.arange(lmax + 1, dtype=float)
+    power = np.where(l > 0, (l + 1.0) ** (-spectral_beta), 0.0)
+
+    clm = pysh.SHCoeffs.from_random(power)
+    sh_grid = clm.expand(grid='DH')
+    noise_arr = sh_grid.to_array()
+    noise_arr /= noise_arr.std()
+
+    dh_lats = sh_grid.lats()   # descending degrees
+    dh_lons = sh_grid.lons()   # 0 → ~360
+
+    interp = RegularGridInterpolator(
+        (dh_lats[::-1], dh_lons), noise_arr[::-1, :],
+        method='linear', bounds_error=False, fill_value=0.0)
+
+    lon2d_360 = lon2d % 360.0
+    pts = np.column_stack([lat2d.flatten(), lon2d_360.flatten()])
+    noise = interp(pts).reshape(nlat, nlon)
+    std = noise.std()
+    if std > 0:
+        noise /= std
+
+    elev[is_craton] += noise[is_craton] * elev[is_craton] * noise_fraction
+    elev[is_craton]  = np.maximum(elev[is_craton], 100.0)
+
+    return xr.DataArray(elev, dims=['lat', 'lon'],
+                        coords={'lat': lats, 'lon': lons},
+                        attrs={'units': 'meters', 'long_name': 'synthetic elevation'})
+
+
+def generate_seafloor_age_grid(tracer_csv, craton_raster=None, region='d', spacing='1d'):
+    """Interpolate seafloor age tracers to a global grid and optionally mask continents.
+
+    The tracer CSV is expected to have columns [age, lon, lat] (the format
+    written by run_SDP.py).  blockmedian reduces duplicate points per cell
+    before sphinterpolate produces the final grid.
+
+    craton_raster : xr.DataArray with plate-ID values > 0 on continental pixels.
+        Where it is positive the returned age grid is set to NaN.
+    """
+    # pygmt spacing must be a string like '0.5d'; convert float/int if needed
+    if not isinstance(spacing, str):
+        spacing = f'{spacing}d'
+
+    res = pygmt.blockmedian(tracer_csv, region=region, incols='1,2,0',
+                            spacing=spacing, output_type='numpy')
+    age_grid = pygmt.sphinterpolate(res, region=region, spacing=spacing)
+
+    if craton_raster is not None:
+        # Normalise dim names so interp works regardless of x/y vs lon/lat
+        rename = {k: v for k, v in {'x': 'lon', 'y': 'lat'}.items()
+                  if k in craton_raster.dims}
+        cr = craton_raster.rename(rename) if rename else craton_raster
+        cr_on_grid = cr.interp(lat=age_grid.lat, lon=age_grid.lon, method='nearest')
+        age_grid = age_grid.where(cr_on_grid <= 0)
+
+    age_grid.attrs.update({'units': 'Myr', 'long_name': 'seafloor age'})
+    return age_grid
+
+
+def generate_topo_bathy_grid(seafloor_age_grid, topography_raster=None,
+                              default_ocean_depth_m=-3500):
+    """Combine GDH1 bathymetry with synthetic topography into a seamless grid.
+
+    GDH1 model (Stein & Stein 1992):
+      depth = -(2600 + 365 * sqrt(age))          for age < 20 Myr
+      depth = -(5651 - 2473 * exp(-0.0278*age))  for age >= 20 Myr
+
+    topography_raster : xr.DataArray, optional.  Continental elevations (> 0 m).
+        Where present these overwrite the bathymetry.  If None, only bathymetry
+        is returned.
+    default_ocean_depth_m : fill value for ocean pixels with no age data.
+        Set to None to leave those pixels as NaN.
+    """
+    age = seafloor_age_grid.values.copy().astype(float)
+
+    # GDH1 — work in-place on a pre-NaN'd array
+    bathy = np.full_like(age, np.nan)
+    young = np.isfinite(age) & (age < 20.)
+    old   = np.isfinite(age) & (age >= 20.)
+    bathy[young] = -(2600. + 365. * np.sqrt(age[young]))
+    bathy[old]   = -(5651. - 2473. * np.exp(-0.0278 * age[old]))
+
+    combined = bathy.copy()
+
+    # Fill uncovered ocean pixels with a default depth
+    if default_ocean_depth_m is not None:
+        combined[~np.isfinite(combined)] = float(default_ocean_depth_m)
+
+    # Overwrite continental pixels with topography
+    if topography_raster is not None:
+        rename = {k: v for k, v in {'x': 'lon', 'y': 'lat'}.items()
+                  if k in topography_raster.dims}
+        topo = topography_raster.rename(rename) if rename else topography_raster
+        topo_on_grid = topo.interp(lat=seafloor_age_grid.lat,
+                                   lon=seafloor_age_grid.lon, method='nearest')
+        topo_vals = topo_on_grid.values
+        continental = topo_vals > 0
+        combined[continental] = topo_vals[continental]
+
+    return xr.DataArray(combined,
+                        dims=seafloor_age_grid.dims,
+                        coords=seafloor_age_grid.coords,
+                        attrs={'units': 'meters', 'long_name': 'topography-bathymetry'})
 
 
 def write_rotation_file(rotation_records, path, fixed_plate_id=0):

@@ -33,7 +33,7 @@ cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlant
 
 reconstruction_time = 0
 delta_time = 1.
-total_time = 12.
+total_time = 100.
 forces = {'slab_pull': 8, 'slab_suction': 8, 'ridge_push': 3, 'continental_collision': 8}
 
 params = {
@@ -47,7 +47,7 @@ params = {
     'tracer_offset_deg':           0.6,      # perpendicular offset from ridge axis at seeding
     'seafloor_spacing_deg':        2.0,      # grid spacing for initial seafloor age tracers
     'spreading_rate_km_per_myr':   50.0,     # assumed spreading rate for age estimation
-    'csv_save_interval':           10,       # save active-tracer CSV every N timesteps
+    'csv_save_interval':           5,       # save active-tracer CSV every N timesteps
     'eq_n_candidates':             100000,   # random sphere points sampled for earthquake generation
     'eq_ridge_max_dist_deg':       1.0,      # max distance from ridge axis for ridge earthquakes
     'eq_ridge_max_depth_km':       50.0,     # max depth for ridge earthquakes (km)
@@ -55,6 +55,14 @@ params = {
     'eq_slab_max_depth_km':        650.0,    # maximum slab depth (km)
     'eq_ridge_prob':               0.15,      # fraction of ridge candidates accepted (controls density)
     'eq_subduction_prob':          1.0,      # fraction of subduction candidates accepted
+    'topo_continental_base_m':     900,      # background continental elevation (m)
+    'topo_noise_fraction':         0.15,      # noise amplitude as fraction of local elevation
+    'topo_spectral_beta':          2.0,      # SH power-law exponent (2 = brown / realistic terrain)
+    'topo_andean_max_dist_deg':    11.0,      # cutoff distance from trench for Andean mountains
+    'topo_andean_arc_dist_deg':    4.5,      # distance of arc-peak from trench (degrees)
+    'topo_andean_peak_m':         5000,      # peak Andean elevation (m)
+    'topo_himalayan_max_dist_deg': 8.0,      # half-width of Himalayan collision zone (degrees)
+    'topo_himalayan_peak_m':      7000,      # peak Himalayan elevation (m)
 }
 
 
@@ -183,6 +191,15 @@ for i in range(1, int(total_time / delta_time) + 1):
             lon=active_tracers.geometry.x,
             lat=active_tracers.geometry.y
         ).drop(columns='geometry').to_csv('./output/tracers_{:04d}.csv'.format(i), index=False)
+
+        age_grid = None
+        if len(active_tracers):
+            age_grid = sdp.generate_seafloor_age_grid(
+                './output/tracers_{:04d}.csv'.format(i),
+                craton_raster=rasters.get('craton'),
+                spacing=params['raster_spacing'])
+            age_grid.to_netcdf('./output/seafloor_age_{:04d}.nc'.format(i))
+
         rasters['divergence'].to_netcdf('./output/divergence_{:04d}.nc'.format(i))
         rasters['plate_id'].to_netcdf('./output/plate_id_{:04d}.nc'.format(i))
         if 'craton' in rasters:
@@ -231,5 +248,25 @@ for i in range(1, int(total_time / delta_time) + 1):
             ridge_eq_prob=params['eq_ridge_prob'],
             subduction_eq_prob=params['eq_subduction_prob'])
         earthquakes.to_file('./output/earthquakes_{:04d}.geojson'.format(i), driver='GeoJSON')
+
+        topo = None
+        if 'craton' in rasters:
+            topo = sdp.compute_topography_raster(
+                rasters['plate_id'], rasters['craton'], boundaries_gdf,
+                polarity_dict=polarity_dict, craton_counts=craton_counts,
+                continental_base_m=params['topo_continental_base_m'],
+                noise_fraction=params['topo_noise_fraction'],
+                spectral_beta=params['topo_spectral_beta'],
+                andean_max_dist_deg=params['topo_andean_max_dist_deg'],
+                andean_arc_dist_deg=params['topo_andean_arc_dist_deg'],
+                andean_peak_m=params['topo_andean_peak_m'],
+                himalayan_max_dist_deg=params['topo_himalayan_max_dist_deg'],
+                himalayan_peak_m=params['topo_himalayan_peak_m'],
+                div_threshold_subduction=params['div_threshold_subduction'])
+            topo.to_netcdf('./output/topography_{:04d}.nc'.format(i))
+
+        if age_grid is not None:
+            topo_bathy = sdp.generate_topo_bathy_grid(age_grid, topography_raster=topo)
+            topo_bathy.to_netcdf('./output/topo_bathy_{:04d}.nc'.format(i))
 
 sdp.write_rotation_file(rotation_records, './output/synthetic_rotations.rot')
