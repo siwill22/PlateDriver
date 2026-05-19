@@ -41,8 +41,8 @@ params = {
     'tessellation_deg':            0.2,      # polygon edge densification before rasterising
     'topo_simplify_tolerance':     1,        # polygon smoothing tolerance after polygonise
     'boundary_search_radius_deg':  2,        # plate ID neighbour search radius at boundaries
-    'div_threshold_subduction':   -0.00025,  # divergence below this → subduction zone
-    'div_threshold_ridge':         0.0001,  # divergence above this → ridge
+    'div_threshold_subduction':   -1.0,   # cm/yr relative normal velocity below this → subduction
+    'div_threshold_ridge':         1.0,   # cm/yr relative normal velocity above this → ridge
     'tracer_spacing_deg':          2.0,      # seed point spacing along ridge boundaries
     'tracer_offset_deg':           0.6,      # perpendicular offset from ridge axis at seeding
     'seafloor_spacing_deg':        2.0,      # grid spacing for initial seafloor age tracers
@@ -84,7 +84,7 @@ rotation_records = []
 #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
 tracers = sdp.generate_seafloor_age_tracers(
-    new_plate_polygons, boundaries_gdf, rasters['divergence'],
+    new_plate_polygons, boundaries_gdf,
     spacing_deg=params['seafloor_spacing_deg'],
     spreading_rate_km_per_myr=params['spreading_rate_km_per_myr'],
     div_threshold=params['div_threshold_ridge'])
@@ -115,13 +115,13 @@ for i in range(1, int(total_time / delta_time) + 1):
         cumulative_rotation_dict[pid] = stage_rot * prev
         rotation_records.append((t_record, pid, cumulative_rotation_dict[pid]))
 
-    new_tracers = sdp.seed_ridge_tracers(boundaries_gdf, rasters['divergence'],
+    new_tracers = sdp.seed_ridge_tracers(boundaries_gdf,
                                          spacing_deg=params['tracer_spacing_deg'],
                                          threshold=params['div_threshold_ridge'],
                                          offset_deg=params['tracer_offset_deg'])
     tracers = pd.concat([tracers, new_tracers], ignore_index=True)
     tracers = sdp.advect_tracers(tracers, rasters['plate_id'], stage_pole_dict, delta_time)
-    tracers = sdp.deactivate_subducted_tracers(tracers, rasters['divergence'],
+    tracers = sdp.deactivate_subducted_tracers(tracers, boundaries_gdf,
                                                threshold=params['div_threshold_subduction'])
 
     fig = pygmt.Figure()

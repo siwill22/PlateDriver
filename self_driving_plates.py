@@ -57,7 +57,7 @@ def nudge_polygons(polygon_features, stage_pole_dict):
     rpolygons = []
     for polygon_feature in polygon_features:
         plate_id = polygon_feature.get_reconstruction_plate_id()
-        nudged_geometry = stage_pole_dict[plate_id] * polygon_feature.get_geometry()
+        nudged_geometry = stage_pole_dict.get(plate_id, pygplates.FiniteRotation()) * polygon_feature.get_geometry()
         nfeature = polygon_feature.clone()
         nfeature.set_geometry(nudged_geometry)
         rpolygons.append(nfeature)
@@ -155,10 +155,8 @@ def velocity_grid(plate_id_raster, plate_parameters, delta_time=1, raster_spacin
         velocity_domain_point = pygplates.PointOnSphere(velocity_point.y, velocity_point.x)
 
         # Get the stage rotation of partitioning plate from 'time + delta_time' to 'time'.
-        if int(velocity_point.pid)==0:
-            equivalent_stage_rotation = pygplates.FiniteRotation()
-        else:
-            equivalent_stage_rotation = plate_parameters[int(velocity_point.pid)] #rotation_model.get_rotation(reconstruction_time, int(velocity_point.pid), reconstruction_time + delta_time)
+        pid_int = int(velocity_point.pid)
+        equivalent_stage_rotation = plate_parameters.get(pid_int, pygplates.FiniteRotation())
 
         # Calculate velocity at the velocity domain point.
         # This is from 'time + delta_time' to 'time' on the partitioning plate.
@@ -188,10 +186,66 @@ def velocity_grid(plate_id_raster, plate_parameters, delta_time=1, raster_spacin
     return velocity_grid_east, velocity_grid_north
 
 
-def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, forces,
+def compute_boundary_divergence(boundaries_gdf, stage_pole_dict, delta_time):
+    """Compute relative normal velocity at each shared boundary segment midpoint.
+
+    Returns boundaries_gdf with a 'divergence' column (cm/yr).  Positive values
+    indicate plates moving apart (ridge), negative indicate convergence (subduction).
+    The sign convention is: (v_poly1 - v_poly2) projected onto the right-hand normal
+    of the segment direction as stored in the LineString.
+    """
+    divergences = []
+    identity = pygplates.FiniteRotation()
+
+    for _, row in boundaries_gdf.iterrows():
+        pid1 = row.get('plateid1_poly1')
+        pid2 = row.get('plateid1_poly2')
+        seg   = row.geometry
+
+        if not pid1 or not pid2 or pid1 == 0 or pid2 == 0:
+            divergences.append(0.0)
+            continue
+
+        mid = seg.interpolate(0.5, normalized=True)
+        pt  = pygplates.PointOnSphere(mid.y, mid.x)   # (lat, lon)
+
+        R1 = stage_pole_dict.get(pid1, identity)
+        R2 = stage_pole_dict.get(pid2, identity)
+
+        v1 = pygplates.calculate_velocities([pt], R1, delta_time)[0]
+        v2 = pygplates.calculate_velocities([pt], R2, delta_time)[0]
+
+        v1_local = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt], [v1])[0]
+        v2_local = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt], [v2])[0]
+
+        vrel_north = v1_local.get_x() - v2_local.get_x()
+        vrel_east  = v1_local.get_y() - v2_local.get_y()
+
+        # Great-circle normal from segment endpoints via pygplates
+        coords = list(seg.coords)
+        try:
+            arc = pygplates.GreatCircleArc(
+                pygplates.PointOnSphere(coords[0][1],  coords[0][0]),
+                pygplates.PointOnSphere(coords[-1][1], coords[-1][0]))
+            seg_normal = arc.get_great_circle_normal()
+        except pygplates.IndeterminateGreatCircleArcNormalError:
+            divergences.append(0.0)
+            continue
+        seg_nl = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt], [seg_normal])[0]
+
+        divergences.append(vrel_east * seg_nl.get_y() + vrel_north * seg_nl.get_x())
+
+    result = boundaries_gdf.copy()
+    result['divergence'] = divergences
+    return result
+
+
+def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             craton_raster=None,
-                            divergence_threshold_for_subduction=-0.00025,
-                            divergence_threshold_for_ridge_push=0.00025,
+                            stage_pole_dict=None,
+                            delta_time=1,
+                            divergence_threshold_for_subduction=-1.0,
+                            divergence_threshold_for_ridge_push=1.0,
                             boundary_search_radius_deg=2,
                             polarity_dict=None):
 
@@ -244,8 +298,22 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
                 downgoing_plate = id1
                 overriding_plate = id2
 
-                # This tells us if boundary is divergent or 
-                divergence_value = divergence_raster.interp(lon=arc_point[1], lat=arc_point[0]).item()
+                # Per-segment relative normal velocity: positive = diverging, negative = converging
+                pt_obj = pygplates.PointOnSphere(arc_point[0], arc_point[1])
+                if stage_pole_dict is not None and id1 and id2 and id1 > 0 and id2 > 0:
+                    try:
+                        _v1 = pygplates.calculate_velocities([pt_obj], stage_pole_dict.get(id1, pygplates.FiniteRotation()), delta_time)[0]
+                        _v2 = pygplates.calculate_velocities([pt_obj], stage_pole_dict.get(id2, pygplates.FiniteRotation()), delta_time)[0]
+                        _v1l = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt_obj], [_v1])[0]
+                        _v2l = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt_obj], [_v2])[0]
+                        _seg_n = segment.get_great_circle_normal()
+                        _seg_nl = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt_obj], [_seg_n])[0]
+                        divergence_value = ((_v1l.get_y() - _v2l.get_y()) * _seg_nl.get_y()
+                                            + (_v1l.get_x() - _v2l.get_x()) * _seg_nl.get_x())
+                    except pygplates.IndeterminateGreatCircleArcNormalError:
+                        divergence_value = 0.0
+                else:
+                    divergence_value = 0.0
 
                 continental_collision = False
                 if craton_raster is not None:
@@ -343,8 +411,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     tessellation_deg          = params.get('tessellation_deg',           0.2)
     raster_spacing            = params.get('raster_spacing',             1)
     topo_simplify             = params.get('topo_simplify_tolerance',    1)
-    div_thresh_sub            = params.get('div_threshold_subduction',  -0.00025)
-    div_thresh_ridge          = params.get('div_threshold_ridge',        0.00025)
+    div_thresh_sub            = params.get('div_threshold_subduction',  -1.0)
+    div_thresh_ridge          = params.get('div_threshold_ridge',        1.0)
     boundary_search_radius    = params.get('boundary_search_radius_deg', 2)
 
     new_features = tessellate_polygons(rpolygons, max_dist_deg=tessellation_deg)
@@ -399,16 +467,17 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     # BUT we should do that in 'polygons_to_stage_poles'?
 
     boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons)
-
+    boundaries_gdf = compute_boundary_divergence(boundaries_gdf, stage_pole_dict, delta_time)
 
     velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time,
                                                              raster_spacing=raster_spacing)
-    #
+    # Visualisation only — Cartesian approximation, not used for boundary classification
     div = mpcalc.divergence(velocity_grid_east, velocity_grid_north)
 
-    #
-    stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, div, plate_id_raster, forces,
+    stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, plate_id_raster, forces,
                                               craton_raster,
+                                              stage_pole_dict=stage_pole_dict,
+                                              delta_time=delta_time,
                                               divergence_threshold_for_subduction=div_thresh_sub,
                                               divergence_threshold_for_ridge_push=div_thresh_ridge,
                                               boundary_search_radius_deg=boundary_search_radius,
@@ -432,7 +501,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
            boundaries_gdf
 
 
-def seed_ridge_tracers(boundaries_gdf, divergence_raster, spacing_deg=2.0,
+def seed_ridge_tracers(boundaries_gdf, spacing_deg=2.0,
                        threshold=0.00025, offset_deg=0.6):
     """Seed tracer point pairs offset perpendicular to divergent boundary segments.
 
@@ -440,12 +509,12 @@ def seed_ridge_tracers(boundaries_gdf, divergence_raster, spacing_deg=2.0,
     that after advection they are carried apart on their respective plates.
     offset_deg must exceed half the plate_id raster cell size (~0.5 deg) so each
     point clearly falls on one plate in the nearest-neighbour lookup.
+    boundaries_gdf must have a 'divergence' column (from compute_boundary_divergence).
     """
     new_points = []
     for _, row in boundaries_gdf.iterrows():
         seg = row.geometry
-        mid = seg.interpolate(0.5, normalized=True)
-        div_val = divergence_raster.interp(lon=mid.x, lat=mid.y).item()
+        div_val = row.get('divergence', 0.0)
         if div_val <= threshold:
             continue
 
@@ -473,7 +542,7 @@ def seed_ridge_tracers(boundaries_gdf, divergence_raster, spacing_deg=2.0,
     return gpd.GeoDataFrame(new_points).set_crs(epsg=4326)
 
 
-def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf, divergence_raster,
+def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf,
                                    spacing_deg=5.0, spreading_rate_km_per_myr=50.0,
                                    div_threshold=0.00025):
     """Seed initial tracers inside each plate polygon with age estimated from ridge distance.
@@ -481,6 +550,7 @@ def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf, divergence_ras
     For each polygon, finds its own divergent boundary segments, builds a BallTree from
     densified ridge points, then assigns age = haversine_dist_km / spreading_rate to each
     interior grid point.  Points with no divergent boundary on their plate are skipped.
+    boundaries_gdf must have a 'divergence' column (from compute_boundary_divergence).
     """
     from sklearn.neighbors import BallTree
     from shapely.geometry import Point
@@ -499,11 +569,10 @@ def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf, divergence_ras
         for _, brow in boundaries_gdf.iterrows():
             if brow['plateid1_poly1'] != pid and brow['plateid1_poly2'] != pid:
                 continue
-            seg = brow.geometry
-            mid = seg.interpolate(0.5, normalized=True)
-            div_val = divergence_raster.interp(lon=mid.x, lat=mid.y).item()
+            div_val = brow.get('divergence', 0.0)
             if div_val <= div_threshold:
                 continue
+            seg = brow.geometry
             # Densify segment for accurate distance queries
             seg_len = seg.length
             n = max(int(seg_len / (spacing_deg / 2)), 2)
@@ -566,15 +635,34 @@ def advect_tracers(tracers, plate_id_raster, stage_pole_dict, delta_time=1):
     return pd.concat([updated, inactive], ignore_index=True)
 
 
-def deactivate_subducted_tracers(tracers, divergence_raster, threshold=-0.00025):
-    """Mark active tracers as inactive where they have entered a subduction zone."""
+def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-0.00025, max_dist_deg=2.0):
+    """Mark active tracers as inactive when their nearest boundary segment is convergent.
+
+    Uses boundaries_gdf 'divergence' column (from compute_boundary_divergence).
+    A tracer is deactivated when its nearest boundary has divergence < threshold
+    and is within max_dist_deg degrees.
+    """
     if tracers is None or len(tracers) == 0:
         return tracers
+    if boundaries_gdf is None or len(boundaries_gdf) == 0:
+        return tracers
     tracers = tracers.copy()
-    for idx, row in tracers[tracers.active.astype(bool)].iterrows():
-        div_val = divergence_raster.interp(
-            lon=row.geometry.x, lat=row.geometry.y).item()
-        if div_val < threshold:
+    active_mask = tracers.active.astype(bool)
+    if not active_mask.any():
+        return tracers
+
+    # Build spatial index over boundary segment midpoints
+    mids = boundaries_gdf.geometry.interpolate(0.5, normalized=True)
+    divs = boundaries_gdf['divergence'].values if 'divergence' in boundaries_gdf.columns else np.zeros(len(boundaries_gdf))
+
+    mid_coords = np.column_stack([mids.x.values, mids.y.values])
+
+    for idx, row in tracers[active_mask].iterrows():
+        lon, lat = row.geometry.x, row.geometry.y
+        diffs = mid_coords - np.array([lon, lat])
+        dists = np.sqrt((diffs[:, 0] ** 2) + (diffs[:, 1] ** 2))
+        nearest_idx = np.argmin(dists)
+        if dists[nearest_idx] < max_dist_deg and divs[nearest_idx] < threshold:
             tracers.loc[idx, 'active'] = False
     return tracers
 
