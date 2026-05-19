@@ -57,7 +57,7 @@ def nudge_polygons(polygon_features, stage_pole_dict):
     rpolygons = []
     for polygon_feature in polygon_features:
         plate_id = polygon_feature.get_reconstruction_plate_id()
-        nudged_geometry = stage_pole_dict[plate_id] * polygon_feature.get_geometry()
+        nudged_geometry = stage_pole_dict.get(plate_id, pygplates.FiniteRotation()) * polygon_feature.get_geometry()
         nfeature = polygon_feature.clone()
         nfeature.set_geometry(nudged_geometry)
         rpolygons.append(nfeature)
@@ -155,10 +155,7 @@ def velocity_grid(plate_id_raster, plate_parameters, delta_time=1, raster_spacin
         velocity_domain_point = pygplates.PointOnSphere(velocity_point.y, velocity_point.x)
 
         # Get the stage rotation of partitioning plate from 'time + delta_time' to 'time'.
-        if int(velocity_point.pid)==0:
-            equivalent_stage_rotation = pygplates.FiniteRotation()
-        else:
-            equivalent_stage_rotation = plate_parameters[int(velocity_point.pid)] #rotation_model.get_rotation(reconstruction_time, int(velocity_point.pid), reconstruction_time + delta_time)
+        equivalent_stage_rotation = plate_parameters.get(int(velocity_point.pid), pygplates.FiniteRotation())
 
         # Calculate velocity at the velocity domain point.
         # This is from 'time + delta_time' to 'time' on the partitioning plate.
