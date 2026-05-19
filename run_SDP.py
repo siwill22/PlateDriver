@@ -59,8 +59,8 @@ result = pdriver.get_torques_for_plate_snapshot(snapshot, reconstruction_time, d
 
 stage_pole_dict = {}
 
-#for res in result:
-#    stage_pole_dict[res[0]] = res[3]
+for res in result:
+    stage_pole_dict[res[0]] = res[3]
 #    print(res[0], res[3])
 #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
 
