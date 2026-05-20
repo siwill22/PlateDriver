@@ -139,54 +139,46 @@ def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1):
 
 def velocity_grid(plate_id_raster, plate_parameters, delta_time=1, raster_spacing=1):
     '''
-    Given a raster defining the plateids around the margins of a deformation zone, extract rigid plate 
-    velocities at these points
+    Given a raster defining the plateids around the margins of a deformation zone, extract rigid plate
+    velocities at these points.
+
+    Grouped per plate: one pygplates call per unique plate ID instead of one per pixel,
+    reducing ~259,200 calls to ~15-20.
     '''
-    
-    velocity_type = 'MagAzim'
+    lons = plate_id_raster.x.values   # (nlon,)
+    lats = plate_id_raster.y.values   # (nlat,)
+    pids = plate_id_raster.values     # (nlat, nlon)
 
-    # We decide to isolate points from the grid where the 
-    velpts = pygmt.grd2xyz(plate_id_raster, skiprows=True)
-    velpts = velpts.rename(columns={velpts.columns[2]:'pid'})
+    nlat, nlon = pids.shape
+    vel_east  = np.zeros((nlat, nlon), dtype=float)
+    vel_north = np.zeros((nlat, nlon), dtype=float)
 
-    # All domain points and associated (magnitude, azimuth, inclination) velocities for the current time.
-    all_domain_points = []
-    all_velocities = []
-    plate_ids = []
+    lon2d, lat2d = np.meshgrid(lons, lats)   # (nlat, nlon)
 
-    for i,velocity_point in velpts.iterrows():
-        velocity_domain_point = pygplates.PointOnSphere(velocity_point.y, velocity_point.x)
+    for pid_val in np.unique(pids):
+        if np.isnan(pid_val):
+            continue
+        pid_int  = int(pid_val)
+        rotation = plate_parameters.get(pid_int, pygplates.FiniteRotation())
 
-        # Get the stage rotation of partitioning plate from 'time + delta_time' to 'time'.
-        pid_int = int(velocity_point.pid)
-        equivalent_stage_rotation = plate_parameters.get(pid_int, pygplates.FiniteRotation())
+        rows, cols = np.where(pids == pid_val)
+        lats_m = lat2d[rows, cols]
+        lons_m = lon2d[rows, cols]
 
-        # Calculate velocity at the velocity domain point.
-        # This is from 'time + delta_time' to 'time' on the partitioning plate.
-        velocity_vectors = pygplates.calculate_velocities(
-            [velocity_domain_point],
-            equivalent_stage_rotation,
-            delta_time)
+        pts = [pygplates.PointOnSphere(float(la), float(lo))
+               for la, lo in zip(lats_m, lons_m)]
 
-        # Convert global 3D velocity vectors to local (magnitude, azimuth, inclination) tuples (one tuple per point).
-        velocities = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down(
-                                [velocity_domain_point],
-                                velocity_vectors)
-        all_velocities.append(velocities[0])
+        vecs = pygplates.calculate_velocities(pts, rotation, delta_time)
+        ned  = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down(pts, vecs)
 
-    vel_east=[]
-    vel_north=[]
-    for velocity_vector in all_velocities:
-        vel_east.append(velocity_vector.get_y())
-        vel_north.append(velocity_vector.get_x())
-        
-    velpts['vel_east'] = vel_east
-    velpts['vel_north'] = vel_north
-    
-    velocity_grid_east = pygmt.xyz2grd(x=velpts.x, y=velpts.y, z=velpts.vel_east, region='d', spacing=raster_spacing)
-    velocity_grid_north = pygmt.xyz2grd(x=velpts.x, y=velpts.y, z=velpts.vel_north, region='d', spacing=raster_spacing)
-    
-    return velocity_grid_east, velocity_grid_north
+        for k, nv in enumerate(ned):
+            vel_east[rows[k], cols[k]]  = nv.get_y()
+            vel_north[rows[k], cols[k]] = nv.get_x()
+
+    coords = {'y': lats, 'x': lons}
+    da_east  = xr.DataArray(vel_east,  dims=['y', 'x'], coords=coords)
+    da_north = xr.DataArray(vel_north, dims=['y', 'x'], coords=coords)
+    return da_east, da_north
 
 
 def compute_boundary_divergence(boundaries_gdf, stage_pole_dict, delta_time, plate_id_raster,
@@ -524,7 +516,11 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
 
     velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time,
                                                              raster_spacing=raster_spacing)
-    div = mpcalc.divergence(velocity_grid_east, velocity_grid_north)
+    du_dx = np.gradient(velocity_grid_east.values, velocity_grid_east.x.values, axis=1)
+    dv_dy = np.gradient(velocity_grid_north.values, velocity_grid_north.y.values, axis=0)
+    div = xr.DataArray(du_dx + dv_dy,
+                       dims=velocity_grid_east.dims,
+                       coords=velocity_grid_east.coords)
     _ct['velocity_grid'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, plate_id_raster, forces,

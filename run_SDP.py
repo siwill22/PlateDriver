@@ -49,6 +49,7 @@ params = {
     'seafloor_spacing_deg':        2.0,      # grid spacing for initial seafloor age tracers
     'spreading_rate_km_per_myr':   50.0,     # assumed spreading rate for age estimation
     'csv_save_interval':           5,       # save active-tracer CSV every N timesteps
+    'plot_interval':               5,       # make plots every N timesteps; None = no plots
     'eq_n_candidates':             100000,   # random sphere points sampled for earthquake generation
     'eq_ridge_max_dist_deg':       1.0,      # max distance from ridge axis for ridge earthquakes
     'eq_ridge_max_depth_km':       50.0,     # max depth for ridge earthquakes (km)
@@ -168,48 +169,51 @@ for i in range(1, int(total_time / delta_time) + 1):
             geometry='geometry').set_crs(epsg=4326)
     _step_times['seamounts'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    fig = pygmt.Figure()
-    fig.basemap(frame='f', projection='W10i', region='d')
-    #fig.plot(data=clipped_polygons, fill='blue', transparency=50)
-    pygmt.makecpt(cmap='polar', series=[-0.001,0.001], background='o')
-    #fig.grdimage(rasters['divergence'], cmap=True)
-    fig.plot(data=new_plate_polygons.iloc[:], pen='1p,black', transparency=50)
-    # Overlay per-segment boundary type: red=ridge, blue=subduction, black=conservative
-    if 'divergence' in boundaries_gdf.columns:
-        ridge_bounds = boundaries_gdf[boundaries_gdf['divergence'] > params['div_threshold_ridge']]
-        sub_bounds   = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
-        cons_bounds  = boundaries_gdf[
-            (boundaries_gdf['divergence'] >= params['div_threshold_subduction']) &
-            (boundaries_gdf['divergence'] <= params['div_threshold_ridge'])
-        ]
-        if len(cons_bounds):
-            fig.plot(data=cons_bounds, pen='1p,black')
-        if len(ridge_bounds):
-            fig.plot(data=ridge_bounds, pen='2p,red')
-        if len(sub_bounds):
-            fig.plot(data=sub_bounds, pen='2p,blue')
-    glon,glat = np.meshgrid(rasters.lon, rasters.lat)
-    stride=5
-    magnitude = np.sqrt(rasters['velocity_east'].data[::stride,::stride].flatten()**2 + rasters['velocity_north'].data[::stride,::stride].flatten()**2)
-    azimuth = np.degrees(np.arctan2(rasters['velocity_east'].data[::stride,::stride].flatten(), rasters['velocity_north'].data[::stride,::stride].flatten())) % 360
-    fig.plot(data={'x': glon[::stride,::stride].flatten(),
-                'y': glat[::stride,::stride].flatten(),
-                'azimuth': azimuth,
-                'magnitude': magnitude/(2000.*delta_time)},
-            style='V0.15c+e+a45+ggray40+n', pen="0.1p,black", fill="black")
-    fig.plot(data=gpml2gdf(cratons), pen='1p,black', fill='grey', transparency=50)
-    label_pts = new_plate_polygons.representative_point()
-    fig.text(x=label_pts.x, y=label_pts.y,
-             text=new_plate_polygons['PLATEID1'], font='10p,Helvetica-Bold,black', justify='CM')
     active_tracers = tracers[tracers.active.astype(bool)]
-    if len(active_tracers):
-        vmax = 100 #max(float(active_tracers.age.max()), 1.0)
-        pygmt.makecpt(cmap='cubhelix', series=[0, vmax], reverse=True)
-        fig.plot(x=active_tracers.geometry.x.values, y=active_tracers.geometry.y.values,
-                 style='c0.08c', fill=active_tracers.age.values.astype(float),
-                 cmap=True, pen='0.1p,black')
-    fig.savefig('./output/test_plot_{:04d}.png'.format(i))
-    _step_times['plot'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+    _plot_interval = params.get('plot_interval')
+    if _plot_interval is not None and i % _plot_interval == 0:
+        _tp0 = time.perf_counter()
+        fig = pygmt.Figure()
+        fig.basemap(frame='f', projection='W10i', region='d')
+        pygmt.makecpt(cmap='polar', series=[-0.001,0.001], background='o')
+        fig.plot(data=new_plate_polygons.iloc[:], pen='1p,black', transparency=50)
+        # Overlay per-segment boundary type: red=ridge, blue=subduction, black=conservative
+        if 'divergence' in boundaries_gdf.columns:
+            ridge_bounds = boundaries_gdf[boundaries_gdf['divergence'] > params['div_threshold_ridge']]
+            sub_bounds   = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
+            cons_bounds  = boundaries_gdf[
+                (boundaries_gdf['divergence'] >= params['div_threshold_subduction']) &
+                (boundaries_gdf['divergence'] <= params['div_threshold_ridge'])
+            ]
+            if len(cons_bounds):
+                fig.plot(data=cons_bounds, pen='1p,black')
+            if len(ridge_bounds):
+                fig.plot(data=ridge_bounds, pen='2p,red')
+            if len(sub_bounds):
+                fig.plot(data=sub_bounds, pen='2p,blue')
+        glon, glat = np.meshgrid(rasters.lon, rasters.lat)
+        stride = 5
+        magnitude = np.sqrt(rasters['velocity_east'].data[::stride,::stride].flatten()**2 + rasters['velocity_north'].data[::stride,::stride].flatten()**2)
+        azimuth = np.degrees(np.arctan2(rasters['velocity_east'].data[::stride,::stride].flatten(), rasters['velocity_north'].data[::stride,::stride].flatten())) % 360
+        fig.plot(data={'x': glon[::stride,::stride].flatten(),
+                    'y': glat[::stride,::stride].flatten(),
+                    'azimuth': azimuth,
+                    'magnitude': magnitude/(2000.*delta_time)},
+                style='V0.15c+e+a45+ggray40+n', pen="0.1p,black", fill="black")
+        fig.plot(data=gpml2gdf(cratons), pen='1p,black', fill='grey', transparency=50)
+        label_pts = new_plate_polygons.representative_point()
+        fig.text(x=label_pts.x, y=label_pts.y,
+                 text=new_plate_polygons['PLATEID1'], font='10p,Helvetica-Bold,black', justify='CM')
+        if len(active_tracers):
+            vmax = 100
+            pygmt.makecpt(cmap='cubhelix', series=[0, vmax], reverse=True)
+            fig.plot(x=active_tracers.geometry.x.values, y=active_tracers.geometry.y.values,
+                     style='c0.08c', fill=active_tracers.age.values.astype(float),
+                     cmap=True, pen='0.1p,black')
+        fig.savefig('./output/test_plot_{:04d}.png'.format(i))
+        _step_times['plot'] = time.perf_counter() - _tp0
+    _t0 = time.perf_counter()
 
     if i % params['csv_save_interval'] == 0:
         active_tracers[['geometry', 'age']].assign(
