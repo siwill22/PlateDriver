@@ -805,6 +805,52 @@ def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_di
     return tracers
 
 
+def generate_hotspot_locations(n=20, locations=None, seed=None):
+    """Return a GeoDataFrame of fixed hot spot source points.
+
+    If locations is a list of (lon, lat) tuples those are used directly.
+    Otherwise n points are drawn uniformly on the sphere via the normal-vector
+    method (generate (x,y,z) ~ N(0,1), normalise, convert to lon/lat).
+    """
+    if locations is not None:
+        rows = [{'hotspot_id': i, 'geometry': Point(lon, lat)}
+                for i, (lon, lat) in enumerate(locations)]
+    else:
+        rng = np.random.default_rng(seed)
+        xyz = rng.standard_normal((n, 3))
+        xyz /= np.linalg.norm(xyz, axis=1, keepdims=True)
+        lons = np.degrees(np.arctan2(xyz[:, 1], xyz[:, 0]))
+        lats = np.degrees(np.arcsin(xyz[:, 2]))
+        rows = [{'hotspot_id': i, 'geometry': Point(float(lons[i]), float(lats[i]))}
+                for i in range(n)]
+    return gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
+
+
+def seed_hotspot_seamounts(hotspot_locs, prob=0.3, rng=None):
+    """Probabilistically create new seamounts at fixed hot spot locations.
+
+    For each hot spot, a seamount is created with probability prob.
+    Returns a GeoDataFrame (possibly empty) with columns matching the tracers
+    GeoDataFrame so that advect_tracers and deactivate_subducted_tracers work
+    without modification.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    rows = []
+    for _, hs in hotspot_locs.iterrows():
+        if rng.uniform() < prob:
+            rows.append({
+                'geometry':    hs.geometry,
+                'hotspot_id':  int(hs['hotspot_id']),
+                'age':         0.0,
+                'active':      True,
+            })
+    if not rows:
+        return gpd.GeoDataFrame(columns=['geometry', 'hotspot_id', 'age', 'active'],
+                                geometry='geometry').set_crs(epsg=4326)
+    return gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
+
+
 def craton_counts_from_raster(craton_raster):
     """Return {plate_id: pixel_count} from a craton xarray DataArray.  Only counts pixels > 0."""
     if craton_raster is None:

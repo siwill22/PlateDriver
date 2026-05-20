@@ -33,7 +33,7 @@ cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlant
 
 reconstruction_time = 0
 delta_time = 1.
-total_time = 100.
+total_time = 20.
 forces = {'slab_pull': 8, 'slab_suction': 8, 'ridge_push': 3, 'continental_collision': 8}
 
 params = {
@@ -56,13 +56,16 @@ params = {
     'eq_ridge_prob':               0.15,      # fraction of ridge candidates accepted (controls density)
     'eq_subduction_prob':          1.0,      # fraction of subduction candidates accepted
     'topo_continental_base_m':     400,      # background continental elevation (m)
-    'topo_noise_fraction':         0.15,      # noise amplitude as fraction of local elevation
+    'topo_noise_fraction':         0.3,      # noise amplitude as fraction of local elevation
     'topo_spectral_beta':          2.0,      # SH power-law exponent (2 = brown / realistic terrain)
     'topo_andean_max_dist_deg':    11.0,      # cutoff distance from trench for Andean mountains
     'topo_andean_arc_dist_deg':    4.5,      # distance of arc-peak from trench (degrees)
     'topo_andean_peak_m':         3000,      # peak Andean elevation (m)
     'topo_himalayan_max_dist_deg': 8.0,      # half-width of Himalayan collision zone (degrees)
     'topo_himalayan_peak_m':      5000,      # peak Himalayan elevation (m)
+    'n_hotspots':                   20,      # number of randomly placed hot spot sources
+    'hotspot_prob':                0.3,      # probability of eruption per hot spot per timestep
+    # To use fixed locations instead: set hotspot_locations = [(lon, lat), ...]
 }
 
 
@@ -104,6 +107,10 @@ tracers = sdp.generate_seafloor_age_tracers(
     spreading_rate_km_per_myr=params['spreading_rate_km_per_myr'],
     div_threshold=params['div_threshold_ridge'])
 
+hotspot_locs = sdp.generate_hotspot_locations(n=params['n_hotspots'])
+seamounts = gpd.GeoDataFrame(columns=['geometry', 'hotspot_id', 'age', 'active'],
+                             geometry='geometry').set_crs(epsg=4326)
+
 for i in range(1, int(total_time / delta_time) + 1):
     t = i * delta_time
 
@@ -143,6 +150,17 @@ for i in range(1, int(total_time / delta_time) + 1):
                                   div_threshold=params['div_threshold_subduction'])
     tracers = sdp.deactivate_subducted_tracers(tracers, boundaries_gdf,
                                                threshold=params['div_threshold_subduction'])
+
+    seamounts = sdp.advect_tracers(seamounts, rasters['plate_id'], stage_pole_dict, delta_time,
+                                   boundaries_gdf=boundaries_gdf,
+                                   div_threshold=params['div_threshold_subduction'])
+    seamounts = sdp.deactivate_subducted_tracers(seamounts, boundaries_gdf,
+                                                  threshold=params['div_threshold_subduction'])
+    new_seamounts = sdp.seed_hotspot_seamounts(hotspot_locs, prob=params['hotspot_prob'])
+    if len(new_seamounts):
+        seamounts = gpd.GeoDataFrame(
+            pd.concat([seamounts, new_seamounts], ignore_index=True),
+            geometry='geometry').set_crs(epsg=4326)
 
     fig = pygmt.Figure()
     fig.basemap(frame='f', projection='W10i', region='d')
@@ -271,3 +289,10 @@ for i in range(1, int(total_time / delta_time) + 1):
             topo_bathy.to_netcdf('./output/topo_bathy_{:04d}.nc'.format(i))
 
 sdp.write_rotation_file(rotation_records, './output/synthetic_rotations.rot')
+
+active_seamounts = seamounts[seamounts.active.astype(bool)]
+if len(active_seamounts):
+    active_seamounts[['hotspot_id', 'age']].assign(
+        lon=active_seamounts.geometry.x,
+        lat=active_seamounts.geometry.y,
+    ).to_csv('./output/hotspot_seamounts_final.csv', index=False)
