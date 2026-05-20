@@ -1,3 +1,4 @@
+import time
 import pygplates
 from gprm.utils.create_gpml import gpml2gdf, gdf2gpml
 from gprm.utils.proximity import rasterize_polygons
@@ -477,67 +478,54 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     div_thresh_ridge          = params.get('div_threshold_ridge',        1.0)
     boundary_search_radius    = params.get('boundary_search_radius_deg', 2)
 
+    _ct = {}
+    _t0 = time.perf_counter()
+
     new_features = tessellate_polygons(rpolygons, max_dist_deg=tessellation_deg)
+    _ct['tessellate'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     rp_gdf = plate_polygons_to_wrapped_gdf(new_features)
+    _ct['wrap_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     clipped_polygons = resolve_overlaps(rp_gdf, priority_col='PLATEID1')
     clipped_polygons = clipped_polygons.explode(index_parts=False).reset_index(drop=True)
-    
+    _ct['resolve_overlaps'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
     plate_id_raster = update_plate_id_raster(clipped_polygons, raster_spacing=raster_spacing)
-    
-    #import matplotlib.pyplot as plt
-    #fig,ax = plt.subplots()
-    #plate_id_raster.plot(ax=ax)
-    #clipped_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
-    #fig.savefig('./output/plate_id_raster_1{:d}.png'.format(np.random.randint(0,100000)))
+    _ct['plate_id_raster'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     # Force values within cratons to overrule any plate polygon changes
-    # (from a geological perspective, cratons will overide subduction zones).
     if cratons is not None:
         wrapped_cratons = plate_polygons_to_wrapped_gdf(cratons)
         valid_cratons = wrapped_cratons.dropna(subset=['geometry'])
         valid_cratons = valid_cratons[~valid_cratons.geometry.is_empty]
         craton_raster = rasterize_polygons(valid_cratons, zval_field='PLATEID1', sampling=raster_spacing)
         plate_id_raster = craton_raster.where(craton_raster>0, plate_id_raster)
-
-        #fig,ax = plt.subplots()
-        #craton_raster.plot(ax=ax)
-        ##new_plate_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
-        #fig.savefig('./output/craton_raster_{:d}.png'.format(np.random.randint(0,100000)))
-
     else:
         craton_raster = None
+    _ct['craton_raster'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    
     new_plate_polygons = update_plate_polygons(plate_id_raster,
                                                raster_spacing=raster_spacing,
                                                topo_simplify=topo_simplify)
     new_plate_polygons = new_plate_polygons.explode(index_parts=False).reset_index(drop=True)
     new_plate_polygons = new_plate_polygons[new_plate_polygons.geometry.geom_type.isin(['Polygon'])]
-    #print(new_plate_polygons)
+    _ct['update_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    #import matplotlib.pyplot as plt
-    #fig,ax = plt.subplots()
-    #plate_id_raster.plot(ax=ax)
-    #new_plate_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
-    #fig.savefig('./output/plate_id_raster_2{:d}.png'.format(np.random.randint(0,100000)))
-
-    # Handle polygon splitting
-    # TODO make sure that polygon splits retain consistency with craton polygons
     new_plate_polygons = resolve_duplicate_plateids(new_plate_polygons, next_plateid=None)
-
-    # Handle reduction in forces for plates with continents?
-    # BUT we should do that in 'polygons_to_stage_poles'?
+    _ct['resolve_duplicates'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons)
+    _ct['topo_boundaries'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
     boundaries_gdf = compute_boundary_divergence(boundaries_gdf, stage_pole_dict, delta_time, plate_id_raster,
                                                  plate_polygons_gdf=new_plate_polygons)
+    _ct['boundary_divergence'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time,
                                                              raster_spacing=raster_spacing)
-    # Visualisation only — Cartesian approximation, not used for boundary classification
     div = mpcalc.divergence(velocity_grid_east, velocity_grid_north)
+    _ct['velocity_grid'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, plate_id_raster, forces,
                                               craton_raster,
@@ -547,6 +535,12 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                               divergence_threshold_for_ridge_push=div_thresh_ridge,
                                               boundary_search_radius_deg=boundary_search_radius,
                                               polarity_dict=polarity_dict)
+    _ct['stage_poles'] = time.perf_counter() - _t0
+
+    _ct_total = sum(_ct.values())
+    print('  [compute_timestep {:.1f}s]'.format(_ct_total),
+          '  '.join('{}: {:.1f}s ({:.0f}%)'.format(k, v, 100*v/_ct_total)
+                    for k, v in sorted(_ct.items(), key=lambda x: -x[1])))
     #
     #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
     #print([(key,item) for key,item in stage_pole_dict.items()])

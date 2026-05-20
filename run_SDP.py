@@ -1,3 +1,4 @@
+import time
 import pygplates
 import numpy as np
 import pandas as pd
@@ -33,7 +34,7 @@ cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlant
 
 reconstruction_time = 0
 delta_time = 1.
-total_time = 20.
+total_time = 60.
 forces = {'slab_pull': 8, 'slab_suction': 8, 'ridge_push': 3, 'continental_collision': 8}
 
 params = {
@@ -115,13 +116,14 @@ for i in range(1, int(total_time / delta_time) + 1):
     t = i * delta_time
 
     print('t = {:.1f} Myr (step {})'.format(t, i))
-    
-    rpolygons = sdp.nudge_polygons(
-        new_plate_polygons.explode(index_parts=False).reset_index(drop=True), 
-        stage_pole_dict)
-    
-    cratons = sdp.nudge_polygons(cratons, stage_pole_dict)
+    _step_times = {}
+    _t0 = time.perf_counter()
 
+    rpolygons = sdp.nudge_polygons(
+        new_plate_polygons.explode(index_parts=False).reset_index(drop=True),
+        stage_pole_dict)
+    cratons = sdp.nudge_polygons(cratons, stage_pole_dict)
+    _step_times['nudge_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     (new_plate_polygons,
      stage_pole_dict,
@@ -129,7 +131,8 @@ for i in range(1, int(total_time / delta_time) + 1):
      boundaries_gdf) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
                                              cratons=cratons, params=params,
                                              polarity_dict=polarity_dict)
-    
+    _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
     for key,item in stage_pole_dict.items():
         print(key,item.get_lat_lon_euler_pole_and_angle_degrees())
 
@@ -139,6 +142,7 @@ for i in range(1, int(total_time / delta_time) + 1):
         prev = cumulative_rotation_dict.get(pid, pygplates.FiniteRotation())
         cumulative_rotation_dict[pid] = stage_rot * prev
         rotation_records.append((t_record, pid, cumulative_rotation_dict[pid]))
+    _step_times['rotations'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     new_tracers = sdp.seed_ridge_tracers(boundaries_gdf,
                                          spacing_deg=params['tracer_spacing_deg'],
@@ -150,6 +154,7 @@ for i in range(1, int(total_time / delta_time) + 1):
                                   div_threshold=params['div_threshold_subduction'])
     tracers = sdp.deactivate_subducted_tracers(tracers, boundaries_gdf,
                                                threshold=params['div_threshold_subduction'])
+    _step_times['tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     seamounts = sdp.advect_tracers(seamounts, rasters['plate_id'], stage_pole_dict, delta_time,
                                    boundaries_gdf=boundaries_gdf,
@@ -161,6 +166,7 @@ for i in range(1, int(total_time / delta_time) + 1):
         seamounts = gpd.GeoDataFrame(
             pd.concat([seamounts, new_seamounts], ignore_index=True),
             geometry='geometry').set_crs(epsg=4326)
+    _step_times['seamounts'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     fig = pygmt.Figure()
     fig.basemap(frame='f', projection='W10i', region='d')
@@ -203,6 +209,7 @@ for i in range(1, int(total_time / delta_time) + 1):
                  style='c0.08c', fill=active_tracers.age.values.astype(float),
                  cmap=True, pen='0.1p,black')
     fig.savefig('./output/test_plot_{:04d}.png'.format(i))
+    _step_times['plot'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     if i % params['csv_save_interval'] == 0:
         active_tracers[['geometry', 'age']].assign(
@@ -287,6 +294,12 @@ for i in range(1, int(total_time / delta_time) + 1):
         if age_grid is not None:
             topo_bathy = sdp.generate_topo_bathy_grid(age_grid, topography_raster=topo)
             topo_bathy.to_netcdf('./output/topo_bathy_{:04d}.nc'.format(i))
+        _step_times['save_outputs'] = time.perf_counter() - _t0
+
+    total = sum(_step_times.values())
+    print('  --- step timing (step {:d}, {:.1f}s total) ---'.format(i, total))
+    for _name, _dt in sorted(_step_times.items(), key=lambda x: -x[1]):
+        print('  {:20s}  {:5.1f}s  ({:4.1f}%)'.format(_name, _dt, 100 * _dt / total))
 
 sdp.write_rotation_file(rotation_records, './output/synthetic_rotations.rot')
 
