@@ -965,16 +965,17 @@ def generate_synthetic_earthquakes(boundaries_gdf, polarity_dict=None, plate_pol
                 'geometry':       Point(lon_c, lat_c),
                 'depth_km':       round(float(np.random.uniform(0.0, ridge_max_depth_km)), 1),
                 'boundary_type':  'ridge',
-                'plateid1':       int(seg_row.get('plateid1_poly1', 0) or 0),
-                'plateid2':       int(seg_row.get('plateid1_poly2', 0) or 0),
+                'plateid1':       int(v) if pd.notna(v := seg_row.get('plateid1_poly1', 0)) else 0,
+                'plateid2':       int(v) if pd.notna(v := seg_row.get('plateid1_poly2', 0)) else 0,
                 'downgoing_plate':  0,
                 'overriding_plate': 0,
             })
 
         elif div < div_threshold_subduction:
             # Subduction: overriding-plate side only, depth from slab dip
-            p1 = int(seg_row.get('plateid1_poly1', 0) or 0)
-            p2 = int(seg_row.get('plateid1_poly2', 0) or 0)
+            _r1, _r2 = seg_row.get('plateid1_poly1', 0), seg_row.get('plateid1_poly2', 0)
+            p1 = int(_r1) if pd.notna(_r1) else 0
+            p2 = int(_r2) if pd.notna(_r2) else 0
             if p1 == 0 or p2 == 0:
                 continue
 
@@ -1106,8 +1107,9 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
             row = boundaries_gdf.iloc[iloc_i]
             if row.get('divergence', 0.0) >= div_threshold_subduction:
                 continue
-            p1 = int(row.get('plateid1_poly1', 0) or 0)
-            p2 = int(row.get('plateid1_poly2', 0) or 0)
+            _r1, _r2 = row.get('plateid1_poly1', 0), row.get('plateid1_poly2', 0)
+            p1 = int(_r1) if pd.notna(_r1) else 0
+            p2 = int(_r2) if pd.notna(_r2) else 0
             if p1 == 0 or p2 == 0:
                 continue
 

@@ -55,14 +55,14 @@ params = {
     'eq_slab_max_depth_km':        650.0,    # maximum slab depth (km)
     'eq_ridge_prob':               0.15,      # fraction of ridge candidates accepted (controls density)
     'eq_subduction_prob':          1.0,      # fraction of subduction candidates accepted
-    'topo_continental_base_m':     900,      # background continental elevation (m)
+    'topo_continental_base_m':     400,      # background continental elevation (m)
     'topo_noise_fraction':         0.15,      # noise amplitude as fraction of local elevation
     'topo_spectral_beta':          2.0,      # SH power-law exponent (2 = brown / realistic terrain)
     'topo_andean_max_dist_deg':    11.0,      # cutoff distance from trench for Andean mountains
     'topo_andean_arc_dist_deg':    4.5,      # distance of arc-peak from trench (degrees)
-    'topo_andean_peak_m':         5000,      # peak Andean elevation (m)
+    'topo_andean_peak_m':         3000,      # peak Andean elevation (m)
     'topo_himalayan_max_dist_deg': 8.0,      # half-width of Himalayan collision zone (degrees)
-    'topo_himalayan_peak_m':      7000,      # peak Himalayan elevation (m)
+    'topo_himalayan_peak_m':      5000,      # peak Himalayan elevation (m)
 }
 
 
@@ -222,7 +222,8 @@ for i in range(1, int(total_time / delta_time) + 1):
             downgoing, overriding = [], []
             for _, br in bdf.iterrows():
                 if br['boundary_type'] == 'subduction':
-                    p1, p2 = int(br['plateid1_poly1'] or 0), int(br['plateid1_poly2'] or 0)
+                    p1 = int(br['plateid1_poly1']) if pd.notna(br['plateid1_poly1']) else 0
+                    p2 = int(br['plateid1_poly2']) if pd.notna(br['plateid1_poly2']) else 0
                     dg = sdp.resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)
                     ov = p2 if dg == p1 else p1
                 else:
