@@ -129,7 +129,8 @@ def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1):
     topo = tp.Topology(new_plate_polygons, prequantize=False)
     new_plate_polygons_smooth = topo.toposimplify(topo_simplify).to_gdf()
 
-    # Clip the GeoDataFrame
+    # Fix any invalid geometries produced by toposimplify before clipping
+    new_plate_polygons_smooth.geometry = new_plate_polygons_smooth.geometry.make_valid()
     new_plate_polygons_smooth = new_plate_polygons_smooth.clip(box(-180, -90, 180, 90))
 
     new_plate_polygons_smooth = new_plate_polygons_smooth.rename(columns={'DN':'PLATEID1'})
@@ -695,6 +696,9 @@ def advect_tracers(tracers, plate_id_raster, stage_pole_dict, delta_time=1,
     this step (raster plate_id changes from old to new for a convergent pair) are
     immediately deactivated.  This catches the case where a tracer slips into the
     overriding plate's raster territory before the BallTree proximity check fires.
+
+    Vectorised: raster lookups are done as single numpy index arrays; rotations are
+    grouped per plate so pygplates is called once per plate, not once per tracer.
     """
     if tracers is None or len(tracers) == 0:
         return tracers
@@ -709,28 +713,59 @@ def advect_tracers(tracers, plate_id_raster, stage_pole_dict, delta_time=1,
         for _, brow in conv.iterrows():
             p1 = brow.get('plateid1_poly1', 0)
             p2 = brow.get('plateid1_poly2', 0)
-            if p1 and p2 and p1 != 0 and p2 != 0:
-                convergent_pairs.add(frozenset([p1, p2]))
+            if pd.notna(p1) and pd.notna(p2) and p1 != 0 and p2 != 0:
+                convergent_pairs.add(frozenset([int(p1), int(p2)]))
 
-    rows = []
-    for _, row in active.iterrows():
-        lon, lat = row.geometry.x, row.geometry.y
-        old_pid = int(plate_id_raster.sel(lon=lon, lat=lat, method='nearest').item())
-        rotation = stage_pole_dict.get(old_pid, pygplates.FiniteRotation())
-        pt = rotation * pygplates.PointOnSphere(lat, lon)
-        new_lat, new_lon = pt.to_lat_lon()
-        r = row.to_dict()
-        r['geometry'] = Point(new_lon, new_lat)
-        r['age'] = row.age + delta_time
-        # Deactivate if the tracer crossed a convergent plate boundary this step
-        if convergent_pairs and old_pid > 0:
-            new_pid = int(plate_id_raster.sel(lon=new_lon, lat=new_lat, method='nearest').item())
-            if new_pid != old_pid and new_pid > 0 and frozenset([old_pid, new_pid]) in convergent_pairs:
-                r['active'] = False
-        rows.append(r)
-    if not rows:
-        return tracers
-    updated = gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
+    lons = active.geometry.x.values.copy()
+    lats = active.geometry.y.values.copy()
+    ages = active.age.values.copy().astype(float) + delta_time
+    active_flags = active.active.values.copy().astype(bool)
+
+    # Vectorised nearest-neighbour raster lookup using searchsorted
+    # Coordinate names may be 'x'/'y' or 'lon'/'lat' depending on caller
+    rast_lons = (plate_id_raster.lon if 'lon' in plate_id_raster.coords
+                 else plate_id_raster.x).values
+    rast_lats = (plate_id_raster.lat if 'lat' in plate_id_raster.coords
+                 else plate_id_raster.y).values
+    rast_vals = plate_id_raster.values          # (nlat, nlon)
+    nlon, nlat = len(rast_lons), len(rast_lats)
+
+    def _raster_pids(lo_arr, la_arr):
+        ci = np.clip(np.searchsorted(rast_lons, lo_arr), 0, nlon - 1)
+        ri = np.clip(np.searchsorted(rast_lats, la_arr), 0, nlat - 1)
+        return rast_vals[ri, ci]
+
+    old_pids = _raster_pids(lons, lats)
+
+    new_lons = lons.copy()
+    new_lats = lats.copy()
+
+    # Group by plate — one pygplates call per unique plate ID
+    for pid_val in np.unique(old_pids):
+        if np.isnan(pid_val):
+            continue
+        pid_int = int(pid_val)
+        rotation = stage_pole_dict.get(pid_int, pygplates.FiniteRotation())
+        if rotation.represents_identity_rotation():
+            continue
+        mask = old_pids == pid_val
+        idxs = np.where(mask)[0]
+        for k in idxs:
+            pt = rotation * pygplates.PointOnSphere(float(lats[k]), float(lons[k]))
+            new_lats[k], new_lons[k] = pt.to_lat_lon()
+
+    # Vectorised convergent-crossing check
+    if convergent_pairs:
+        new_pids = _raster_pids(new_lons, new_lats)
+        moved = (new_pids != old_pids) & (old_pids > 0) & (new_pids > 0)
+        for k in np.where(moved)[0]:
+            if frozenset([int(old_pids[k]), int(new_pids[k])]) in convergent_pairs:
+                active_flags[k] = False
+
+    updated = active.copy()
+    updated['geometry'] = gpd.points_from_xy(new_lons, new_lats)
+    updated['age'] = ages
+    updated['active'] = active_flags
     return pd.concat([updated, inactive], ignore_index=True)
 
 

@@ -27,18 +27,18 @@ reconstruction_model = ReconstructionModel('')
 #cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlantis4_cratons.geojson')
 
 reconstruction_model.add_rotation_model('/Users/simon/GIT/octopus/Atlantis3/atlantis3_rotations.rot')
-reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis6_topologies.gpml')
-reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis6_topological_polygons.gpml')
-cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlantis6_cratons.geojson')
+reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis66_topologies.gpml')
+reconstruction_model.add_dynamic_polygons('/Users/simon/GIT/octopus/Atlantis3/atlantis66_topological_polygons.gpml')
+cratons = pygplates.FeatureCollection('/Users/simon/GIT/octopus/Atlantis3/atlantis66_cratons.geojson')
 
 
 reconstruction_time = 0
 delta_time = 1.
 total_time = 60.
-forces = {'slab_pull': 8, 'slab_suction': 8, 'ridge_push': 3, 'continental_collision': 8}
+forces = {'slab_pull': 6, 'slab_suction': 6, 'ridge_push': 3, 'continental_collision': 18}
 
 params = {
-    'raster_spacing':              0.5,        # degrees; controls velocity grid resolution and polygon transform
+    'raster_spacing':              0.25,        # degrees; controls velocity grid resolution and polygon transform
     'tessellation_deg':            0.2,      # polygon edge densification before rasterising
     'topo_simplify_tolerance':     0.5,        # polygon smoothing tolerance after polygonise
     'boundary_search_radius_deg':  2,        # plate ID neighbour search radius at boundaries
@@ -46,10 +46,10 @@ params = {
     'div_threshold_ridge':         0.2,   # cm/yr relative normal velocity above this → ridge
     'tracer_spacing_deg':          1.0,      # seed point spacing along ridge boundaries
     'tracer_offset_deg':           0.6,      # perpendicular offset from ridge axis at seeding
-    'seafloor_spacing_deg':        2.0,      # grid spacing for initial seafloor age tracers
+    'seafloor_spacing_deg':        1.0,      # grid spacing for initial seafloor age tracers
     'spreading_rate_km_per_myr':   50.0,     # assumed spreading rate for age estimation
     'csv_save_interval':           5,       # save active-tracer CSV every N timesteps
-    'plot_interval':               5,       # make plots every N timesteps; None = no plots
+    'plot_interval':               1,       # make plots every N timesteps; None = no plots
     'eq_n_candidates':             100000,   # random sphere points sampled for earthquake generation
     'eq_ridge_max_dist_deg':       1.0,      # max distance from ridge axis for ridge earthquakes
     'eq_ridge_max_depth_km':       50.0,     # max depth for ridge earthquakes (km)
@@ -65,8 +65,8 @@ params = {
     'topo_andean_peak_m':         3000,      # peak Andean elevation (m)
     'topo_himalayan_max_dist_deg': 8.0,      # half-width of Himalayan collision zone (degrees)
     'topo_himalayan_peak_m':      5000,      # peak Himalayan elevation (m)
-    'n_hotspots':                   20,      # number of randomly placed hot spot sources
-    'hotspot_prob':                0.3,      # probability of eruption per hot spot per timestep
+    'n_hotspots':                   30,      # number of randomly placed hot spot sources
+    'hotspot_prob':                1.0,      # probability of eruption per hot spot per timestep
     # To use fixed locations instead: set hotspot_locations = [(lon, lat), ...]
 }
 
@@ -176,6 +176,12 @@ for i in range(1, int(total_time / delta_time) + 1):
         _tp0 = time.perf_counter()
         fig = pygmt.Figure()
         fig.basemap(frame='f', projection='W10i', region='d')
+        if len(active_tracers):
+            vmax = 100
+            pygmt.makecpt(cmap='cubhelix', series=[0, vmax], reverse=True)
+            fig.plot(x=active_tracers.geometry.x.values, y=active_tracers.geometry.y.values,
+                     style='c0.08c', fill=active_tracers.age.values.astype(float),
+                     cmap=True, pen='0.1p,black')
         pygmt.makecpt(cmap='polar', series=[-0.001,0.001], background='o')
         fig.plot(data=new_plate_polygons.iloc[:], pen='1p,black', transparency=50)
         # Overlay per-segment boundary type: red=ridge, blue=subduction, black=conservative
@@ -193,7 +199,7 @@ for i in range(1, int(total_time / delta_time) + 1):
             if len(sub_bounds):
                 fig.plot(data=sub_bounds, pen='2p,blue')
         glon, glat = np.meshgrid(rasters.lon, rasters.lat)
-        stride = 5
+        stride = 10
         magnitude = np.sqrt(rasters['velocity_east'].data[::stride,::stride].flatten()**2 + rasters['velocity_north'].data[::stride,::stride].flatten()**2)
         azimuth = np.degrees(np.arctan2(rasters['velocity_east'].data[::stride,::stride].flatten(), rasters['velocity_north'].data[::stride,::stride].flatten())) % 360
         fig.plot(data={'x': glon[::stride,::stride].flatten(),
@@ -205,12 +211,6 @@ for i in range(1, int(total_time / delta_time) + 1):
         label_pts = new_plate_polygons.representative_point()
         fig.text(x=label_pts.x, y=label_pts.y,
                  text=new_plate_polygons['PLATEID1'], font='10p,Helvetica-Bold,black', justify='CM')
-        if len(active_tracers):
-            vmax = 100
-            pygmt.makecpt(cmap='cubhelix', series=[0, vmax], reverse=True)
-            fig.plot(x=active_tracers.geometry.x.values, y=active_tracers.geometry.y.values,
-                     style='c0.08c', fill=active_tracers.age.values.astype(float),
-                     cmap=True, pen='0.1p,black')
         fig.savefig('./output/test_plot_{:04d}.png'.format(i))
         _step_times['plot'] = time.perf_counter() - _tp0
     _t0 = time.perf_counter()
@@ -298,6 +298,14 @@ for i in range(1, int(total_time / delta_time) + 1):
         if age_grid is not None:
             topo_bathy = sdp.generate_topo_bathy_grid(age_grid, topography_raster=topo)
             topo_bathy.to_netcdf('./output/topo_bathy_{:04d}.nc'.format(i))
+
+        sdp.write_rotation_file(rotation_records, './output/synthetic_rotations_{:04d}.rot'.format(i))
+
+        _active_seamounts = seamounts[seamounts.active.astype(bool)]
+        if len(_active_seamounts):
+            _active_seamounts[['geometry', 'hotspot_id', 'age']].to_file(
+                './output/hotspot_seamounts_{:04d}.geojson'.format(i), driver='GeoJSON')
+
         _step_times['save_outputs'] = time.perf_counter() - _t0
 
     total = sum(_step_times.values())
@@ -305,11 +313,7 @@ for i in range(1, int(total_time / delta_time) + 1):
     for _name, _dt in sorted(_step_times.items(), key=lambda x: -x[1]):
         print('  {:20s}  {:5.1f}s  ({:4.1f}%)'.format(_name, _dt, 100 * _dt / total))
 
-sdp.write_rotation_file(rotation_records, './output/synthetic_rotations.rot')
-
 active_seamounts = seamounts[seamounts.active.astype(bool)]
 if len(active_seamounts):
-    active_seamounts[['hotspot_id', 'age']].assign(
-        lon=active_seamounts.geometry.x,
-        lat=active_seamounts.geometry.y,
-    ).to_csv('./output/hotspot_seamounts_final.csv', index=False)
+    active_seamounts[['geometry', 'hotspot_id', 'age']].to_file(
+        './output/hotspot_seamounts_final.geojson', driver='GeoJSON')
