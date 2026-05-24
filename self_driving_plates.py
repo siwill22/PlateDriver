@@ -1126,7 +1126,8 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
                                andean_peak_m=5000,
                                himalayan_max_dist_deg=4.0,
                                himalayan_peak_m=8000,
-                               div_threshold_subduction=-0.0001):
+                               div_threshold_subduction=-0.0001,
+                               coastal_margin_deg=2.0):
     """Generate a synthetic elevation raster from tectonic setting.
 
     Continental pixels (craton_raster > 0) receive:
@@ -1268,6 +1269,16 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
 
     elev[is_craton] += noise[is_craton] * elev[is_craton] * noise_fraction
     elev[is_craton]  = np.maximum(elev[is_craton], 100.0)
+
+    # --- Coastal taper: smooth elevation to zero within coastal_margin_deg of the
+    #     craton edge, eliminating the cliff where continent meets ocean.
+    #     distance_transform_edt gives the Euclidean distance (in pixels) to the
+    #     nearest non-craton pixel; multiply by raster_spacing to get degrees.
+    from scipy.ndimage import distance_transform_edt
+    dist_deg = distance_transform_edt(is_craton) * raster_spacing
+    t = np.clip(dist_deg / coastal_margin_deg, 0.0, 1.0)
+    taper = t * t * (3.0 - 2.0 * t)   # smoothstep: 0 at coast, 1 inland
+    elev *= taper                       # ocean pixels are already 0; no-op there
 
     return xr.DataArray(elev, dims=['lat', 'lon'],
                         coords={'lat': lats, 'lon': lons},
