@@ -40,7 +40,7 @@ forces = {'slab_pull': 6, 'slab_suction': 6, 'ridge_push': 3, 'continental_colli
 params = {
     'raster_spacing':              0.25,        # degrees; controls velocity grid resolution and polygon transform
     'tessellation_deg':            0.2,      # polygon edge densification before rasterising
-    'topo_simplify_tolerance':     0.5,        # polygon smoothing tolerance after polygonise
+    'topo_simplify_tolerance':     0.4,        # polygon smoothing tolerance after polygonise
     'boundary_search_radius_deg':  2,        # plate ID neighbour search radius at boundaries
     'div_threshold_subduction':   -0.0001,   # cm/yr relative normal velocity below this → subduction
     'div_threshold_ridge':         0.2,   # cm/yr relative normal velocity above this → ridge
