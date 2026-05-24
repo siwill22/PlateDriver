@@ -49,7 +49,7 @@ DEFAULT_TRENCH_FILE      = './output/trench_0060.nc'
 DEFAULT_OUTPUT_FILE      = './output/blended_0060.nc'
 
 DEFAULT_ELEV_THRESHOLD_M = -1500.0   # pixels above this → "land/shallow" mask
-DEFAULT_BUFFER_DEG       =    2.0    # width of NaN transition band (degrees)
+DEFAULT_BUFFER_DEG       =    4.0    # width of NaN transition band (degrees)
 DEFAULT_FILL_SIGMA_DEG   =    3.0    # Gaussian fill kernel radius (degrees)
 DEFAULT_OUTPUT_SPACING   =   None    # output grid spacing in degrees; None = use topo grid
 
