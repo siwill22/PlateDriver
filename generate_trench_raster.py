@@ -88,10 +88,10 @@ def _collect_subduction_points(features, div_threshold=-0.0001,
 # ---------------------------------------------------------------------------
 
 def generate_trench_raster(boundaries_file,
-                            spacing=0.5,
-                            peak_depth_m=6000.0,
+                            spacing=0.1,
+                            peak_depth_m=2000.0,
                             sigma_deg=1.5,
-                            max_dist_deg=6.0,
+                            max_dist_deg=4.0,
                             div_threshold=-0.0001,
                             tessellation_deg=0.2):
     """Generate a trench-depth anomaly raster from a boundary GeoJSON.
@@ -182,14 +182,14 @@ def main():
                         help='Path to boundaries_NNNN.geojson')
     parser.add_argument('--output', '-o', default=None,
                         help='Output NetCDF path (default: trench_NNNN.nc alongside input)')
-    parser.add_argument('--spacing', type=float, default=0.5,
-                        help='Raster spacing in degrees (default: 0.5)')
-    parser.add_argument('--peak-depth', type=float, default=6000.0,
-                        help='Trench depth at the subduction line in metres (default: 6000)')
+    parser.add_argument('--spacing', type=float, default=0.1,
+                        help='Raster spacing in degrees (default: 0.1)')
+    parser.add_argument('--peak-depth', type=float, default=2000.0,
+                        help='Trench depth at the subduction line in metres (default: 2000)')
     parser.add_argument('--sigma', type=float, default=1.5,
                         help='Gaussian half-width in degrees (default: 1.5 ≈ 165 km)')
-    parser.add_argument('--max-dist', type=float, default=6.0,
-                        help='Maximum distance from trench to compute, degrees (default: 6)')
+    parser.add_argument('--max-dist', type=float, default=4.0,
+                        help='Maximum distance from trench to compute, degrees (default: 4)')
     parser.add_argument('--div-threshold', type=float, default=-0.0001,
                         help='Fallback divergence threshold for subduction (default: -0.0001)')
     args = parser.parse_args()
