@@ -1,3 +1,4 @@
+import time
 import pygplates
 from gprm.utils.create_gpml import gpml2gdf, gdf2gpml
 from gprm.utils.proximity import rasterize_polygons
@@ -8,7 +9,7 @@ import pandas as pd
 import xarray as xr
 import geopandas as gpd
 from shapely.ops import unary_union
-from shapely.geometry import box
+from shapely.geometry import box, LineString
 import pygmt
 import metpy.calc as mpcalc
 
@@ -108,7 +109,9 @@ def resolve_overlaps(gdf, priority_col):
 
 
 def update_plate_id_raster(clipped_polygons, raster_spacing=1):
-    plate_id_raster = rasterize_polygons(clipped_polygons, zval_field='PLATEID1', sampling=raster_spacing)
+    valid = clipped_polygons.dropna(subset=['geometry'])
+    valid = valid[~valid.geometry.is_empty]
+    plate_id_raster = rasterize_polygons(valid, zval_field='PLATEID1', sampling=raster_spacing)
     plate_id_raster = plate_id_raster.where(plate_id_raster>0, np.nan)
 
     plate_id_raster = fill_nan_spherical(plate_id_raster)
@@ -126,7 +129,8 @@ def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1):
     topo = tp.Topology(new_plate_polygons, prequantize=False)
     new_plate_polygons_smooth = topo.toposimplify(topo_simplify).to_gdf()
 
-    # Clip the GeoDataFrame
+    # Fix any invalid geometries produced by toposimplify before clipping
+    new_plate_polygons_smooth.geometry = new_plate_polygons_smooth.geometry.make_valid()
     new_plate_polygons_smooth = new_plate_polygons_smooth.clip(box(-180, -90, 180, 90))
 
     new_plate_polygons_smooth = new_plate_polygons_smooth.rename(columns={'DN':'PLATEID1'})
@@ -136,59 +140,158 @@ def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1):
 
 def velocity_grid(plate_id_raster, plate_parameters, delta_time=1, raster_spacing=1):
     '''
-    Given a raster defining the plateids around the margins of a deformation zone, extract rigid plate 
-    velocities at these points
+    Given a raster defining the plateids around the margins of a deformation zone, extract rigid plate
+    velocities at these points.
+
+    Grouped per plate: one pygplates call per unique plate ID instead of one per pixel,
+    reducing ~259,200 calls to ~15-20.
     '''
-    
-    velocity_type = 'MagAzim'
+    lons = plate_id_raster.x.values   # (nlon,)
+    lats = plate_id_raster.y.values   # (nlat,)
+    pids = plate_id_raster.values     # (nlat, nlon)
 
-    # We decide to isolate points from the grid where the 
-    velpts = pygmt.grd2xyz(plate_id_raster, skiprows=True)
-    velpts = velpts.rename(columns={velpts.columns[2]:'pid'})
+    nlat, nlon = pids.shape
+    vel_east  = np.zeros((nlat, nlon), dtype=float)
+    vel_north = np.zeros((nlat, nlon), dtype=float)
 
-    # All domain points and associated (magnitude, azimuth, inclination) velocities for the current time.
-    all_domain_points = []
-    all_velocities = []
-    plate_ids = []
+    lon2d, lat2d = np.meshgrid(lons, lats)   # (nlat, nlon)
 
-    for i,velocity_point in velpts.iterrows():
-        velocity_domain_point = pygplates.PointOnSphere(velocity_point.y, velocity_point.x)
+    for pid_val in np.unique(pids):
+        if np.isnan(pid_val):
+            continue
+        pid_int  = int(pid_val)
+        rotation = plate_parameters.get(pid_int, pygplates.FiniteRotation())
 
-        # Get the stage rotation of partitioning plate from 'time + delta_time' to 'time'.
-        equivalent_stage_rotation = plate_parameters.get(int(velocity_point.pid), pygplates.FiniteRotation())
+        rows, cols = np.where(pids == pid_val)
+        lats_m = lat2d[rows, cols]
+        lons_m = lon2d[rows, cols]
 
-        # Calculate velocity at the velocity domain point.
-        # This is from 'time + delta_time' to 'time' on the partitioning plate.
-        velocity_vectors = pygplates.calculate_velocities(
-            [velocity_domain_point],
-            equivalent_stage_rotation,
-            delta_time)
+        pts = [pygplates.PointOnSphere(float(la), float(lo))
+               for la, lo in zip(lats_m, lons_m)]
 
-        # Convert global 3D velocity vectors to local (magnitude, azimuth, inclination) tuples (one tuple per point).
-        velocities = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down(
-                                [velocity_domain_point],
-                                velocity_vectors)
-        all_velocities.append(velocities[0])
+        vecs = pygplates.calculate_velocities(pts, rotation, delta_time)
+        ned  = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down(pts, vecs)
 
-    vel_east=[]
-    vel_north=[]
-    for velocity_vector in all_velocities:
-        vel_east.append(velocity_vector.get_y())
-        vel_north.append(velocity_vector.get_x())
-        
-    velpts['vel_east'] = vel_east
-    velpts['vel_north'] = vel_north
-    
-    velocity_grid_east = pygmt.xyz2grd(x=velpts.x, y=velpts.y, z=velpts.vel_east, region='d', spacing=raster_spacing)
-    velocity_grid_north = pygmt.xyz2grd(x=velpts.x, y=velpts.y, z=velpts.vel_north, region='d', spacing=raster_spacing)
-    
-    return velocity_grid_east, velocity_grid_north
+        for k, nv in enumerate(ned):
+            vel_east[rows[k], cols[k]]  = nv.get_y()
+            vel_north[rows[k], cols[k]] = nv.get_x()
+
+    coords = {'y': lats, 'x': lons}
+    da_east  = xr.DataArray(vel_east,  dims=['y', 'x'], coords=coords)
+    da_north = xr.DataArray(vel_north, dims=['y', 'x'], coords=coords)
+    return da_east, da_north
 
 
-def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, forces,
+def compute_boundary_divergence(boundaries_gdf, stage_pole_dict, delta_time, plate_id_raster,
+                                plate_polygons_gdf=None):
+    """Compute per-arc-segment relative normal velocity.
+
+    Explodes each boundary LineString into individual 2-vertex segments and computes
+    divergence independently for each.  Returns a GeoDataFrame where each row is one
+    arc segment with its own 'divergence' value (cm/yr).  Positive = ridge, negative
+    = subduction.  Different segments of the same plate-pair boundary can have
+    different signs, correctly capturing oblique or mixed boundaries.
+
+    Sign: dot(centroid_pid1_xyz, arc_normal) > 0 → normal points toward pid1 → sign=+1.
+    Falls back to raster probe when plate_polygons_gdf is not provided.
+    """
+    identity = pygplates.FiniteRotation()
+    OFFSET_DEG = 0.5
+
+    pid_raster = plate_id_raster.rename({k: v for k, v in {'x': 'lon', 'y': 'lat'}.items()
+                                         if k in plate_id_raster.dims})
+
+    # Build centroid lookup: pid → geocentric (x,y,z) tuple — stable sign reference
+    pid_to_centroid_xyz = {}
+    if plate_polygons_gdf is not None:
+        for _, prow in plate_polygons_gdf.iterrows():
+            pid = prow.get('PLATEID1')
+            if pid and pid not in pid_to_centroid_xyz:
+                rep = prow.geometry.representative_point()
+                pid_to_centroid_xyz[pid] = pygplates.PointOnSphere(rep.y, rep.x).to_xyz()
+
+    new_rows = []
+    for _, row in boundaries_gdf.iterrows():
+        pid1 = row.get('plateid1_poly1')
+        pid2 = row.get('plateid1_poly2')
+        seg   = row.geometry
+        coords = list(seg.coords)
+
+        if not pid1 or not pid2 or pid1 == 0 or pid2 == 0 or len(coords) < 2:
+            r = row.to_dict()
+            r['divergence'] = 0.0
+            new_rows.append(r)
+            continue
+
+        for i in range(len(coords) - 1):
+            try:
+                p1 = pygplates.PointOnSphere(coords[i][1],   coords[i][0])
+                p2 = pygplates.PointOnSphere(coords[i+1][1], coords[i+1][0])
+                arc = pygplates.GreatCircleArc(p1, p2)
+                seg_normal = arc.get_great_circle_normal()
+            except pygplates.IndeterminateGreatCircleArcNormalError:
+                continue
+
+            # Midpoint: average lat/lon (accurate enough for short arc segments)
+            mid_lat = (coords[i][1] + coords[i+1][1]) / 2.0
+            mid_lon = (coords[i][0] + coords[i+1][0]) / 2.0
+            pt = pygplates.PointOnSphere(mid_lat, mid_lon)
+
+            seg_nl = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down(
+                [pt], [seg_normal])[0]
+            n_north, n_east = seg_nl.get_x(), seg_nl.get_y()
+
+            # Sign: centroid hemisphere test (preferred) or raster probe (fallback)
+            if pid1 in pid_to_centroid_xyz:
+                c = pid_to_centroid_xyz[pid1]
+                dot_val = seg_normal.get_x()*c[0] + seg_normal.get_y()*c[1] + seg_normal.get_z()*c[2]
+                sign = 1 if dot_val > 0 else -1
+            elif pid2 in pid_to_centroid_xyz:
+                c = pid_to_centroid_xyz[pid2]
+                dot_val = seg_normal.get_x()*c[0] + seg_normal.get_y()*c[1] + seg_normal.get_z()*c[2]
+                sign = -1 if dot_val > 0 else 1
+            else:
+                probe_lon = float(np.clip(mid_lon + OFFSET_DEG * n_east, -180, 180))
+                probe_lat = float(np.clip(mid_lat + OFFSET_DEG * n_north,  -90,  90))
+                try:
+                    probe_val = int(pid_raster.sel(lon=probe_lon, lat=probe_lat,
+                                                   method='nearest').item())
+                except Exception:
+                    probe_val = 0
+                if probe_val == pid1:
+                    sign = 1
+                elif probe_val == pid2:
+                    sign = -1
+                else:
+                    continue
+
+            v1 = pygplates.calculate_velocities([pt], stage_pole_dict.get(pid1, identity), delta_time)[0]
+            v2 = pygplates.calculate_velocities([pt], stage_pole_dict.get(pid2, identity), delta_time)[0]
+            v1l = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt], [v1])[0]
+            v2l = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt], [v2])[0]
+
+            # divergence = (v_pid1 - v_pid2) · n_toward_pid1
+            raw = (v1l.get_y() - v2l.get_y()) * n_east + (v1l.get_x() - v2l.get_x()) * n_north
+
+            r = row.to_dict()
+            r['geometry'] = LineString([coords[i], coords[i+1]])
+            r['divergence'] = sign * raw
+            new_rows.append(r)
+
+    if not new_rows:
+        result = boundaries_gdf.copy()
+        result['divergence'] = 0.0
+        return result
+
+    return gpd.GeoDataFrame(new_rows, geometry='geometry', crs=boundaries_gdf.crs)
+
+
+def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             craton_raster=None,
-                            divergence_threshold_for_subduction=-0.00025,
-                            divergence_threshold_for_ridge_push=0.00025,
+                            stage_pole_dict=None,
+                            delta_time=1,
+                            divergence_threshold_for_subduction=-1.0,
+                            divergence_threshold_for_ridge_push=1.0,
                             boundary_search_radius_deg=2,
                             polarity_dict=None):
 
@@ -204,7 +307,7 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
             unique, counts = np.unique(valid, return_counts=True)
             craton_pixel_counts = {int(k): int(v) for k, v in zip(unique, counts)}
 
-    stage_pole_dict = {}
+    new_stage_pole_dict = {}
     torque_dict = {}
     
     gpml_plates = gdf2gpml(polygons_gdf.explode(index_parts=False).reset_index(drop=True))
@@ -241,8 +344,29 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
                 downgoing_plate = id1
                 overriding_plate = id2
 
-                # This tells us if boundary is divergent or 
-                divergence_value = divergence_raster.interp(lon=arc_point[1], lat=arc_point[0]).item()
+                # Per-segment relative normal velocity: positive = diverging, negative = converging.
+                # outward normal of the current plate = -clockwise_flag * gca_normal
+                # (gca_normal = A×B = left-hand normal; inward for CW polygons, outward for CCW)
+                # divergence = (v_neighbor - v_current) · outward_normal
+                pt_obj = pygplates.PointOnSphere(arc_point[0], arc_point[1])
+                pid_current = plate.get_reconstruction_plate_id()
+                pid_neighbor = id2 if id1 == pid_current else id1
+                if stage_pole_dict is not None and pid_neighbor and pid_neighbor > 0:
+                    try:
+                        _v_cur = pygplates.calculate_velocities([pt_obj], stage_pole_dict.get(pid_current, pygplates.FiniteRotation()), delta_time)[0]
+                        _v_nbr = pygplates.calculate_velocities([pt_obj], stage_pole_dict.get(pid_neighbor, pygplates.FiniteRotation()), delta_time)[0]
+                        _vcl = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt_obj], [_v_cur])[0]
+                        _vnl = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt_obj], [_v_nbr])[0]
+                        _seg_n = segment.get_great_circle_normal()
+                        _seg_nl = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down([pt_obj], [_seg_n])[0]
+                        # multiply by -clockwise_flag to convert gca_normal to outward normal
+                        divergence_value = -clockwise_flag * (
+                            (_vnl.get_y() - _vcl.get_y()) * _seg_nl.get_y()
+                            + (_vnl.get_x() - _vcl.get_x()) * _seg_nl.get_x())
+                    except pygplates.IndeterminateGreatCircleArcNormalError:
+                        divergence_value = 0.0
+                else:
+                    divergence_value = 0.0
 
                 continental_collision = False
                 if craton_raster is not None:
@@ -257,8 +381,11 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
                 segment_torque = None
                 if divergence_value<divergence_threshold_for_subduction:
 
-                    # Record overriding/downgoing polarity for this plate pair (sticky — only set once)
-                    if id1 and id2 and id1 > 0 and id2 > 0:
+                    # Record overriding/downgoing polarity for this plate pair (sticky — only set once).
+                    # Skip when craton_raster is None (bootstrap step) so the craton rule is
+                    # not contaminated by an arbitrary oceanic fallback before craton info is available.
+                    if (id1 and id2 and id1 > 0 and id2 > 0
+                            and craton_raster is not None):
                         pair = (min(id1, id2), max(id1, id2))
                         if pair not in polarity_dict:
                             area1 = craton_pixel_counts.get(id1, 0)
@@ -328,9 +455,9 @@ def polygons_to_stage_poles(polygons_gdf, divergence_raster, plate_id_raster, fo
             computed_stage_rotation = pygplates.FiniteRotation()
         
         torque_dict[plate.get_reconstruction_plate_id()] = net_torque
-        stage_pole_dict[plate.get_reconstruction_plate_id()] = computed_stage_rotation
-        
-    return stage_pole_dict
+        new_stage_pole_dict[plate.get_reconstruction_plate_id()] = computed_stage_rotation
+
+    return new_stage_pole_dict
 
 
 def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None, polarity_dict=None):
@@ -340,76 +467,77 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     tessellation_deg          = params.get('tessellation_deg',           0.2)
     raster_spacing            = params.get('raster_spacing',             1)
     topo_simplify             = params.get('topo_simplify_tolerance',    1)
-    div_thresh_sub            = params.get('div_threshold_subduction',  -0.00025)
-    div_thresh_ridge          = params.get('div_threshold_ridge',        0.00025)
+    div_thresh_sub            = params.get('div_threshold_subduction',  -1.0)
+    div_thresh_ridge          = params.get('div_threshold_ridge',        1.0)
     boundary_search_radius    = params.get('boundary_search_radius_deg', 2)
 
+    _ct = {}
+    _t0 = time.perf_counter()
+
     new_features = tessellate_polygons(rpolygons, max_dist_deg=tessellation_deg)
+    _ct['tessellate'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     rp_gdf = plate_polygons_to_wrapped_gdf(new_features)
+    _ct['wrap_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     clipped_polygons = resolve_overlaps(rp_gdf, priority_col='PLATEID1')
     clipped_polygons = clipped_polygons.explode(index_parts=False).reset_index(drop=True)
-    
+    _ct['resolve_overlaps'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
     plate_id_raster = update_plate_id_raster(clipped_polygons, raster_spacing=raster_spacing)
-    
-    #import matplotlib.pyplot as plt
-    #fig,ax = plt.subplots()
-    #plate_id_raster.plot(ax=ax)
-    #clipped_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
-    #fig.savefig('./output/plate_id_raster_1{:d}.png'.format(np.random.randint(0,100000)))
+    _ct['plate_id_raster'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     # Force values within cratons to overrule any plate polygon changes
-    # (from a geological perspective, cratons will overide subduction zones).
     if cratons is not None:
         wrapped_cratons = plate_polygons_to_wrapped_gdf(cratons)
-        craton_raster = rasterize_polygons(wrapped_cratons, zval_field='PLATEID1', sampling=raster_spacing)
+        valid_cratons = wrapped_cratons.dropna(subset=['geometry'])
+        valid_cratons = valid_cratons[~valid_cratons.geometry.is_empty]
+        craton_raster = rasterize_polygons(valid_cratons, zval_field='PLATEID1', sampling=raster_spacing)
         plate_id_raster = craton_raster.where(craton_raster>0, plate_id_raster)
-
-        #fig,ax = plt.subplots()
-        #craton_raster.plot(ax=ax)
-        ##new_plate_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
-        #fig.savefig('./output/craton_raster_{:d}.png'.format(np.random.randint(0,100000)))
-
     else:
         craton_raster = None
+    _ct['craton_raster'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    
     new_plate_polygons = update_plate_polygons(plate_id_raster,
                                                raster_spacing=raster_spacing,
                                                topo_simplify=topo_simplify)
     new_plate_polygons = new_plate_polygons.explode(index_parts=False).reset_index(drop=True)
     new_plate_polygons = new_plate_polygons[new_plate_polygons.geometry.geom_type.isin(['Polygon'])]
-    #print(new_plate_polygons)
+    _ct['update_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    #import matplotlib.pyplot as plt
-    #fig,ax = plt.subplots()
-    #plate_id_raster.plot(ax=ax)
-    #new_plate_polygons.plot(ax=ax, facecolor='none', edgecolor='black', linewidth=0.5)
-    #fig.savefig('./output/plate_id_raster_2{:d}.png'.format(np.random.randint(0,100000)))
-
-    # Handle polygon splitting
-    # TODO make sure that polygon splits retain consistency with craton polygons
     new_plate_polygons = resolve_duplicate_plateids(new_plate_polygons, next_plateid=None)
-
-    # Handle reduction in forces for plates with continents?
-    # BUT we should do that in 'polygons_to_stage_poles'?
+    _ct['resolve_duplicates'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons)
+    _ct['topo_boundaries'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
+    boundaries_gdf = compute_boundary_divergence(boundaries_gdf, stage_pole_dict, delta_time, plate_id_raster,
+                                                 plate_polygons_gdf=new_plate_polygons)
+    _ct['boundary_divergence'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     velocity_grid_east, velocity_grid_north = velocity_grid(plate_id_raster, stage_pole_dict, delta_time,
                                                              raster_spacing=raster_spacing)
-    #
-    div = mpcalc.divergence(velocity_grid_east, velocity_grid_north)
+    du_dx = np.gradient(velocity_grid_east.values, velocity_grid_east.x.values, axis=1)
+    dv_dy = np.gradient(velocity_grid_north.values, velocity_grid_north.y.values, axis=0)
+    div = xr.DataArray(du_dx + dv_dy,
+                       dims=velocity_grid_east.dims,
+                       coords=velocity_grid_east.coords)
+    _ct['velocity_grid'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    #
-    stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, div, plate_id_raster, forces,
+    stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, plate_id_raster, forces,
                                               craton_raster,
+                                              stage_pole_dict=stage_pole_dict,
+                                              delta_time=delta_time,
                                               divergence_threshold_for_subduction=div_thresh_sub,
                                               divergence_threshold_for_ridge_push=div_thresh_ridge,
                                               boundary_search_radius_deg=boundary_search_radius,
                                               polarity_dict=polarity_dict)
+    _ct['stage_poles'] = time.perf_counter() - _t0
+
+    _ct_total = sum(_ct.values())
+    print('  [compute_timestep {:.1f}s]'.format(_ct_total),
+          '  '.join('{}: {:.1f}s ({:.0f}%)'.format(k, v, 100*v/_ct_total)
+                    for k, v in sorted(_ct.items(), key=lambda x: -x[1])))
     #
     #print([(key,item.get_lat_lon_euler_pole_and_angle_degrees()) for key,item in stage_pole_dict.items()])
     #print([(key,item) for key,item in stage_pole_dict.items()])
@@ -429,48 +557,64 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
            boundaries_gdf
 
 
-def seed_ridge_tracers(boundaries_gdf, divergence_raster, spacing_deg=2.0,
-                       threshold=0.00025, offset_deg=0.6):
+def seed_ridge_tracers(boundaries_gdf, spacing_deg=2.0,
+                       threshold=1.0, offset_deg=0.6):
     """Seed tracer point pairs offset perpendicular to divergent boundary segments.
 
     Two points are seeded per position (one on each side of the ridge axis) so
     that after advection they are carried apart on their respective plates.
     offset_deg must exceed half the plate_id raster cell size (~0.5 deg) so each
     point clearly falls on one plate in the nearest-neighbour lookup.
+    boundaries_gdf must have a 'divergence' column (from compute_boundary_divergence).
+    Uses pygplates for all geometric operations.
     """
     new_points = []
     for _, row in boundaries_gdf.iterrows():
-        seg = row.geometry
-        mid = seg.interpolate(0.5, normalized=True)
-        div_val = divergence_raster.interp(lon=mid.x, lat=mid.y).item()
+        div_val = row.get('divergence', 0.0)
         if div_val <= threshold:
             continue
 
-        # Perpendicular unit vector to the segment
-        coords = list(seg.coords)
-        dlon = coords[-1][0] - coords[0][0]
-        dlat = coords[-1][1] - coords[0][1]
-        norm = np.sqrt(dlon**2 + dlat**2)
-        if norm == 0:
+        coords = list(row.geometry.coords)
+        if len(coords) < 2:
             continue
-        perp_lon = -dlat / norm
-        perp_lat = dlon / norm
 
-        length = seg.length
-        n = max(int(length / spacing_deg), 1)
-        for i in range(n + 1):
-            pt = seg.interpolate(i / n, normalized=True)
-            for sign in [+1, -1]:
-                new_lon = np.clip(pt.x + sign * offset_deg * perp_lon, -180, 180)
-                new_lat = np.clip(pt.y + sign * offset_deg * perp_lat, -90, 90)
-                new_points.append({'geometry': Point(new_lon, new_lat),
-                                   'active': True, 'age': 0})
+        # Process each consecutive vertex pair as its own great-circle arc so
+        # that curved boundaries are followed correctly, not approximated as a
+        # single chord between the first and last coordinates.
+        for i in range(len(coords) - 1):
+            try:
+                p1 = pygplates.PointOnSphere(coords[i][1],   coords[i][0])
+                p2 = pygplates.PointOnSphere(coords[i+1][1], coords[i+1][0])
+                arc = pygplates.GreatCircleArc(p1, p2)
+                arc_normal = arc.get_great_circle_normal()
+            except pygplates.IndeterminateGreatCircleArcNormalError:
+                continue
+
+            # Tessellate this arc segment at spacing_deg for even seed density
+            try:
+                seg_pts = list(
+                    pygplates.PolylineOnSphere([p1, p2])
+                    .to_tessellated(np.radians(spacing_deg))
+                    .get_points())
+            except Exception:
+                seg_pts = [p1, p2]
+
+            for pt in seg_pts:
+                lat, lon = pt.to_lat_lon()
+                seg_nl = pygplates.LocalCartesian.convert_from_geocentric_to_north_east_down(
+                    [pt], [arc_normal])[0]
+                n_north, n_east = seg_nl.get_x(), seg_nl.get_y()
+                for sign in [+1, -1]:
+                    new_lon = np.clip(lon + sign * offset_deg * n_east,  -180, 180)
+                    new_lat = np.clip(lat + sign * offset_deg * n_north,  -90,  90)
+                    new_points.append({'geometry': Point(new_lon, new_lat),
+                                       'active': True, 'age': 0})
     if not new_points:
         return gpd.GeoDataFrame(columns=['geometry', 'active', 'age']).set_crs(epsg=4326)
     return gpd.GeoDataFrame(new_points).set_crs(epsg=4326)
 
 
-def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf, divergence_raster,
+def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf,
                                    spacing_deg=5.0, spreading_rate_km_per_myr=50.0,
                                    div_threshold=0.00025):
     """Seed initial tracers inside each plate polygon with age estimated from ridge distance.
@@ -478,6 +622,7 @@ def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf, divergence_ras
     For each polygon, finds its own divergent boundary segments, builds a BallTree from
     densified ridge points, then assigns age = haversine_dist_km / spreading_rate to each
     interior grid point.  Points with no divergent boundary on their plate are skipped.
+    boundaries_gdf must have a 'divergence' column (from compute_boundary_divergence).
     """
     from sklearn.neighbors import BallTree
     from shapely.geometry import Point
@@ -491,22 +636,26 @@ def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf, divergence_ras
         if geom is None or geom.is_empty:
             continue
 
-        # Divergent segments that border this plate
+        # Divergent segments that border this plate — densify via pygplates per arc
         div_ridge_pts = []
         for _, brow in boundaries_gdf.iterrows():
             if brow['plateid1_poly1'] != pid and brow['plateid1_poly2'] != pid:
                 continue
-            seg = brow.geometry
-            mid = seg.interpolate(0.5, normalized=True)
-            div_val = divergence_raster.interp(lon=mid.x, lat=mid.y).item()
+            div_val = brow.get('divergence', 0.0)
             if div_val <= div_threshold:
                 continue
-            # Densify segment for accurate distance queries
-            seg_len = seg.length
-            n = max(int(seg_len / (spacing_deg / 2)), 2)
-            for i in range(n + 1):
-                pt = seg.interpolate(i / n, normalized=True)
-                div_ridge_pts.append([pt.y, pt.x])  # (lat, lon) for haversine
+            coords = list(brow.geometry.coords)
+            for i in range(len(coords) - 1):
+                try:
+                    p1 = pygplates.PointOnSphere(coords[i][1],   coords[i][0])
+                    p2 = pygplates.PointOnSphere(coords[i+1][1], coords[i+1][0])
+                    for pt in (pygplates.PolylineOnSphere([p1, p2])
+                               .to_tessellated(np.radians(spacing_deg / 2))
+                               .get_points()):
+                        lat, lon = pt.to_lat_lon()
+                        div_ridge_pts.append([lat, lon])
+                except Exception:
+                    div_ridge_pts.append([coords[i][1], coords[i][0]])
 
         if not div_ridge_pts:
             continue
@@ -539,41 +688,666 @@ def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf, divergence_ras
     return gpd.GeoDataFrame(all_points).set_crs(epsg=4326)
 
 
-def advect_tracers(tracers, plate_id_raster, stage_pole_dict, delta_time=1):
-    """Move active tracers one step using their plate's stage rotation."""
+def advect_tracers(tracers, plate_id_raster, stage_pole_dict, delta_time=1,
+                   boundaries_gdf=None, div_threshold=0.0):
+    """Move active tracers one step using their plate's stage rotation.
+
+    If boundaries_gdf is provided, tracers that cross a convergent boundary during
+    this step (raster plate_id changes from old to new for a convergent pair) are
+    immediately deactivated.  This catches the case where a tracer slips into the
+    overriding plate's raster territory before the BallTree proximity check fires.
+
+    Vectorised: raster lookups are done as single numpy index arrays; rotations are
+    grouped per plate so pygplates is called once per plate, not once per tracer.
+    """
     if tracers is None or len(tracers) == 0:
         return tracers
     active_mask = tracers.active.astype(bool)
     active = tracers[active_mask].copy()
     inactive = tracers[~active_mask]
-    rows = []
-    for _, row in active.iterrows():
-        lon, lat = row.geometry.x, row.geometry.y
-        pid = int(plate_id_raster.sel(lon=lon, lat=lat, method='nearest').item())
-        rotation = stage_pole_dict.get(pid, pygplates.FiniteRotation())
-        pt = rotation * pygplates.PointOnSphere(lat, lon)
-        new_lat, new_lon = pt.to_lat_lon()
-        r = row.to_dict()
-        r['geometry'] = Point(new_lon, new_lat)
-        r['age'] = row.age + delta_time
-        rows.append(r)
-    if not rows:
-        return tracers
-    updated = gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
+
+    # Pre-build frozenset of convergent plate-pair keys for O(1) lookup
+    convergent_pairs = set()
+    if boundaries_gdf is not None and 'divergence' in boundaries_gdf.columns:
+        conv = boundaries_gdf[boundaries_gdf['divergence'] < div_threshold]
+        for _, brow in conv.iterrows():
+            p1 = brow.get('plateid1_poly1', 0)
+            p2 = brow.get('plateid1_poly2', 0)
+            if pd.notna(p1) and pd.notna(p2) and p1 != 0 and p2 != 0:
+                convergent_pairs.add(frozenset([int(p1), int(p2)]))
+
+    lons = active.geometry.x.values.copy()
+    lats = active.geometry.y.values.copy()
+    ages = active.age.values.copy().astype(float) + delta_time
+    active_flags = active.active.values.copy().astype(bool)
+
+    # Vectorised nearest-neighbour raster lookup using searchsorted
+    # Coordinate names may be 'x'/'y' or 'lon'/'lat' depending on caller
+    rast_lons = (plate_id_raster.lon if 'lon' in plate_id_raster.coords
+                 else plate_id_raster.x).values
+    rast_lats = (plate_id_raster.lat if 'lat' in plate_id_raster.coords
+                 else plate_id_raster.y).values
+    rast_vals = plate_id_raster.values          # (nlat, nlon)
+    nlon, nlat = len(rast_lons), len(rast_lats)
+
+    def _raster_pids(lo_arr, la_arr):
+        ci = np.clip(np.searchsorted(rast_lons, lo_arr), 0, nlon - 1)
+        ri = np.clip(np.searchsorted(rast_lats, la_arr), 0, nlat - 1)
+        return rast_vals[ri, ci]
+
+    old_pids = _raster_pids(lons, lats)
+
+    new_lons = lons.copy()
+    new_lats = lats.copy()
+
+    # Group by plate — one pygplates call per unique plate ID
+    for pid_val in np.unique(old_pids):
+        if np.isnan(pid_val):
+            continue
+        pid_int = int(pid_val)
+        rotation = stage_pole_dict.get(pid_int, pygplates.FiniteRotation())
+        if rotation.represents_identity_rotation():
+            continue
+        mask = old_pids == pid_val
+        idxs = np.where(mask)[0]
+        for k in idxs:
+            pt = rotation * pygplates.PointOnSphere(float(lats[k]), float(lons[k]))
+            new_lats[k], new_lons[k] = pt.to_lat_lon()
+
+    # Vectorised convergent-crossing check
+    if convergent_pairs:
+        new_pids = _raster_pids(new_lons, new_lats)
+        moved = (new_pids != old_pids) & (old_pids > 0) & (new_pids > 0)
+        for k in np.where(moved)[0]:
+            if frozenset([int(old_pids[k]), int(new_pids[k])]) in convergent_pairs:
+                active_flags[k] = False
+
+    updated = active.copy()
+    updated['geometry'] = gpd.points_from_xy(new_lons, new_lats)
+    updated['age'] = ages
+    updated['active'] = active_flags
     return pd.concat([updated, inactive], ignore_index=True)
 
 
-def deactivate_subducted_tracers(tracers, divergence_raster, threshold=-0.00025):
-    """Mark active tracers as inactive where they have entered a subduction zone."""
+def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_dist_deg=1.0):
+    """Mark active tracers as inactive when within max_dist_deg of a convergent boundary.
+
+    Convergent boundaries are those with divergence < threshold in boundaries_gdf.
+    Distance is computed to the full boundary geometry (not just midpoints) via
+    pygplates tessellation and a haversine BallTree, matching the approach used in
+    generate_seafloor_age_tracers.
+    """
+    from sklearn.neighbors import BallTree
+
     if tracers is None or len(tracers) == 0:
         return tracers
+    if boundaries_gdf is None or len(boundaries_gdf) == 0:
+        return tracers
+    if 'divergence' not in boundaries_gdf.columns:
+        return tracers
+
     tracers = tracers.copy()
-    for idx, row in tracers[tracers.active.astype(bool)].iterrows():
-        div_val = divergence_raster.interp(
-            lon=row.geometry.x, lat=row.geometry.y).item()
-        if div_val < threshold:
-            tracers.loc[idx, 'active'] = False
+    active_mask = tracers.active.astype(bool)
+    if not active_mask.any():
+        return tracers
+
+    conv_boundaries = boundaries_gdf[boundaries_gdf['divergence'] < threshold]
+    if len(conv_boundaries) == 0:
+        return tracers
+
+    # Tessellate convergent boundary segments into dense point arrays (pygplates spherical)
+    SAMPLE_DEG = 0.5
+    conv_pts = []
+    for _, brow in conv_boundaries.iterrows():
+        coords = list(brow.geometry.coords)
+        if len(coords) < 2:
+            continue
+        try:
+            pts = [pygplates.PointOnSphere(c[1], c[0]) for c in coords]
+            polyline = pygplates.PolylineOnSphere(pts)
+            for pt in polyline.to_tessellated(np.radians(SAMPLE_DEG)).get_points():
+                lat, lon = pt.to_lat_lon()
+                conv_pts.append([lat, lon])
+        except Exception:
+            for c in coords:
+                conv_pts.append([c[1], c[0]])
+
+    if not conv_pts:
+        return tracers
+
+    tree = BallTree(np.deg2rad(np.array(conv_pts)), metric='haversine')
+
+    active_tracers = tracers[active_mask]
+    coords_rad = np.deg2rad(np.column_stack([
+        active_tracers.geometry.y.values,
+        active_tracers.geometry.x.values,
+    ]))
+    dists_rad, _ = tree.query(coords_rad, k=1)
+    dists_deg = np.degrees(dists_rad.flatten())
+
+    deactivate_mask = dists_deg < max_dist_deg
+    tracers.loc[active_tracers.index[deactivate_mask], 'active'] = False
     return tracers
+
+
+def generate_hotspot_locations(n=20, locations=None, seed=None):
+    """Return a GeoDataFrame of fixed hot spot source points.
+
+    If locations is a list of (lon, lat) tuples those are used directly.
+    Otherwise n points are drawn uniformly on the sphere via the normal-vector
+    method (generate (x,y,z) ~ N(0,1), normalise, convert to lon/lat).
+    """
+    if locations is not None:
+        rows = [{'hotspot_id': i, 'geometry': Point(lon, lat)}
+                for i, (lon, lat) in enumerate(locations)]
+    else:
+        rng = np.random.default_rng(seed)
+        xyz = rng.standard_normal((n, 3))
+        xyz /= np.linalg.norm(xyz, axis=1, keepdims=True)
+        lons = np.degrees(np.arctan2(xyz[:, 1], xyz[:, 0]))
+        lats = np.degrees(np.arcsin(xyz[:, 2]))
+        rows = [{'hotspot_id': i, 'geometry': Point(float(lons[i]), float(lats[i]))}
+                for i in range(n)]
+    return gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
+
+
+def seed_hotspot_seamounts(hotspot_locs, prob=0.3, rng=None):
+    """Probabilistically create new seamounts at fixed hot spot locations.
+
+    For each hot spot, a seamount is created with probability prob.
+    Returns a GeoDataFrame (possibly empty) with columns matching the tracers
+    GeoDataFrame so that advect_tracers and deactivate_subducted_tracers work
+    without modification.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    rows = []
+    for _, hs in hotspot_locs.iterrows():
+        if rng.uniform() < prob:
+            rows.append({
+                'geometry':    hs.geometry,
+                'hotspot_id':  int(hs['hotspot_id']),
+                'age':         0.0,
+                'active':      True,
+            })
+    if not rows:
+        return gpd.GeoDataFrame(columns=['geometry', 'hotspot_id', 'age', 'active'],
+                                geometry='geometry').set_crs(epsg=4326)
+    return gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
+
+
+def craton_counts_from_raster(craton_raster):
+    """Return {plate_id: pixel_count} from a craton xarray DataArray.  Only counts pixels > 0."""
+    if craton_raster is None:
+        return {}
+    vals = craton_raster.values.flatten()
+    counts = {}
+    for v in vals[vals > 0]:
+        pid = int(v)
+        counts[pid] = counts.get(pid, 0) + 1
+    return counts
+
+
+def resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts=None):
+    """Return the downgoing plate ID for a convergent boundary between p1 and p2.
+
+    Priority:
+      1. Craton rule: plate with cratons is overriding; the other is downgoing.
+         If both have cratons, the one with more pixels is overriding.
+      2. polarity_dict (sticky result from previous steps).
+      3. Fallback: p1 downgoing (arbitrary, consistent).
+    """
+    if p1 == 0 or p2 == 0:
+        return p1
+    if craton_counts:
+        a1 = craton_counts.get(p1, 0)
+        a2 = craton_counts.get(p2, 0)
+        if a1 > 0 and a2 == 0:
+            return p2           # p1 continental → overriding; p2 downgoing
+        if a2 > 0 and a1 == 0:
+            return p1           # p2 continental → overriding; p1 downgoing
+        if a1 > 0 and a2 > 0:
+            return p2 if a1 >= a2 else p1   # larger craton is overriding
+    pair = (min(p1, p2), max(p1, p2))
+    return polarity_dict.get(pair, p1)
+
+
+def generate_synthetic_earthquakes(boundaries_gdf, polarity_dict=None, plate_polygons_gdf=None,
+                                    craton_counts=None, plate_id_raster=None,
+                                    n_candidates=100000,
+                                    ridge_max_dist_deg=2.0,
+                                    ridge_max_depth_km=50.0,
+                                    slab_dip_deg=45.0,
+                                    slab_max_depth_km=600.0,
+                                    div_threshold_ridge=0.1,
+                                    div_threshold_subduction=-0.1,
+                                    ridge_eq_prob=1.0,
+                                    subduction_eq_prob=1.0):
+    """Generate a synthetic earthquake catalog from plate boundary geometry.
+
+    Ridge earthquakes: random depth in [0, ridge_max_depth_km], symmetric about the
+    ridge axis within ridge_max_dist_deg.
+
+    Subduction earthquakes: overriding-plate side only (hemisphere test using
+    polarity_dict + arc normal).  Depth increases linearly with horizontal distance
+    from the boundary: depth = dist_km * tan(slab_dip_deg), capped at
+    slab_max_depth_km.  Maximum horizontal extent = slab_max_depth_km / tan(dip).
+
+    Returns a GeoDataFrame with columns:
+        geometry, depth_km, boundary_type, plateid1, plateid2,
+        downgoing_plate, overriding_plate
+    """
+    from sklearn.neighbors import BallTree
+
+    if boundaries_gdf is None or 'divergence' not in boundaries_gdf.columns:
+        return gpd.GeoDataFrame(
+            columns=['geometry', 'depth_km', 'boundary_type',
+                     'plateid1', 'plateid2', 'downgoing_plate', 'overriding_plate']
+        ).set_crs(epsg=4326)
+
+    if polarity_dict is None:
+        polarity_dict = {}
+
+    slab_dip_rad = np.radians(slab_dip_deg)
+    slab_max_dist_km  = slab_max_depth_km / np.tan(slab_dip_rad)
+    slab_max_dist_deg = slab_max_dist_km / 111.195
+    max_query_deg = max(ridge_max_dist_deg, slab_max_dist_deg)
+
+    # Centroid lookup for hemisphere test (which side is overriding plate)
+    pid_to_centroid_xyz = {}
+    if plate_polygons_gdf is not None:
+        for _, prow in plate_polygons_gdf.iterrows():
+            pid = prow.get('PLATEID1')
+            if pid and pid not in pid_to_centroid_xyz:
+                rep = prow.geometry.representative_point()
+                pid_to_centroid_xyz[pid] = pygplates.PointOnSphere(rep.y, rep.x).to_xyz()
+
+    # Tessellate active boundary segments; track iloc index into boundaries_gdf
+    SAMPLE_DEG = 0.3
+    pts_latlon = []
+    pts_seg_iloc = []
+
+    for iloc_i in range(len(boundaries_gdf)):
+        row = boundaries_gdf.iloc[iloc_i]
+        div = row.get('divergence', 0.0)
+        if not (div > div_threshold_ridge or div < div_threshold_subduction):
+            continue
+        coords = list(row.geometry.coords)
+        if len(coords) < 2:
+            continue
+        try:
+            p1 = pygplates.PointOnSphere(coords[0][1], coords[0][0])
+            p2 = pygplates.PointOnSphere(coords[1][1], coords[1][0])
+            for pt in pygplates.PolylineOnSphere([p1, p2]).to_tessellated(
+                    np.radians(SAMPLE_DEG)).get_points():
+                lat, lon = pt.to_lat_lon()
+                pts_latlon.append([lat, lon])
+                pts_seg_iloc.append(iloc_i)
+        except Exception:
+            pass
+
+    if not pts_latlon:
+        return gpd.GeoDataFrame(
+            columns=['geometry', 'depth_km', 'boundary_type',
+                     'plateid1', 'plateid2', 'downgoing_plate', 'overriding_plate']
+        ).set_crs(epsg=4326)
+
+    # Uniform random points on sphere — Marsaglia's method, vectorised
+    xyz_batches = []
+    total = 0
+    while total < n_candidates:
+        batch = max(n_candidates * 4, 10000)
+        x1 = np.random.uniform(-1, 1, batch)
+        x2 = np.random.uniform(-1, 1, batch)
+        s = x1**2 + x2**2
+        ok = s < 1
+        x1, x2, s = x1[ok], x2[ok], s[ok]
+        sq = np.sqrt(1 - s)
+        xyz_batches.append(np.column_stack([2*x1*sq, 2*x2*sq, 1 - 2*s]))
+        total += int(ok.sum())
+    xyz = np.vstack(xyz_batches)[:n_candidates]
+    lats = np.degrees(np.arcsin(np.clip(xyz[:, 2], -1, 1)))
+    lons = np.degrees(np.arctan2(xyz[:, 1], xyz[:, 0]))
+
+    # Find nearest active boundary point for every candidate
+    tree = BallTree(np.deg2rad(np.array(pts_latlon)), metric='haversine')
+    dists_rad, nn_idx = tree.query(np.deg2rad(np.column_stack([lats, lons])), k=1)
+    dists_deg = np.degrees(dists_rad.flatten())
+    nn_idx    = nn_idx.flatten()
+
+    earthquakes = []
+
+    for ci in np.where(dists_deg < max_query_deg)[0]:
+        lon_c    = float(lons[ci])
+        lat_c    = float(lats[ci])
+        dist_deg = float(dists_deg[ci])
+        dist_km  = dist_deg * 111.195
+
+        seg_row = boundaries_gdf.iloc[pts_seg_iloc[nn_idx[ci]]]
+        div     = seg_row.get('divergence', 0.0)
+
+        if div > div_threshold_ridge:
+            # Ridge: shallow, symmetric about axis
+            if dist_deg > ridge_max_dist_deg:
+                continue
+            if ridge_eq_prob < 1.0 and np.random.random() > ridge_eq_prob:
+                continue
+            earthquakes.append({
+                'geometry':       Point(lon_c, lat_c),
+                'depth_km':       round(float(np.random.uniform(0.0, ridge_max_depth_km)), 1),
+                'boundary_type':  'ridge',
+                'plateid1':       int(v) if pd.notna(v := seg_row.get('plateid1_poly1', 0)) else 0,
+                'plateid2':       int(v) if pd.notna(v := seg_row.get('plateid1_poly2', 0)) else 0,
+                'downgoing_plate':  0,
+                'overriding_plate': 0,
+            })
+
+        elif div < div_threshold_subduction:
+            # Subduction: overriding-plate side only, depth from slab dip
+            _r1, _r2 = seg_row.get('plateid1_poly1', 0), seg_row.get('plateid1_poly2', 0)
+            p1 = int(_r1) if pd.notna(_r1) else 0
+            p2 = int(_r2) if pd.notna(_r2) else 0
+            if p1 == 0 or p2 == 0:
+                continue
+
+            dg        = resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)
+            overriding = p2 if dg == p1 else p1
+
+            # Arc normal for hemisphere test
+            coords = list(seg_row.geometry.coords)
+            if len(coords) < 2:
+                continue
+            try:
+                arc = pygplates.GreatCircleArc(
+                    pygplates.PointOnSphere(coords[0][1], coords[0][0]),
+                    pygplates.PointOnSphere(coords[1][1], coords[1][0]))
+                seg_normal = arc.get_great_circle_normal()
+            except pygplates.IndeterminateGreatCircleArcNormalError:
+                continue
+
+            # Is this candidate on the overriding-plate side?
+            pt_xyz = pygplates.PointOnSphere(lat_c, lon_c).to_xyz()
+            dot_pt = (seg_normal.get_x()*pt_xyz[0]
+                    + seg_normal.get_y()*pt_xyz[1]
+                    + seg_normal.get_z()*pt_xyz[2])
+
+            if overriding in pid_to_centroid_xyz:
+                c      = pid_to_centroid_xyz[overriding]
+                dot_ov = (seg_normal.get_x()*c[0]
+                        + seg_normal.get_y()*c[1]
+                        + seg_normal.get_z()*c[2])
+                if (dot_pt > 0) != (dot_ov > 0):
+                    continue        # wrong side → downgoing plate, skip
+
+            depth_km = dist_km * np.tan(slab_dip_rad)
+            if depth_km > slab_max_depth_km:
+                continue
+
+            # Sanity check: reject if the point sits inside the downgoing plate's
+            # surface expression — the slab dips away from that plate, not under it.
+            if plate_id_raster is not None:
+                try:
+                    raster_pid = int(plate_id_raster.sel(
+                        lon=lon_c, lat=lat_c, method='nearest').item())
+                    if raster_pid == dg:
+                        continue
+                except Exception:
+                    pass
+
+            if subduction_eq_prob < 1.0 and np.random.random() > subduction_eq_prob:
+                continue
+
+            earthquakes.append({
+                'geometry':        Point(lon_c, lat_c),
+                'depth_km':        round(float(depth_km), 1),
+                'boundary_type':   'subduction',
+                'plateid1':        p1,
+                'plateid2':        p2,
+                'downgoing_plate':  dg,
+                'overriding_plate': overriding,
+            })
+
+    if not earthquakes:
+        return gpd.GeoDataFrame(
+            columns=['geometry', 'depth_km', 'boundary_type',
+                     'plateid1', 'plateid2', 'downgoing_plate', 'overriding_plate']
+        ).set_crs(epsg=4326)
+
+    return gpd.GeoDataFrame(earthquakes, geometry='geometry').set_crs(epsg=4326)
+
+
+def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
+                               polarity_dict=None, craton_counts=None,
+                               continental_base_m=500,
+                               noise_fraction=0.15,
+                               spectral_beta=2.0,
+                               andean_max_dist_deg=5.0,
+                               andean_arc_dist_deg=1.5,
+                               andean_peak_m=5000,
+                               himalayan_max_dist_deg=4.0,
+                               himalayan_peak_m=8000,
+                               div_threshold_subduction=-0.0001):
+    """Generate a synthetic elevation raster from tectonic setting.
+
+    Continental pixels (craton_raster > 0) receive:
+      - Background: continental_base_m + bandlimited Gaussian noise
+      - Andean zone: Gaussian elevation peak at andean_arc_dist_deg from the trench,
+        only on the overriding (continental) plate side of ocean-continent subduction
+      - Himalayan zone: linear ramp peaked at the collision boundary for
+        continent-continent convergent boundaries (both plates have cratons)
+    Ocean pixels remain at 0.  Returns an xr.DataArray with lon/lat dims.
+    """
+    from sklearn.neighbors import BallTree
+    import pyshtools as pysh
+    from scipy.interpolate import RegularGridInterpolator
+
+    if polarity_dict is None:
+        polarity_dict = {}
+    if craton_counts is None:
+        craton_counts = {}
+
+    def _ensure_lonlat(da):
+        return da.rename({k: v for k, v in {'x': 'lon', 'y': 'lat'}.items()
+                          if k in da.dims})
+
+    pid_r  = _ensure_lonlat(plate_id_raster)
+    crat_r = _ensure_lonlat(craton_raster)
+
+    lons = pid_r.lon.values
+    lats = pid_r.lat.values
+    raster_spacing = float(abs(lons[1] - lons[0]))
+
+    lon2d, lat2d = np.meshgrid(lons, lats)          # (nlat, nlon)
+    nlat, nlon   = lon2d.shape
+
+    craton_vals = np.nan_to_num(crat_r.values, nan=0.0).astype(float)
+    is_craton   = craton_vals > 0
+    elev        = np.zeros((nlat, nlon), dtype=float)
+
+    # --- Background continental elevation (flat; noise added after all zones) ---
+    elev[is_craton] = float(continental_base_m)
+
+    # --- Classify convergent segments: Andean vs Himalayan ---
+    andean_pts   = []   # (lat, lon)
+    andean_ovpid = []   # overriding plate ID for each Andean BallTree point
+    himalayan_pts = []
+
+    TESS_DEG = 0.5
+    if boundaries_gdf is not None and 'divergence' in boundaries_gdf.columns:
+        for iloc_i in range(len(boundaries_gdf)):
+            row = boundaries_gdf.iloc[iloc_i]
+            if row.get('divergence', 0.0) >= div_threshold_subduction:
+                continue
+            _r1, _r2 = row.get('plateid1_poly1', 0), row.get('plateid1_poly2', 0)
+            p1 = int(_r1) if pd.notna(_r1) else 0
+            p2 = int(_r2) if pd.notna(_r2) else 0
+            if p1 == 0 or p2 == 0:
+                continue
+
+            dg = resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)
+            ov = p2 if dg == p1 else p1
+            a_ov = craton_counts.get(ov, 0)
+            a_dg = craton_counts.get(dg, 0)
+            is_andean    = a_ov > 0
+            is_himalayan = a_ov > 0 and a_dg > 0
+
+            if not (is_andean or is_himalayan):
+                continue
+
+            coords = list(row.geometry.coords)
+            if len(coords) < 2:
+                continue
+            try:
+                pp1 = pygplates.PointOnSphere(coords[0][1], coords[0][0])
+                pp2 = pygplates.PointOnSphere(coords[1][1], coords[1][0])
+                seg_pts = (pygplates.PolylineOnSphere([pp1, pp2])
+                           .to_tessellated(np.radians(TESS_DEG)).get_points())
+                for pt in seg_pts:
+                    lat, lon = pt.to_lat_lon()
+                    if is_andean:
+                        andean_pts.append([lat, lon])
+                        andean_ovpid.append(ov)
+                    if is_himalayan:
+                        himalayan_pts.append([lat, lon])
+            except Exception:
+                pass
+
+    # --- Andean elevation ---
+    if andean_pts:
+        tree = BallTree(np.deg2rad(andean_pts), metric='haversine')
+        ri, ci = np.where(is_craton)
+        pts_rad = np.deg2rad(np.column_stack([lat2d[ri, ci], lon2d[ri, ci]]))
+        dists_deg, nn_idx = tree.query(pts_rad, k=1)
+        dists_deg = np.degrees(dists_deg.flatten())
+        nn_idx    = nn_idx.flatten()
+
+        for k in np.where(dists_deg < andean_max_dist_deg)[0]:
+            if int(craton_vals[ri[k], ci[k]]) != andean_ovpid[nn_idx[k]]:
+                continue    # pixel is in the downgoing plate — skip
+            d = dists_deg[k]
+            arc_elev = andean_peak_m * np.exp(
+                -((d - andean_arc_dist_deg) / andean_arc_dist_deg) ** 2)
+            elev[ri[k], ci[k]] = max(elev[ri[k], ci[k]], arc_elev)
+
+    # --- Himalayan elevation ---
+    if himalayan_pts:
+        tree = BallTree(np.deg2rad(himalayan_pts), metric='haversine')
+        pts_rad = np.deg2rad(np.column_stack([lat2d.flatten(), lon2d.flatten()]))
+        dists_deg, _ = tree.query(pts_rad, k=1)
+        dists_deg = np.degrees(dists_deg.flatten()).reshape(nlat, nlon)
+
+        him_zone = (dists_deg < himalayan_max_dist_deg) & is_craton
+        him_elev = himalayan_peak_m * np.maximum(
+            0.0, 1.0 - dists_deg / himalayan_max_dist_deg)
+        elev[him_zone] = np.maximum(elev[him_zone], him_elev[him_zone])
+
+    # --- Elevation-scaled spherical noise via spherical harmonic synthesis ---
+    # lmax chosen so DH grid spacing ≈ raster_spacing: spacing = 90/(lmax+1)
+    lmax = max(int(90.0 / raster_spacing) - 1, 10)
+    l = np.arange(lmax + 1, dtype=float)
+    power = np.where(l > 0, (l + 1.0) ** (-spectral_beta), 0.0)
+
+    clm = pysh.SHCoeffs.from_random(power)
+    sh_grid = clm.expand(grid='DH')
+    noise_arr = sh_grid.to_array()
+    noise_arr /= noise_arr.std()
+
+    dh_lats = sh_grid.lats()   # descending degrees
+    dh_lons = sh_grid.lons()   # 0 → ~360
+
+    interp = RegularGridInterpolator(
+        (dh_lats[::-1], dh_lons), noise_arr[::-1, :],
+        method='linear', bounds_error=False, fill_value=0.0)
+
+    lon2d_360 = lon2d % 360.0
+    pts = np.column_stack([lat2d.flatten(), lon2d_360.flatten()])
+    noise = interp(pts).reshape(nlat, nlon)
+    std = noise.std()
+    if std > 0:
+        noise /= std
+
+    elev[is_craton] += noise[is_craton] * elev[is_craton] * noise_fraction
+    elev[is_craton]  = np.maximum(elev[is_craton], 100.0)
+
+    return xr.DataArray(elev, dims=['lat', 'lon'],
+                        coords={'lat': lats, 'lon': lons},
+                        attrs={'units': 'meters', 'long_name': 'synthetic elevation'})
+
+
+def generate_seafloor_age_grid(tracer_csv, craton_raster=None, region='d', spacing='1d'):
+    """Interpolate seafloor age tracers to a global grid and optionally mask continents.
+
+    The tracer CSV is expected to have columns [age, lon, lat] (the format
+    written by run_SDP.py).  blockmedian reduces duplicate points per cell
+    before sphinterpolate produces the final grid.
+
+    craton_raster : xr.DataArray with plate-ID values > 0 on continental pixels.
+        Where it is positive the returned age grid is set to NaN.
+    """
+    # pygmt spacing must be a string like '0.5d'; convert float/int if needed
+    if not isinstance(spacing, str):
+        spacing = f'{spacing}d'
+
+    res = pygmt.blockmedian(tracer_csv, region=region, incols='1,2,0',
+                            spacing=spacing, output_type='numpy')
+    age_grid = pygmt.sphinterpolate(res, region=region, spacing=spacing)
+
+    if craton_raster is not None:
+        # Normalise dim names so interp works regardless of x/y vs lon/lat
+        rename = {k: v for k, v in {'x': 'lon', 'y': 'lat'}.items()
+                  if k in craton_raster.dims}
+        cr = craton_raster.rename(rename) if rename else craton_raster
+        cr_on_grid = cr.interp(lat=age_grid.lat, lon=age_grid.lon, method='nearest')
+        age_grid = age_grid.where(cr_on_grid <= 0)
+
+    age_grid.attrs.update({'units': 'Myr', 'long_name': 'seafloor age'})
+    return age_grid
+
+
+def generate_topo_bathy_grid(seafloor_age_grid, topography_raster=None,
+                              default_ocean_depth_m=-3500):
+    """Combine GDH1 bathymetry with synthetic topography into a seamless grid.
+
+    GDH1 model (Stein & Stein 1992):
+      depth = -(2600 + 365 * sqrt(age))          for age < 20 Myr
+      depth = -(5651 - 2473 * exp(-0.0278*age))  for age >= 20 Myr
+
+    topography_raster : xr.DataArray, optional.  Continental elevations (> 0 m).
+        Where present these overwrite the bathymetry.  If None, only bathymetry
+        is returned.
+    default_ocean_depth_m : fill value for ocean pixels with no age data.
+        Set to None to leave those pixels as NaN.
+    """
+    age = seafloor_age_grid.values.copy().astype(float)
+
+    # GDH1 — work in-place on a pre-NaN'd array
+    bathy = np.full_like(age, np.nan)
+    young = np.isfinite(age) & (age < 20.)
+    old   = np.isfinite(age) & (age >= 20.)
+    bathy[young] = -(2600. + 365. * np.sqrt(age[young]))
+    bathy[old]   = -(5651. - 2473. * np.exp(-0.0278 * age[old]))
+
+    combined = bathy.copy()
+
+    # Fill uncovered ocean pixels with a default depth
+    if default_ocean_depth_m is not None:
+        combined[~np.isfinite(combined)] = float(default_ocean_depth_m)
+
+    # Overwrite continental pixels with topography
+    if topography_raster is not None:
+        rename = {k: v for k, v in {'x': 'lon', 'y': 'lat'}.items()
+                  if k in topography_raster.dims}
+        topo = topography_raster.rename(rename) if rename else topography_raster
+        topo_on_grid = topo.interp(lat=seafloor_age_grid.lat,
+                                   lon=seafloor_age_grid.lon, method='nearest')
+        topo_vals = topo_on_grid.values
+        continental = topo_vals > 0
+        combined[continental] = topo_vals[continental]
+
+    return xr.DataArray(combined,
+                        dims=seafloor_age_grid.dims,
+                        coords=seafloor_age_grid.coords,
+                        attrs={'units': 'meters', 'long_name': 'topography-bathymetry'})
 
 
 def write_rotation_file(rotation_records, path, fixed_plate_id=0):
@@ -680,8 +1454,8 @@ def topo_polygons_to_boundaries(plate_polygons):
                 'plateid1_poly2': feat_to_plateid.get(unique_polys[1]) if len(unique_polys) > 1 else None
             })
 
-    boundaries_gdf = gpd.GeoDataFrame(boundaries, geometry='geometry')
-    
+    boundaries_gdf = gpd.GeoDataFrame(boundaries, geometry='geometry').set_crs(epsg=4326)
+
     return boundaries_gdf
 
 
