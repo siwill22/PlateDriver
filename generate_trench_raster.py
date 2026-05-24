@@ -122,9 +122,10 @@ def generate_trench_raster(boundaries_file,
         gj = json.load(fh)
     features = gj.get('features', [])
 
-    lons_grid = np.arange(-180.0 + spacing / 2.0, 180.0, spacing)
-    lats_grid = np.arange( -90.0 + spacing / 2.0,  90.0, spacing)
-    nlon, nlat = len(lons_grid), len(lats_grid)
+    nlon = int(round(360.0 / spacing)) + 1
+    nlat = int(round(180.0 / spacing)) + 1
+    lons_grid = np.linspace(-180.0, 180.0, nlon)
+    lats_grid = np.linspace( -90.0,  90.0, nlat)
 
     # Empty DataArray returned when there are no subduction segments
     def _zero_da():
