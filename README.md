@@ -1,5 +1,9 @@
 # PlateDriver — Self-Driving Plate Tectonics Simulation
 
+## Inspiration
+
+The core approach in PlateDriver — computing forces on plate boundaries and integrating them forward to derive stage rotations — is heavily inspired by the [Tectonic Explorer](https://github.com/concord-consortium/tectonic-explorer) project by the Concord Consortium. That project demonstrates that a small set of physically motivated boundary forces (slab pull, ridge push, collision resistance) is sufficient to produce broadly realistic plate motion on an interactive timescale. PlateDriver extends the same idea into a full simulation pipeline built on [GPlates](https://www.gplates.org) / pygplates, with raster-based plate tracking, tracer advection, and output compatible with GPlates workflows.
+
 ## What this is
 
 PlateDriver is a forward model of plate tectonic evolution. Starting from an initial set of tectonic plates (defined in GPlates format), the model computes the forces acting on each plate at every timestep, derives stage rotations, and evolves the plate geometry forward in time. The plates "drive themselves" — no prescribed rotation model is needed after the initial snapshot.
