@@ -830,6 +830,243 @@ def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_di
     return tracers
 
 
+def update_slab_tracers(slab_tracers, boundaries_gdf, delta_time,
+                         div_threshold_subduction=-0.0001,
+                         slowing_factor=4,
+                         sample_deg=1.0,
+                         upper_mantle_km=670.0,
+                         cmb_depth_km=2890.0,
+                         max_sink_rate_km_per_myr=200.0):
+    """Seed new slablets at subduction zones and sink existing ones downward.
+
+    slab_tracers is a plain DataFrame with columns:
+        lon, lat, depth_km, age, active, sink_rate_km_per_myr
+    All sinking is vertical — lon/lat stay fixed after seeding.
+    Sinking rate: upper mantle at full rate, lower mantle at rate/slowing_factor.
+    1 cm/yr convergence = 10 km/Myr sinking.
+    max_sink_rate_km_per_myr caps the rate; synthetic plates can have unrealistically
+    large convergence velocities, so this prevents slablets from racing to the CMB
+    in just a few steps (real maximum is ~100-200 km/Myr).
+    """
+    slab_tracers = slab_tracers.copy()
+
+    if len(slab_tracers) > 0:
+        active = slab_tracers['active'].astype(bool)
+        upper = active & (slab_tracers['depth_km'] < upper_mantle_km)
+        lower = active & (slab_tracers['depth_km'] >= upper_mantle_km)
+        slab_tracers.loc[upper, 'depth_km'] += (
+            slab_tracers.loc[upper, 'sink_rate_km_per_myr'] * delta_time)
+        slab_tracers.loc[lower, 'depth_km'] += (
+            slab_tracers.loc[lower, 'sink_rate_km_per_myr'] / slowing_factor * delta_time)
+        slab_tracers.loc[active, 'age'] += delta_time
+        slab_tracers.loc[slab_tracers['depth_km'] >= cmb_depth_km, 'active'] = False
+
+    if boundaries_gdf is None or 'divergence' not in boundaries_gdf.columns:
+        return slab_tracers
+
+    sub = boundaries_gdf[boundaries_gdf['divergence'] < div_threshold_subduction]
+    new_rows = []
+    for _, brow in sub.iterrows():
+        sink_rate = min(abs(float(brow['divergence'])) * 10.0,  # cm/yr → km/Myr
+                        max_sink_rate_km_per_myr)
+        coords = list(brow.geometry.coords)
+        for i in range(len(coords) - 1):
+            lon1, lat1 = coords[i]
+            lon2, lat2 = coords[i + 1]
+            dist = np.hypot(lon2 - lon1, lat2 - lat1)
+            n = max(int(dist / sample_deg), 1)
+            for lo, la in zip(np.linspace(lon1, lon2, n, endpoint=False),
+                              np.linspace(lat1, lat2, n, endpoint=False)):
+                new_rows.append({'lon': lo, 'lat': la,
+                                 'depth_km': 0.0, 'age': 0.0,
+                                 'active': True,
+                                 'sink_rate_km_per_myr': sink_rate})
+    if new_rows:
+        slab_tracers = pd.concat([slab_tracers, pd.DataFrame(new_rows)],
+                                  ignore_index=True)
+    return slab_tracers
+
+
+def update_cmb_heat(cmb_heat, slab_tracers, delta_time,
+                    spacing_deg=5.0,
+                    cmb_depth_km=2890.0,
+                    cmb_layer_km=400.0,
+                    heating_rate=0.02,
+                    slab_suppression=0.05,
+                    surface_coupling=0.1,
+                    sigma_deg=10.0,
+                    max_heat=3.0):
+    """Accumulate CMB heat each timestep, building LLSVP-like warm regions.
+
+    Core heating increments the 2D field (nlat × nlon) everywhere each step;
+    slablets suppress it with depth-weighted coupling.  A wide horizontal
+    Gaussian keeps the pattern large-scale.  Positive values = warm regions
+    (slow dVs); passed to generate_mantle_temp_field as the upwelling anomaly.
+
+    Two physical mechanisms are combined:
+      - Thermal (material): slablets near the CMB suppress with full weight (1.0).
+      - Dynamic pressure (incompressibility): surface slablets suppress with
+        surface_coupling weight, representing instantaneous Stokes-flow coupling.
+    Coupling varies linearly with depth from surface_coupling at 0 km to 1.0 at
+    cmb_depth_km, so the LLSVP anti-correlation with subduction appears from the
+    first timestep rather than waiting ~50 Myr for material to arrive physically.
+
+    Parameters
+    ----------
+    heating_rate : float
+        Heat units added per Myr everywhere (core heating).
+    slab_suppression : float
+        Heat units removed per slablet per Myr (at full coupling = CMB depth).
+    surface_coupling : float
+        Fractional coupling at depth=0 (0 = no instantaneous signal, 1 = full).
+        Default 0.1 represents ~10% of the CMB suppression felt immediately from
+        surface subduction via dynamic pressure.
+    sigma_deg : float
+        Horizontal Gaussian smoothing (degrees).  LLSVPs are large-scale features.
+    max_heat : float
+        Safety cap on accumulated heat units.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    nlat, nlon = cmb_heat.shape
+
+    # Core heating everywhere
+    cmb_heat = cmb_heat + heating_rate * delta_time
+
+    # Suppress from ALL active slablets with depth-weighted coupling.
+    # Coupling linearly interpolates from surface_coupling (dynamic pressure, depth=0)
+    # to 1.0 (physical material contact, depth=cmb_depth_km).
+    if len(slab_tracers) > 0:
+        all_active = slab_tracers[slab_tracers['active'].astype(bool)]
+        if len(all_active) > 0:
+            lons_f   = all_active['lon'].values.astype(float)
+            lats_f   = all_active['lat'].values.astype(float)
+            depths_f = all_active['depth_km'].values.astype(float)
+
+            coupling = surface_coupling + (1.0 - surface_coupling) * (depths_f / cmb_depth_km)
+            weights  = slab_suppression * delta_time * coupling
+
+            lon_idx = np.clip(np.floor((lons_f + 180) / spacing_deg).astype(int), 0, nlon - 1)
+            lat_idx = np.clip(np.floor((lats_f + 90)  / spacing_deg).astype(int), 0, nlat - 1)
+            suppress = np.zeros_like(cmb_heat)
+            np.add.at(suppress, (lat_idx, lon_idx), weights)
+            cmb_heat = np.maximum(cmb_heat - suppress, 0.0)
+
+    # Wide horizontal Gaussian — LLSVPs are large-scale features
+    sig = sigma_deg / spacing_deg
+    cmb_heat = gaussian_filter(cmb_heat, sigma=[sig, sig], mode=['reflect', 'wrap'])
+
+    return np.minimum(cmb_heat, max_heat)
+
+
+def generate_mantle_temp_field(slab_tracers,
+                                spacing_deg=5.0,
+                                depth_interval_km=100.0,
+                                max_depth_km=2890.0,
+                                temp_anomaly_K=-500.0,
+                                thermal_tau_myr=200.0,
+                                dVs_per_K=-0.001,
+                                sigma_deg=3.0,
+                                sigma_depth_km=150.0,
+                                cmb_heat=None,
+                                cmb_dVs_scale=-0.5,
+                                cmb_decay_km=400.0,
+                                tomo_smooth_horiz_deg=0.0,
+                                tomo_smooth_depth_km=0.0):
+    """Bin slab tracers onto a 3D grid and return a dVs/Vs anomaly Dataset.
+
+    Each slablet contributes a cold temperature anomaly (temp_anomaly_K, default -500 K)
+    that decays exponentially with age (thermal_tau_myr).  The summed ΔT per grid cell
+    is Gaussian-smoothed and converted to dVs/Vs % (dVs_per_K, default -0.001 %/K,
+    so a fresh slab gives -0.5% per slablet per cell).
+
+    If cmb_heat (a 2D nlat×nlon array from update_cmb_heat) is provided, a warm
+    negative-dVs anomaly is added in the deepest layers, decaying upward with a
+    Gaussian envelope of half-width cmb_decay_km.
+
+    Returns xr.Dataset with variables 'dVs' and optionally 'cmb_heat'
+    (dims: depth, lat, lon).
+    """
+    from scipy.ndimage import gaussian_filter
+
+    lons_g  = np.arange(-180 + spacing_deg / 2, 180, spacing_deg)
+    lats_g  = np.arange( -90 + spacing_deg / 2,  90, spacing_deg)
+    depths_g = np.arange(depth_interval_km / 2, max_depth_km, depth_interval_km)
+    nlon, nlat, ndepth = len(lons_g), len(lats_g), len(depths_g)
+    field = np.zeros((ndepth, nlat, nlon), dtype=float)
+
+    if len(slab_tracers) > 0:
+        active = slab_tracers[slab_tracers['active'].astype(bool)]
+        if len(active) > 0:
+            ages_f   = active['age'].values.astype(float)
+            lons_f   = active['lon'].values.astype(float)
+            lats_f   = active['lat'].values.astype(float)
+            depths_f = active['depth_km'].values.astype(float)
+
+            dT  = temp_anomaly_K * np.exp(-ages_f / thermal_tau_myr)
+            dVs = dT * dVs_per_K
+
+            lon_idx = np.clip(
+                np.floor((lons_f + 180) / spacing_deg).astype(int), 0, nlon - 1)
+            lat_idx = np.clip(
+                np.floor((lats_f + 90)  / spacing_deg).astype(int), 0, nlat - 1)
+            dep_idx = np.clip(
+                np.floor(depths_f / depth_interval_km).astype(int), 0, ndepth - 1)
+            np.add.at(field, (dep_idx, lat_idx, lon_idx), dVs)
+
+            sig_sp  = sigma_deg       / spacing_deg
+            sig_dep = sigma_depth_km  / depth_interval_km
+            field = gaussian_filter(field, sigma=[sig_dep, sig_sp, sig_sp],
+                                    mode=['reflect', 'reflect', 'wrap'])
+
+    # Inject LLSVP-like warm anomaly from CMB heat accumulation.
+    # Iterate deepest→shallowest; break once decay becomes negligible.
+    if cmb_heat is not None and cmb_heat.shape == (nlat, nlon):
+        _n_injected = 0
+        for dep_i in range(ndepth - 1, -1, -1):
+            dist_from_cmb = max_depth_km - depths_g[dep_i]
+            decay = np.exp(-(dist_from_cmb / cmb_decay_km) ** 2)
+            if decay < 1e-4:
+                break
+            field[dep_i] += cmb_heat * cmb_dVs_scale * decay
+            _n_injected += 1
+        print(f'  [mantle] LLSVP injected into {_n_injected} depth layers; '
+              f'cmb_heat range {cmb_heat.min():.3f}–{cmb_heat.max():.3f}; '
+              f'dVs at CMB: {field[-1].min():.4f}–{field[-1].max():.4f} %')
+    elif cmb_heat is not None:
+        print(f'  [mantle] WARNING: cmb_heat shape {cmb_heat.shape} != expected ({nlat},{nlon}) — LLSVP skipped')
+
+    for dep_i in range(ndepth):
+        field[dep_i] -= field[dep_i].mean()
+
+    if tomo_smooth_horiz_deg > 0 or tomo_smooth_depth_km > 0:
+        sig_h = tomo_smooth_horiz_deg / spacing_deg
+        sig_d = tomo_smooth_depth_km  / depth_interval_km
+        field = gaussian_filter(field,
+                                sigma=[max(sig_d, 1e-9), max(sig_h, 1e-9), max(sig_h, 1e-9)],
+                                mode=['reflect', 'reflect', 'wrap'])
+        for dep_i in range(ndepth):
+            field[dep_i] -= field[dep_i].mean()
+
+    data_vars = {
+        'dVs': xr.DataArray(
+            field, dims=['depth', 'lat', 'lon'],
+            coords={'depth': depths_g, 'lat': lats_g, 'lon': lons_g},
+            attrs={'units': '%',
+                   'long_name': 'dVs/Vs anomaly (positive = cold fast slab; negative = warm slow region)',
+                   'temp_anomaly_K': temp_anomaly_K,
+                   'thermal_tau_myr': thermal_tau_myr,
+                   'dVs_per_K': dVs_per_K}),
+    }
+    if cmb_heat is not None and cmb_heat.shape == (nlat, nlon):
+        data_vars['cmb_heat'] = xr.DataArray(
+            cmb_heat, dims=['lat', 'lon'],
+            coords={'lat': lats_g, 'lon': lons_g},
+            attrs={'units': 'heat units',
+                   'long_name': 'CMB heat accumulation (proxy for LLSVP intensity)'})
+    return xr.Dataset(data_vars)
+
+
 def generate_hotspot_locations(n=20, locations=None, seed=None):
     """Return a GeoDataFrame of fixed hot spot source points.
 

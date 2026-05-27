@@ -49,5 +49,27 @@ params:
   topo_andean_peak_m:          3000     # peak Andean elevation (m)
   topo_himalayan_max_dist_deg: 8.0      # half-width of Himalayan collision zone (degrees)
   topo_himalayan_peak_m:       5000     # peak Himalayan elevation (m)
-  n_hotspots:                  30       # number of randomly placed hot spot sources
+  n_hotspots:                  30       # number of randomly placed hot spot sources (ignored if hotspot_locations is set)
   hotspot_prob:                1.0      # probability of eruption per hot spot per timestep
+  #hotspot_locations:                 # optional: fix hotspot positions as [[lon,lat], ...]; overrides n_hotspots
+  #  - [25.0, -30.0]
+  #  - [-150.0, 20.0]
+  #  - [12, -31]
+  #  - [-5, -27]
+  #  - [13, 17]
+  #  - 
+  slab_tracers_enabled:        true    # set true to track slab sinking and produce mantle_temp_NNNN.nc
+  slab_slowing_factor:         4        # lower-mantle sinking slowdown (Lithgow-Bertelloni & Richards 1998)
+  slab_max_sink_rate:          400      # km/Myr; cap on sinking rate (real Earth max ~100-200 km/Myr)
+  slab_thermal_tau_myr:        4       # Myr; thermal decay timescale for slablets (lower = faster fade)
+  mantle_grid_spacing_deg:     5.0     # degrees; horizontal resolution of 3D mantle temp field
+  mantle_depth_interval_km:    100      # km; depth layer thickness
+  cmb_heating_rate:            0.02    # heat units added per Myr everywhere (core heating)
+  cmb_slab_suppression:        0.05    # heat units removed per slablet per Myr (at full coupling)
+  cmb_surface_coupling:        0.1     # fractional coupling at surface (0=thermal only, 1=full instantaneous)
+  cmb_sigma_deg:               10.0    # horizontal smoothing of CMB heat field (degrees)
+  cmb_max_heat:                3.0     # cap on heat accumulation units
+  cmb_dVs_scale:               -0.5   # dVs % per heat unit injected into 3D field (negative = warm)
+  cmb_decay_km:                400.0  # Gaussian decay length upward from CMB (km)
+  tomo_smooth_horiz_deg:       5.0    # tomographic blurring: horizontal Gaussian sigma (degrees; 0 = off)
+  tomo_smooth_depth_km:        150.0  # tomographic blurring: vertical Gaussian sigma (km; 0 = off)

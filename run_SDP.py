@@ -90,9 +90,19 @@ tracers = sdp.generate_seafloor_age_tracers(
     spreading_rate_km_per_myr=params['spreading_rate_km_per_myr'],
     div_threshold=params['div_threshold_ridge'])
 
-hotspot_locs = sdp.generate_hotspot_locations(n=params['n_hotspots'])
+_hs_locs = params.get('hotspot_locations', None)
+hotspot_locs = sdp.generate_hotspot_locations(n=params['n_hotspots'], locations=_hs_locs)
 seamounts = gpd.GeoDataFrame(columns=['geometry', 'hotspot_id', 'age', 'active'],
                              geometry='geometry').set_crs(epsg=4326)
+
+_slab_enabled = params.get('slab_tracers_enabled', False)
+if _slab_enabled:
+    slab_tracers = pd.DataFrame(
+        columns=['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr'])
+    _mantle_spacing = params.get('mantle_grid_spacing_deg', 5.0)
+    _cmb_nlat = len(np.arange(-90  + _mantle_spacing / 2, 90,  _mantle_spacing))
+    _cmb_nlon = len(np.arange(-180 + _mantle_spacing / 2, 180, _mantle_spacing))
+    cmb_heat = np.zeros((_cmb_nlat, _cmb_nlon))
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +151,35 @@ for i in range(1, int(total_time / delta_time) + 1):
     tracers = sdp.deactivate_subducted_tracers(tracers, boundaries_gdf,
                                                threshold=params['div_threshold_subduction'])
     _step_times['tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+    if _slab_enabled:
+        slab_tracers = sdp.update_slab_tracers(
+            slab_tracers, boundaries_gdf, delta_time,
+            div_threshold_subduction=params['div_threshold_subduction'],
+            slowing_factor=params.get('slab_slowing_factor', 4),
+            max_sink_rate_km_per_myr=params.get('slab_max_sink_rate', 200.0))
+        _step_times['slab_tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+        cmb_heat = sdp.update_cmb_heat(
+            cmb_heat, slab_tracers, delta_time,
+            spacing_deg=_mantle_spacing,
+            heating_rate=params.get('cmb_heating_rate', 0.02),
+            slab_suppression=params.get('cmb_slab_suppression', 0.05),
+            surface_coupling=params.get('cmb_surface_coupling', 0.1),
+            sigma_deg=params.get('cmb_sigma_deg', 10.0),
+            max_heat=params.get('cmb_max_heat', 3.0))
+        _step_times['cmb_heat'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+        if 'divergence' in boundaries_gdf.columns:
+            _sub = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
+            _active_slabs = slab_tracers[slab_tracers['active'].astype(bool)]
+            print('  [slab] sub-bdry div (cm/yr): min={:.3f} max={:.3f}  '
+                  'sink_rate (km/Myr): max={:.1f}  '
+                  'slablets: n={:d} depth={:.0f}-{:.0f} km'.format(
+                      float(_sub['divergence'].min()) if len(_sub) else 0.0,
+                      float(_sub['divergence'].max()) if len(_sub) else 0.0,
+                      float(_active_slabs['sink_rate_km_per_myr'].max()) if len(_active_slabs) else 0.0,
+                      len(_active_slabs),
+                      float(_active_slabs['depth_km'].min()) if len(_active_slabs) else 0.0,
+                      float(_active_slabs['depth_km'].max()) if len(_active_slabs) else 0.0))
 
     seamounts = sdp.advect_tracers(seamounts, rasters['plate_id'], stage_pole_dict, delta_time,
                                    boundaries_gdf=boundaries_gdf,
@@ -196,6 +235,10 @@ for i in range(1, int(total_time / delta_time) + 1):
                        'azimuth': azimuth,
                        'magnitude': magnitude / (2000. * delta_time)},
                  style='V0.15c+e+a45+ggray40+n', pen='0.1p,black', fill='black')
+        _active_sm = seamounts[seamounts.active.astype(bool)]
+        if len(_active_sm):
+            fig.plot(x=_active_sm.geometry.x.values, y=_active_sm.geometry.y.values,
+                     style='t0.2c', fill='red', pen='0.5p,black')
         fig.plot(data=gpml2gdf(cratons), pen='1p,black', fill='grey', transparency=50)
         label_pts = new_plate_polygons.representative_point()
         fig.text(x=label_pts.x, y=label_pts.y,
@@ -296,6 +339,21 @@ for i in range(1, int(total_time / delta_time) + 1):
                 _out('seamounts_{:04d}.geojson'.format(i)), driver='GeoJSON')
 
         _step_times['save_outputs'] = time.perf_counter() - _t0
+
+        if _slab_enabled:
+            _t0 = time.perf_counter()
+            mantle_temp = sdp.generate_mantle_temp_field(
+                slab_tracers,
+                spacing_deg=params.get('mantle_grid_spacing_deg', 5.0),
+                depth_interval_km=params.get('mantle_depth_interval_km', 100.0),
+                thermal_tau_myr=params.get('slab_thermal_tau_myr', 200.0),
+                cmb_heat=cmb_heat,
+                cmb_dVs_scale=params.get('cmb_dVs_scale', -0.5),
+                cmb_decay_km=params.get('cmb_decay_km', 400.0),
+                tomo_smooth_horiz_deg=params.get('tomo_smooth_horiz_deg', 0.0),
+                tomo_smooth_depth_km=params.get('tomo_smooth_depth_km', 0.0))
+            mantle_temp.to_netcdf(_out('mantle_temp_{:04d}.nc'.format(i)))
+            _step_times['mantle_temp'] = time.perf_counter() - _t0
 
     total = sum(_step_times.values())
     print('  --- step timing (step {:d}, {:.1f}s total) ---'.format(i, total))
