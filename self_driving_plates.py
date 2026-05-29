@@ -192,23 +192,14 @@ def compute_boundary_divergence(boundaries_gdf, stage_pole_dict, delta_time, pla
     = subduction.  Different segments of the same plate-pair boundary can have
     different signs, correctly capturing oblique or mixed boundaries.
 
-    Sign: dot(centroid_pid1_xyz, arc_normal) > 0 → normal points toward pid1 → sign=+1.
-    Falls back to raster probe when plate_polygons_gdf is not provided.
+    Sign is determined by probing the plate-ID raster on both sides of each segment
+    midpoint — more robust than a centroid hemisphere test for large or concave plates.
     """
     identity = pygplates.FiniteRotation()
     OFFSET_DEG = 0.5
 
     pid_raster = plate_id_raster.rename({k: v for k, v in {'x': 'lon', 'y': 'lat'}.items()
                                          if k in plate_id_raster.dims})
-
-    # Build centroid lookup: pid → geocentric (x,y,z) tuple — stable sign reference
-    pid_to_centroid_xyz = {}
-    if plate_polygons_gdf is not None:
-        for _, prow in plate_polygons_gdf.iterrows():
-            pid = prow.get('PLATEID1')
-            if pid and pid not in pid_to_centroid_xyz:
-                rep = prow.geometry.representative_point()
-                pid_to_centroid_xyz[pid] = pygplates.PointOnSphere(rep.y, rep.x).to_xyz()
 
     new_rows = []
     for _, row in boundaries_gdf.iterrows():
@@ -241,29 +232,26 @@ def compute_boundary_divergence(boundaries_gdf, stage_pole_dict, delta_time, pla
                 [pt], [seg_normal])[0]
             n_north, n_east = seg_nl.get_x(), seg_nl.get_y()
 
-            # Sign: centroid hemisphere test (preferred) or raster probe (fallback)
-            if pid1 in pid_to_centroid_xyz:
-                c = pid_to_centroid_xyz[pid1]
-                dot_val = seg_normal.get_x()*c[0] + seg_normal.get_y()*c[1] + seg_normal.get_z()*c[2]
-                sign = 1 if dot_val > 0 else -1
-            elif pid2 in pid_to_centroid_xyz:
-                c = pid_to_centroid_xyz[pid2]
-                dot_val = seg_normal.get_x()*c[0] + seg_normal.get_y()*c[1] + seg_normal.get_z()*c[2]
-                sign = -1 if dot_val > 0 else 1
+            # Sign: probe raster on both sides of the segment midpoint.
+            # Probing both directions handles triple-junction edges where one probe
+            # may land on a third plate, and avoids the centroid hemisphere test which
+            # fails for large or concave plate geometries.
+            try:
+                pos_lon = float(np.clip(mid_lon + OFFSET_DEG * n_east,  -180, 180))
+                pos_lat = float(np.clip(mid_lat + OFFSET_DEG * n_north,  -90,  90))
+                neg_lon = float(np.clip(mid_lon - OFFSET_DEG * n_east,  -180, 180))
+                neg_lat = float(np.clip(mid_lat - OFFSET_DEG * n_north,  -90,  90))
+                pos_val = int(pid_raster.sel(lon=pos_lon, lat=pos_lat, method='nearest').item())
+                neg_val = int(pid_raster.sel(lon=neg_lon, lat=neg_lat, method='nearest').item())
+            except Exception:
+                continue
+
+            if pos_val == pid1 or neg_val == pid2:
+                sign = 1    # normal points toward pid1
+            elif pos_val == pid2 or neg_val == pid1:
+                sign = -1   # normal points toward pid2
             else:
-                probe_lon = float(np.clip(mid_lon + OFFSET_DEG * n_east, -180, 180))
-                probe_lat = float(np.clip(mid_lat + OFFSET_DEG * n_north,  -90,  90))
-                try:
-                    probe_val = int(pid_raster.sel(lon=probe_lon, lat=probe_lat,
-                                                   method='nearest').item())
-                except Exception:
-                    probe_val = 0
-                if probe_val == pid1:
-                    sign = 1
-                elif probe_val == pid2:
-                    sign = -1
-                else:
-                    continue
+                continue    # neither probe hit pid1 or pid2 (e.g. triple junction)
 
             v1 = pygplates.calculate_velocities([pt], stage_pole_dict.get(pid1, identity), delta_time)[0]
             v2 = pygplates.calculate_velocities([pt], stage_pole_dict.get(pid2, identity), delta_time)[0]
@@ -505,7 +493,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     new_plate_polygons = new_plate_polygons[new_plate_polygons.geometry.geom_type.isin(['Polygon'])]
     _ct['update_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    new_plate_polygons = resolve_duplicate_plateids(new_plate_polygons, next_plateid=None)
+    new_plate_polygons = resolve_duplicate_plateids(new_plate_polygons, next_plateid=None,
+                                                    cratons_gdf=valid_cratons if cratons is not None else None)
     _ct['resolve_duplicates'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons)
@@ -1715,16 +1704,22 @@ def touches_dateline(geom, tol=1e-6):
     coords = np.array(geom.exterior.coords)
     return np.any(np.abs(np.abs(coords[:, 0]) - 180) < tol)
 
-def resolve_duplicate_plateids(gdf, next_plateid=None):
+def resolve_duplicate_plateids(gdf, next_plateid=None, cratons_gdf=None):
     if next_plateid is None:
         next_plateid = gdf['PLATEID1'].max() + 1
-    
+
     gdf = gdf.copy()
-    
+
+    # Pre-compute a union geometry per craton plate ID so we can check intersection cheaply
+    craton_union_by_id = {}
+    if cratons_gdf is not None and len(cratons_gdf):
+        for cid, cgroup in cratons_gdf.groupby('PLATEID1'):
+            craton_union_by_id[int(cid)] = cgroup.union_all()
+
     for plateid, group in gdf.groupby('PLATEID1'):
         if len(group) <= 1:
             continue
-        
+
         # Identify which can be reassigned (not touching dateline)
         for idx in group.index:
             geom = gdf.loc[idx, 'geometry']
@@ -1732,20 +1727,32 @@ def resolve_duplicate_plateids(gdf, next_plateid=None):
                 on_dateline = any(touches_dateline(p) for p in geom.geoms)
             else:
                 on_dateline = touches_dateline(geom)
-            
+
             gdf.loc[idx, '_on_dateline'] = on_dateline
-        
+
         # Reassign all but one (prefer keeping dateline polygons unchanged)
-        candidates = group.index[~gdf.loc[group.index, '_on_dateline']]
+        candidates = list(group.index[~gdf.loc[group.index, '_on_dateline']])
+
+        # If this plate ID belongs to a craton, keep the fragment that contains the
+        # craton geometry — prevents the craton-override raster from creating an orphan
+        # island the following timestep when the larger plate retains the original ID
+        if int(plateid) in craton_union_by_id:
+            craton_geom = craton_union_by_id[int(plateid)]
+            preferred = next(
+                (idx for idx in candidates
+                 if gdf.loc[idx, 'geometry'].intersects(craton_geom)),
+                None)
+            if preferred is not None:
+                candidates = [preferred] + [c for c in candidates if c != preferred]
+
         keep_one = True
-        
         for idx in candidates:
             if keep_one:
                 keep_one = False
                 continue
             gdf.loc[idx, 'PLATEID1'] = next_plateid
             next_plateid += 1
-    
+
     gdf = gdf.drop(columns=['_on_dateline'], errors='ignore')
     return gdf
 
