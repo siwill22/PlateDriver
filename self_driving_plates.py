@@ -1,4 +1,5 @@
 import time
+import math
 import pygplates
 from gprm.utils.create_gpml import gpml2gdf, gdf2gpml
 from gprm.utils.proximity import rasterize_polygons
@@ -281,10 +282,15 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             divergence_threshold_for_subduction=-1.0,
                             divergence_threshold_for_ridge_push=1.0,
                             boundary_search_radius_deg=2,
-                            polarity_dict=None):
+                            polarity_dict=None,
+                            collision_pairs=None,
+                            collision_mode='resistance'):
 
     if polarity_dict is None:
         polarity_dict = {}
+
+    if collision_pairs is None:
+        collision_pairs = set()
 
     # Craton pixel count per plate ID — used to determine overriding plate at new boundaries
     craton_pixel_counts = {}
@@ -388,11 +394,19 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                                 polarity_dict[pair] = id1   # both oceanic: arbitrary
 
                     if continental_collision:
-
-                        normal_reversal = -1 * clockwise_flag
-                        segment_torque = pdriver.get_torque_for_segment(segment, normal_reversal)
-
-                        net_torque = net_torque - segment_torque * forces.get('continental_collision', 0)
+                        if collision_mode == 'coupling':
+                            # New behaviour: contribute zero torque; record pair for post-step
+                            # velocity blending.  The convergence driving force is gone because
+                            # there is no longer a subducting slab to pull the plate forward.
+                            if pid_current and pid_neighbor and pid_current > 0 and pid_neighbor > 0:
+                                collision_pairs.add((min(pid_current, pid_neighbor),
+                                                     max(pid_current, pid_neighbor)))
+                        else:
+                            # Original behaviour: subtract a resistance torque scaled by the
+                            # continental_collision force parameter.
+                            normal_reversal = -1 * clockwise_flag
+                            segment_torque = pdriver.get_torque_for_segment(segment, normal_reversal)
+                            net_torque = net_torque - segment_torque * forces.get('continental_collision', 0)
 
                     elif downgoing_plate:
 
@@ -445,10 +459,268 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
         torque_dict[plate.get_reconstruction_plate_id()] = net_torque
         new_stage_pole_dict[plate.get_reconstruction_plate_id()] = computed_stage_rotation
 
-    return new_stage_pole_dict
+    return new_stage_pole_dict, collision_pairs
 
 
-def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None, polarity_dict=None):
+def apply_collision_coupling(stage_pole_dict, collision_pairs,
+                              collision_state, plate_pixel_counts, params):
+    """Blend stage poles of actively colliding plate pairs toward each other.
+
+    Simulates the progressive suturing of continents (India–Asia style): the
+    longer two cratons have been in contact, the more their velocities are
+    coupled.  Coupling is area-weighted so the smaller plate adjusts more.
+
+    collision_state is mutated in-place: ages for active pairs are incremented,
+    pairs no longer colliding are pruned.
+    """
+    coupling_max  = params.get('collision_coupling_max', 0.0)
+    timescale     = params.get('collision_coupling_timescale', 30)
+    if coupling_max <= 0:
+        return
+
+    def rot_to_vec(rot):
+        if rot.represents_identity_rotation():
+            return np.zeros(3)
+        lat, lon, ang = rot.get_lat_lon_euler_pole_and_angle_degrees()
+        ang_r = math.radians(ang)
+        lat_r = math.radians(lat)
+        lon_r = math.radians(lon)
+        return np.array([math.cos(lat_r) * math.cos(lon_r),
+                         math.cos(lat_r) * math.sin(lon_r),
+                         math.sin(lat_r)]) * ang_r
+
+    def vec_to_rot(v):
+        ang = float(np.linalg.norm(v))
+        if ang < 1e-12:
+            return pygplates.FiniteRotation()
+        axis = v / ang
+        lat = math.degrees(math.asin(float(np.clip(axis[2], -1.0, 1.0))))
+        lon = math.degrees(math.atan2(float(axis[1]), float(axis[0])))
+        return pygplates.FiniteRotation((lat, lon), math.degrees(ang))
+
+    # Update collision ages: increment active pairs, prune inactive ones
+    for pair in list(collision_state.keys()):
+        if pair not in collision_pairs:
+            del collision_state[pair]
+    for pair in collision_pairs:
+        collision_state[pair] = collision_state.get(pair, 0) + 1
+
+    for (pid_lo, pid_hi), age in collision_state.items():
+        if pid_lo not in stage_pole_dict or pid_hi not in stage_pole_dict:
+            continue
+        alpha    = min(coupling_max, age / timescale * coupling_max)
+        area_lo  = plate_pixel_counts.get(pid_lo, 1)
+        area_hi  = plate_pixel_counts.get(pid_hi, 1)
+        total    = area_lo + area_hi
+        vA       = rot_to_vec(stage_pole_dict[pid_lo])
+        vB       = rot_to_vec(stage_pole_dict[pid_hi])
+        v_target = (area_lo * vA + area_hi * vB) / total
+        stage_pole_dict[pid_lo] = vec_to_rot(vA + alpha * (v_target - vA))
+        stage_pole_dict[pid_hi] = vec_to_rot(vB + alpha * (v_target - vB))
+        print(f'  [collision] pair ({pid_lo},{pid_hi}) age={age} coupling={alpha:.3f}')
+
+
+def apply_plate_merges(plate_id_raster, merge_pairs):
+    """Replace pixels of smaller plate IDs with larger plate IDs.
+    merge_pairs: iterable of (pid_large, pid_small).
+    """
+    if not merge_pairs:
+        return plate_id_raster
+    vals = plate_id_raster.values.copy()
+    for pid_large, pid_small in merge_pairs:
+        mask = vals == pid_small
+        if mask.any():
+            vals[mask] = pid_large
+            print(f'  [merge] Plate {pid_small} absorbed into {pid_large} ({int(mask.sum())} px)')
+    return xr.DataArray(vals, dims=plate_id_raster.dims, coords=plate_id_raster.coords)
+
+
+def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
+                             craton_raster=None, cooldown_pids=None):
+    """Detect geometric necks and split implausible plates in the raster.
+
+    Screens plates by concavity ratio and aspect ratio, then uses
+    skimage.morphology.skeletonize + distance transform to locate the
+    narrowest neck and executes a raster cut perpendicular to the skeleton
+    at that point.
+
+    Returns (updated_raster, split_info) where split_info is a list of
+    (new_pid, parent_pid) for stage-pole inheritance by the caller.
+    """
+    try:
+        from skimage.morphology import skeletonize
+        from skimage.measure import label as sk_label
+        from scipy.ndimage import distance_transform_edt
+    except ImportError:
+        print('  [fragment] skimage/scipy not available — skipping')
+        return plate_id_raster, []
+
+    if cooldown_pids is None:
+        cooldown_pids = set()
+
+    min_concavity = params.get('min_concavity_ratio', 0.85)
+    max_aspect    = params.get('max_aspect_ratio', 4.0)
+    rsp           = params.get('raster_spacing', 1.0)
+    min_child_px  = max(4, int(params.get('min_child_area_deg2', 25.0) / rsp ** 2))
+
+    vals = plate_id_raster.values.copy()
+    lats = plate_id_raster.lat.values   # latitude of each raster row
+    split_info = []
+    next_pid = int(new_plate_polygons['PLATEID1'].max()) + 1
+
+    for _, row in new_plate_polygons.iterrows():
+        pid = int(row['PLATEID1'])
+        if pid in cooldown_pids:
+            continue
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+
+        hull_area = geom.convex_hull.area
+        if hull_area < 1e-10:
+            continue
+        concavity = geom.area / hull_area
+        b = geom.bounds
+        dx, dy = b[2] - b[0], b[3] - b[1]
+        if min(dx, dy) < 1e-10:
+            continue
+
+        # FIX 1: Physical aspect ratio — scale longitude extent by cos(lat).
+        # Without this, circumpolar plates (large dx in degrees, small dy) always
+        # trigger fragmentation even when they are physically compact.
+        lat_c   = (b[1] + b[3]) / 2.0
+        dx_phys = dx * np.cos(np.radians(lat_c))
+        aspect  = max(dx_phys, dy) / max(min(dx_phys, dy), 1e-10)
+
+        if concavity >= min_concavity and aspect <= max_aspect:
+            continue
+
+        mask = (vals == pid).astype(np.uint8)
+        if int(mask.sum()) < max(min_child_px * 2, 20):
+            continue
+
+        # FIX 2: Equal-area skeleton and distance transform.
+        # The raster is equirectangular — pixels at high latitudes are physically
+        # much narrower in the E-W direction. Skeletonize and EDT in raw pixel
+        # space give wrong medial-axis paths and wrong "radius" values near poles.
+        # Solution: extract a tight sub-array and compress each row by cos(lat)
+        # so all pixels represent equal physical area before skeletonizing.
+
+        pr, pc = np.where(mask)
+        r0, r1 = int(pr.min()), int(pr.max())
+        c0, c1 = int(pc.min()), int(pc.max())
+        sub      = mask[r0:r1+1, c0:c1+1]
+        sub_lats = lats[r0:r1+1]
+        cos_lats = np.abs(np.cos(np.radians(sub_lats)))
+        max_cos  = float(cos_lats.max())
+        nr, nc   = sub.shape
+
+        # Guard: if the plate spans > 75% of the raster longitude (dateline-
+        # wrapping or genuinely circumpolar), skip equal-area resampling and
+        # fall back to using the sub-array as-is.
+        full_width_frac = (c1 - c0 + 1) / mask.shape[1]
+        if full_width_frac > 0.75:
+            ea = sub.copy()
+            # Map ea coords → orig raster coords is trivial (no column offset)
+            def _ea_col_to_orig(ri, c_ea):
+                return c0 + min(c_ea, nc - 1)
+        else:
+            # Build equal-area mask: for each row resample columns by cos(lat).
+            # Each column in ea-space represents equal physical longitude width.
+            ea = np.zeros((nr, nc), dtype=np.uint8)
+            for ri in range(nr):
+                scale = cos_lats[ri] / max_cos   # 1.0 at most-equatorial row
+                if scale >= 0.99:
+                    ea[ri] = sub[ri]
+                else:
+                    ea_w = max(1, int(round(nc * scale)))
+                    ea_c = np.arange(ea_w)
+                    # Inverse sample: which source column feeds each ea column?
+                    src_c = np.clip(np.round(ea_c / scale).astype(int), 0, nc - 1)
+                    ea[ri, :ea_w] = sub[ri, src_c]
+
+            def _ea_col_to_orig(ri, c_ea):
+                scale = cos_lats[ri] / max_cos
+                c_sub = int(round(c_ea / max(scale, 1e-3)))
+                return c0 + min(c_sub, nc - 1)
+
+        try:
+            skeleton = skeletonize(ea)
+        except Exception:
+            continue
+
+        skel_pts = np.argwhere(skeleton)
+        if len(skel_pts) < 3:
+            continue
+
+        # EDT on the equal-area mask: pixel distances now approximate physical
+        # distances, so the minimum gives the physically narrowest neck.
+        dist       = distance_transform_edt(ea)
+        skel_radii = dist[skeleton > 0]
+        neck_idx   = int(np.argmin(skel_radii))
+        neck_row_ea, neck_col_ea = skel_pts[neck_idx]
+        neck_radius = float(skel_radii[neck_idx])
+
+        # Map neck back to full-raster coordinates
+        neck_row  = r0 + int(neck_row_ea)
+        neck_col  = _ea_col_to_orig(int(neck_row_ea), int(neck_col_ea))
+
+        # Skeleton principal direction from nearby points in ea space
+        win = max(3, int(neck_radius * 2))
+        nearby = skel_pts[
+            (np.abs(skel_pts[:, 0] - neck_row_ea) <= win) &
+            (np.abs(skel_pts[:, 1] - neck_col_ea) <= win)
+        ]
+        if len(nearby) < 2:
+            continue
+        centered = nearby - nearby.mean(axis=0)
+        _, eigvecs = np.linalg.eigh(centered.T @ centered)
+        main_dir = eigvecs[:, -1]
+        cut_dir  = np.array([-main_dir[1], main_dir[0]])   # perpendicular
+
+        # Draw cutting line in original raster space, mapping each ea point back
+        cut_mask = mask.copy()
+        cut_len  = int(np.ceil(neck_radius * 2.5)) + 2
+        for t in range(-cut_len, cut_len + 1):
+            r_ea = int(neck_row_ea) + int(round(t * cut_dir[0]))
+            c_ea = int(neck_col_ea) + int(round(t * cut_dir[1]))
+            if not (0 <= r_ea < nr):
+                continue
+            r_orig = r0 + r_ea
+            c_orig = _ea_col_to_orig(r_ea, c_ea)
+            if 0 <= r_orig < mask.shape[0] and 0 <= c_orig < mask.shape[1]:
+                cut_mask[r_orig, c_orig] = 0
+
+        # FIX 3: 4-connectivity (face-adjacent only).
+        # With 8-connectivity, two regions that meet only diagonally across a
+        # 1-pixel cut still count as connected, so the split never fires.
+        labeled = sk_label(cut_mask, connectivity=1)
+        labels  = [l for l in np.unique(labeled) if l > 0]
+        if len(labels) < 2:
+            continue
+
+        areas = {l: int((labeled == l).sum()) for l in labels}
+        valid = [l for l, a in areas.items() if a >= min_child_px]
+        if len(valid) < 2:
+            continue
+        valid.sort(key=lambda l: areas[l], reverse=True)
+
+        # Larger child keeps parent PID; smaller child gets new PID
+        child_label = valid[1]
+        child_mask  = (labeled == child_label) & (mask == 1)
+        new_pid = next_pid; next_pid += 1
+        vals[child_mask] = new_pid
+        split_info.append((new_pid, pid))
+        print(f'  [fragment] Plate {pid} → child {new_pid} '
+              f'(concavity={concavity:.2f} aspect={aspect:.1f} '
+              f'neck_r={neck_radius:.1f}px child_px={areas[child_label]})')
+
+    return xr.DataArray(vals, dims=plate_id_raster.dims, coords=plate_id_raster.coords), split_info
+
+
+def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None,
+                     polarity_dict=None, merge_pairs=None, fragmentation_cooldown_pids=None,
+                     collision_state=None):
     if params is None:
         params = {}
 
@@ -458,6 +730,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     div_thresh_sub            = params.get('div_threshold_subduction',  -1.0)
     div_thresh_ridge          = params.get('div_threshold_ridge',        1.0)
     boundary_search_radius    = params.get('boundary_search_radius_deg', 2)
+    collision_mode            = params.get('collision_mode',             'resistance')
 
     _ct = {}
     _t0 = time.perf_counter()
@@ -497,6 +770,34 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                                     cratons_gdf=valid_cratons if cratons is not None else None)
     _ct['resolve_duplicates'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
+    def _rebuild_polygons(raster):
+        polys = update_plate_polygons(raster, raster_spacing=raster_spacing,
+                                      topo_simplify=topo_simplify)
+        polys = polys.explode(index_parts=False).reset_index(drop=True)
+        polys = polys[polys.geometry.geom_type.isin(['Polygon'])]
+        return resolve_duplicate_plateids(polys, next_plateid=None,
+                                          cratons_gdf=valid_cratons if cratons is not None else None)
+
+    # Apply merges requested by caller (plates whose relative motion dropped to zero)
+    if merge_pairs:
+        plate_id_raster    = apply_plate_merges(plate_id_raster, merge_pairs)
+        new_plate_polygons = _rebuild_polygons(plate_id_raster)
+        _ct['merge'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+    # Plate fragmentation: split geometrically implausible plates at their neck
+    _split_info = []
+    if params.get('fragmentation_enabled', False):
+        plate_id_raster, _split_info = detect_and_split_plates(
+            plate_id_raster, new_plate_polygons, params,
+            craton_raster=craton_raster,
+            cooldown_pids=fragmentation_cooldown_pids or set())
+        if _split_info:
+            for new_pid, parent_pid in _split_info:
+                if parent_pid in stage_pole_dict:
+                    stage_pole_dict[new_pid] = stage_pole_dict[parent_pid]
+            new_plate_polygons = _rebuild_polygons(plate_id_raster)
+        _ct['fragment'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
     boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons)
     _ct['topo_boundaries'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
@@ -513,14 +814,25 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                        coords=velocity_grid_east.coords)
     _ct['velocity_grid'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    stage_pole_dict = polygons_to_stage_poles(new_plate_polygons, plate_id_raster, forces,
+    stage_pole_dict, _collision_pairs = polygons_to_stage_poles(
+                                              new_plate_polygons, plate_id_raster, forces,
                                               craton_raster,
                                               stage_pole_dict=stage_pole_dict,
                                               delta_time=delta_time,
                                               divergence_threshold_for_subduction=div_thresh_sub,
                                               divergence_threshold_for_ridge_push=div_thresh_ridge,
                                               boundary_search_radius_deg=boundary_search_radius,
-                                              polarity_dict=polarity_dict)
+                                              polarity_dict=polarity_dict,
+                                              collision_mode=collision_mode)
+
+    if collision_mode == 'coupling' and collision_state is not None and _collision_pairs:
+        _pvals = plate_id_raster.values.flatten()
+        _pvalid = _pvals[~np.isnan(_pvals) & (_pvals > 0)]
+        _pu, _pc = np.unique(_pvalid, return_counts=True)
+        _plate_pixel_counts = {int(k): int(v) for k, v in zip(_pu, _pc)}
+        apply_collision_coupling(stage_pole_dict, _collision_pairs,
+                                 collision_state, _plate_pixel_counts, params)
+
     _ct['stage_poles'] = time.perf_counter() - _t0
 
     _ct_total = sum(_ct.values())
@@ -543,7 +855,9 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     return new_plate_polygons, \
            stage_pole_dict, \
            xr.Dataset(rasters_dict), \
-           boundaries_gdf
+           boundaries_gdf, \
+           _split_info, \
+           collision_state if collision_state is not None else {}
 
 
 def seed_ridge_tracers(boundaries_gdf, spacing_deg=2.0,
