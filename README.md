@@ -18,6 +18,8 @@ The model tracks:
 - **Seafloor bathymetry** — derived from seafloor age via the GDH1 age-depth relation
 - **Slab tracers and mantle structure** — subducted material tracked vertically through the mantle; combined with a CMB heat accumulation proxy to produce a 3D dVs/Vs anomaly field analogous to seismic tomography
 - **Finite rotations** — accumulated from stage poles, written to a GPlates-compatible `.rot` file
+- **Plate fragmentation** — geometrically implausible plates (U-shapes, thin necks) can be split at their narrowest point; disabled by default
+- **Plate merging** — plates with persistently near-zero relative motion can be absorbed into their neighbour; disabled by default
 
 ## Inputs
 
@@ -56,7 +58,7 @@ All outputs go to the directory specified by `output_dir` in `config.yaml`.
 | `plate_id_NNNN.nc` | Every `csv_save_interval` steps | Plate ID raster (lon/lat) |
 | `craton_NNNN.nc` | Every `csv_save_interval` steps | Craton ID raster (lon/lat) |
 | `seamounts_final.geojson` | End of run | All active seamounts at final timestep |
-| `synthetic_rotations.rot` | End of run | GPlates rotation file with finite rotations for all plates at all timesteps |
+| `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file with finite rotations for all plates up to step NNNN |
 
 ## Key parameters (`config.yaml`)
 
@@ -189,6 +191,36 @@ params:
 
 Typical global tomography models have horizontal resolution ~500 km (~5°) and vertical resolution ~150 km.
 
+### Plate fragmentation
+
+Geometrically implausible plates are detected by shape screening and optionally split at their narrowest point. Both mechanisms are **disabled by default**.
+
+```yaml
+params:
+  fragmentation_enabled:       false  # split implausible plates at their neck
+  min_concavity_ratio:         0.85   # concavity (area/convex_hull_area) below this → check neck
+  max_aspect_ratio:            4.0    # bounding-box aspect ratio above this → check neck
+  min_child_area_deg2:         25.0   # minimum child plate area; prevents slivers
+  fragmentation_cooldown_myr:  5.0    # Myr before a plate can fragment again
+```
+
+Each candidate plate is rasterized and skeletonized (`skimage.morphology.skeletonize`). The skeleton point with the smallest inscribed-circle radius is the neck. A great-circle cut is drawn through the neck, perpendicular to the local skeleton. The raster is flood-filled to assign the two children: the larger child keeps the parent PLATEID; the smaller child receives a new PLATEID. Both children inherit the parent stage pole and diverge naturally in subsequent timesteps as the new boundary is classified by `compute_boundary_divergence`.
+
+### Plate merging
+
+Plates with persistently near-zero relative motion are absorbed into their largest neighbour.
+
+```yaml
+params:
+  merging_enabled:              false  # absorb plates with near-zero relative motion
+  merge_conservative_threshold: 0.05   # cm/yr; |divergence| below this = near-zero
+  merge_min_steps:              5      # consecutive near-zero steps before merge fires
+  merge_require_no_driver:      true   # only merge if smaller plate has no ridge/subduction
+  merge_cooldown_myr:           10.0   # Myr before merged plate is eligible again
+```
+
+A `_conservative_contact` counter is maintained across timesteps for each plate pair. When the mean absolute divergence stays below `merge_conservative_threshold` for `merge_min_steps` consecutive steps, the smaller plate's raster pixels are relabelled with the larger plate's ID. The merged polygon is re-derived from the updated raster; no special stage-pole initialisation is needed. A cooldown suppresses re-merging or re-fragmentation shortly after an event.
+
 ---
 
 ## Analysis scripts
@@ -219,21 +251,36 @@ Output: `boundary_stats.csv` with columns `timestep`, `ridge_length_km`, `subduc
 | `generate_trench_raster.py` | Standalone script — trench raster generation |
 | `blend_topobathy.py` | Standalone script — topography/bathymetry blending utilities |
 
+### Async output worker
+
+Plotting and file I/O are handled by a background daemon thread so the main simulation loop is never blocked waiting for a PNG to render or a NetCDF to be written. The worker (`_output_worker` in `run_SDP.py`) consumes from `_output_queue` (a `queue.Queue(maxsize=3)`). Each iteration the main loop enqueues a `('plot', payload)` task and, at save intervals, a `('save', payload)` task, then immediately proceeds to the next timestep.
+
+The `maxsize=3` limit applies backpressure: if the worker falls more than 3 tasks behind (e.g. when saving very large mantle temperature grids) the main loop pauses briefly rather than accumulating unbounded state. At the end of the run, `_output_queue.join()` ensures all queued tasks are fully written before the process exits.
+
+Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_records` are shallow-copied; `cmb_heat` and `slab_tracers` are copied with `.copy()`; cratons are converted from pygplates FeatureCollection to GeoDataFrame in the main thread before being passed to the worker.
+
 ### Per-timestep data flow
 
 ```
 nudge_polygons(new_plate_polygons, stage_pole_dict)
     → rpolygons (list of pygplates features, geometries advected by previous stage poles)
 
-compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, cratons, params, polarity_dict)
+compute_timestep(rpolygons, forces, stage_pole_dict, delta_time, cratons, params, polarity_dict,
+                 merge_pairs, fragmentation_cooldown_pids)
     → new_plate_polygons (GeoDataFrame, PLATEID1 col)
     → stage_pole_dict    (Dict[int, FiniteRotation])
     → rasters            (xr.Dataset: plate_id, velocity_east, velocity_north, divergence, craton)
     → boundaries_gdf     (GeoDataFrame: geometry(LineString), plateid1_poly1, plateid1_poly2,
                           divergence — one row per 2-vertex arc segment)
+    → split_info         (list of (new_pid, parent_pid) from fragmentation, or [])
 
 [accumulate finite rotations]
     cumulative_rotation_dict[pid] = stage_rot * cumulative_rotation_dict.get(pid, identity)
+
+[fragmentation / merging bookkeeping]
+    _conservative_contact updated per boundary pair
+    merge candidates fired if counter ≥ merge_min_steps → _merge_pairs for next compute_timestep
+    _plate_cooldown decremented; _fragmentation_cooldown_pids updated
 
 seed_ridge_tracers(boundaries_gdf, ...)   → new seafloor tracers
 advect_tracers(tracers, ...)              → tracers moved by stage rotation; age += delta_time
@@ -271,6 +318,10 @@ update_plate_id_raster        rasterize to plate_id grid; fill NaN via BallTree 
 update_plate_polygons         polygonize raster → toposimplify → clip to globe
 resolve_duplicate_plateids    rename duplicate PLATEID1s from polygon splits;
                               prefers the fragment containing craton geometry
+[apply_plate_merges]          if merge_pairs non-empty: replace smaller-plate pixels in raster,
+                              re-polygonize (merging_enabled only)
+[detect_and_split_plates]     shape-screen plates → skeletonize → neck cut → flood-fill;
+                              assign new PLATEID to smaller child (fragmentation_enabled only)
 topo_polygons_to_boundaries   extract shared boundary segments via TopoJSON
 compute_boundary_divergence   per-arc-segment relative normal velocity; sign determined
                               by probing the plate-ID raster on both sides of each segment
