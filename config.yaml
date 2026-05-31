@@ -94,11 +94,13 @@ params:
   collision_coupling_timescale:  30          # [coupling mode] timesteps to ramp from zero to max
 
   # --- Plate lifecycle (fragmentation & merging) ---
-  fragmentation_enabled:       false    # split geometrically implausible plates at their neck
-  min_concavity_ratio:         0.85     # concavity below this triggers neck check (1=convex)
-  max_aspect_ratio:            4.0      # aspect ratio above this triggers neck check
-  min_child_area_deg2:         25.0     # minimum child plate area in deg² (prevents slivers)
-  fragmentation_cooldown_myr:  5.0      # Myr before a plate can fragment again
+  fragmentation_enabled:       true    # split geometrically implausible plates at their neck
+  min_neck_ratio:              0.35    # cut if neck width < this fraction of typical plate body width
+  min_concavity_ratio:         0.85    # secondary trigger: concavity below this → also attempt cut
+  max_aspect_ratio:            2.0     # secondary trigger: aspect ratio above this → also attempt cut
+  min_child_area_deg2:         25.0    # minimum child plate area in deg² (prevents slivers)
+  min_peninsula_area_deg2:     5.0     # minimum fragment area when neck_ratio < 0.2 (thin peninsulas)
+  fragmentation_cooldown_myr:  5.0     # Myr before a plate can fragment again
   merging_enabled:             false    # absorb plates with persistently near-zero relative motion
   merge_conservative_threshold: 0.05   # cm/yr; boundary |divergence| below this = near-zero
   merge_min_steps:             5        # consecutive near-zero steps before merge fires
