@@ -110,6 +110,7 @@ _conservative_contact   = {}   # {(min_pid, max_pid): int consecutive near-zero 
 _plate_cooldown         = {}   # {pid: float remaining_myr before eligible again}
 _merge_pairs            = []   # [(pid_large, pid_small)] passed to next compute_timestep
 _fragmentation_cooldown_pids = set()
+_craton_plate_remap     = {}   # {craton_plateid: host_plateid} for absorbed cratons
 if _slab_enabled:
     slab_tracers = pd.DataFrame(
         columns=['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr'])
@@ -318,7 +319,13 @@ for i in range(1, int(total_time / delta_time) + 1):
     rpolygons = sdp.nudge_polygons(
         new_plate_polygons.explode(index_parts=False).reset_index(drop=True),
         stage_pole_dict)
-    cratons = sdp.nudge_polygons(cratons, stage_pole_dict)
+    # Absorbed cratons no longer have their own stage pole — supply the host's pole
+    # so the craton feature moves with the plate it was absorbed into.
+    _craton_stage_poles = dict(stage_pole_dict)
+    for _old_pid, _new_pid in _craton_plate_remap.items():
+        if _new_pid in stage_pole_dict:
+            _craton_stage_poles[_old_pid] = stage_pole_dict[_new_pid]
+    cratons = sdp.nudge_polygons(cratons, _craton_stage_poles)
     _step_times['nudge_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     (new_plate_polygons,
@@ -331,7 +338,8 @@ for i in range(1, int(total_time / delta_time) + 1):
                                               polarity_dict=polarity_dict,
                                               merge_pairs=_merge_pairs,
                                               fragmentation_cooldown_pids=_fragmentation_cooldown_pids,
-                                              collision_state=collision_state)
+                                              collision_state=collision_state,
+                                              craton_id_remap=_craton_plate_remap)
     _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     # for key, item in stage_pole_dict.items():

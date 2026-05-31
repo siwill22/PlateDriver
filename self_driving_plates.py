@@ -520,6 +520,57 @@ def apply_collision_coupling(stage_pole_dict, collision_pairs,
         print(f'  [collision] pair ({pid_lo},{pid_hi}) age={age} coupling={alpha:.3f}')
 
 
+def detect_enclosed_plates(plate_id_raster):
+    """Find plates that are completely surrounded by a single other plate.
+
+    A plate is "enclosed" if:
+      - None of its raster cells touch the world boundary (row 0, last row,
+        col 0, last col), and
+      - Every cell adjacent (4-connected) to one of its cells that belongs to
+        a *different* plate belongs to exactly ONE other plate ID.
+
+    Returns a list of (enclosing_pid, enclosed_pid) pairs suitable for
+    apply_plate_merges.  The enclosed plate should be absorbed into its
+    neighbour — having a plate entirely inside another is topologically
+    invalid and produces spurious internal boundaries.
+    """
+    vals = plate_id_raster.values
+    nrows, ncols = vals.shape
+
+    # Collect unique plate IDs (ignore NaN / 0)
+    flat = vals.ravel()
+    pids = set(int(v) for v in flat if not np.isnan(v) and v > 0)
+
+    merge_pairs = []
+    for pid in pids:
+        mask = (vals == pid)
+
+        # Check whether any cell of this plate touches the world boundary
+        if (mask[0, :].any() or mask[-1, :].any() or
+                mask[:, 0].any() or mask[:, -1].any()):
+            continue  # touches world edge → not enclosed
+
+        # Find all plate IDs that share a 4-connected boundary with this plate
+        r, c = np.where(mask)
+        neighbor_ids = set()
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr_ = r + dr
+            nc_ = c + dc
+            valid = (nr_ >= 0) & (nr_ < nrows) & (nc_ >= 0) & (nc_ < ncols)
+            nr_ = nr_[valid]
+            nc_ = nc_[valid]
+            for v in vals[nr_, nc_]:
+                if not np.isnan(v) and int(v) != pid and v > 0:
+                    neighbor_ids.add(int(v))
+
+        if len(neighbor_ids) == 1:
+            enclosing = next(iter(neighbor_ids))
+            print(f'  [topology] Plate {pid} is enclosed by plate {enclosing} — absorbing')
+            merge_pairs.append((enclosing, pid))
+
+    return merge_pairs
+
+
 def apply_plate_merges(plate_id_raster, merge_pairs):
     """Replace pixels of smaller plate IDs with larger plate IDs.
     merge_pairs: iterable of (pid_large, pid_small).
@@ -558,10 +609,12 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
     if cooldown_pids is None:
         cooldown_pids = set()
 
-    min_concavity = params.get('min_concavity_ratio', 0.85)
-    max_aspect    = params.get('max_aspect_ratio', 4.0)
-    rsp           = params.get('raster_spacing', 1.0)
-    min_child_px  = max(4, int(params.get('min_child_area_deg2', 25.0) / rsp ** 2))
+    min_concavity      = params.get('min_concavity_ratio',      0.85)
+    max_aspect         = params.get('max_aspect_ratio',          4.0)
+    min_neck_ratio     = params.get('min_neck_ratio',            0.35)
+    rsp                = params.get('raster_spacing',            1.0)
+    min_child_px       = max(4, int(params.get('min_child_area_deg2',    25.0) / rsp ** 2))
+    min_peninsula_px   = max(4, int(params.get('min_peninsula_area_deg2', 5.0) / rsp ** 2))
 
     vals = plate_id_raster.values.copy()
     lats = plate_id_raster.y.values   # latitude of each raster row
@@ -605,7 +658,9 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
         dx_phys = dx * np.cos(np.radians(lat_c))
         aspect  = max(dx_phys, dy) / max(min(dx_phys, dy), 1e-10)
 
-        if concavity >= min_concavity and aspect <= max_aspect:
+        # Fast skip: nearly circular/square plates can't have a dangerous neck.
+        # This avoids running skeleton on clearly compact shapes.
+        if concavity > 0.97 and aspect < 1.3:
             continue
 
         mask = (vals == pid).astype(np.uint8)
@@ -672,6 +727,23 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
         neck_row_ea, neck_col_ea = skel_pts[neck_idx]
         neck_radius = float(skel_radii[neck_idx])
 
+        # neck_ratio: how narrow is the narrowest point relative to the typical
+        # plate body width (75th-percentile EDT along the skeleton)?
+        # Low ratio → genuine bridge or peninsula. High ratio → uniform plate,
+        # no meaningful constriction (C/U/L shapes, tapered rectangles).
+        ref_radius = float(np.percentile(skel_radii, 75))
+        neck_ratio = neck_radius / max(ref_radius, 1e-3)
+
+        # Decide whether to attempt a cut.  neck_ratio is the primary criterion;
+        # global concavity and aspect are kept as secondary fallbacks.
+        should_cut = (
+            neck_ratio   < min_neck_ratio  # local constriction ← primary trigger
+            or concavity < min_concavity   # globally very concave (secondary)
+            or aspect    > max_aspect      # globally very elongated (secondary)
+        )
+        if not should_cut:
+            continue
+
         # Map neck back to full-raster coordinates
         neck_row  = r0 + int(neck_row_ea)
         neck_col  = _ea_col_to_orig(int(neck_row_ea), int(neck_col_ea))
@@ -711,7 +783,10 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
             continue
 
         areas = {l: int((labeled == l).sum()) for l in labels}
-        valid = [l for l, a in areas.items() if a >= min_child_px]
+        # For very thin necks (genuine peninsulas) allow the severed fragment
+        # to be smaller than the normal minimum so small fingers are not retained.
+        min_px = min_peninsula_px if neck_ratio < 0.2 else min_child_px
+        valid = [l for l, a in areas.items() if a >= min_px]
         if len(valid) < 2:
             continue
         valid.sort(key=lambda l: areas[l], reverse=True)
@@ -724,14 +799,15 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
         split_info.append((new_pid, pid))
         print(f'  [fragment] Plate {pid} → child {new_pid} '
               f'(concavity={concavity:.2f} aspect={aspect:.1f} '
-              f'neck_r={neck_radius:.1f}px child_px={areas[child_label]})')
+              f'neck_ratio={neck_ratio:.2f} neck_r={neck_radius:.1f}px '
+              f'child_px={areas[child_label]})')
 
     return xr.DataArray(vals, dims=plate_id_raster.dims, coords=plate_id_raster.coords), split_info
 
 
 def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None,
                      polarity_dict=None, merge_pairs=None, fragmentation_cooldown_pids=None,
-                     collision_state=None):
+                     collision_state=None, craton_id_remap=None):
     if params is None:
         params = {}
 
@@ -765,6 +841,17 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
         valid_cratons = wrapped_cratons.dropna(subset=['geometry'])
         valid_cratons = valid_cratons[~valid_cratons.geometry.is_empty]
         craton_raster = rasterize_polygons(valid_cratons, zval_field='PLATEID1', sampling=raster_spacing)
+        # Apply any accumulated craton plate ID remappings.  When a craton's original
+        # plate is absorbed into a host plate, its cells should immediately carry the
+        # host plate's ID so that (a) the craton override merges seamlessly with the
+        # host rather than re-creating a stale isolated plate, and (b) the craton
+        # moves with the host plate via nudge_polygons in run_SDP.py.
+        if craton_id_remap:
+            cr_vals = craton_raster.values.copy()
+            for old_id, new_id in craton_id_remap.items():
+                cr_vals[cr_vals == old_id] = new_id
+            craton_raster = xr.DataArray(cr_vals, dims=craton_raster.dims,
+                                         coords=craton_raster.coords)
         plate_id_raster = craton_raster.where(craton_raster>0, plate_id_raster)
     else:
         craton_raster = None
@@ -810,6 +897,27 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                     stage_pole_dict[new_pid] = stage_pole_dict[parent_pid]
             new_plate_polygons = _rebuild_polygons(plate_id_raster)
         _ct['fragment'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+    # Topology repair: absorb any plate that is completely enclosed within
+    # a single other plate.  This can occur when a neck closes (two sides of
+    # a peninsula fuse), trapping a small plate inside a larger one.  Such
+    # configurations are physically invalid and produce spurious internal
+    # boundaries with large divergence.
+    _enclosed = detect_enclosed_plates(plate_id_raster)
+    if _enclosed:
+        plate_id_raster    = apply_plate_merges(plate_id_raster, _enclosed)
+        new_plate_polygons = _rebuild_polygons(plate_id_raster)
+        # Record the remap so that (a) the craton_raster override next step uses
+        # the host plate's ID for enclosed-craton cells, and (b) nudge_polygons
+        # in run_SDP.py can supply the host's stage pole for those craton features.
+        if craton_id_remap is not None:
+            for enclosing, enclosed in _enclosed:
+                craton_id_remap[enclosed] = enclosing
+                # Propagate chains: if anything already pointed at 'enclosed', redirect it.
+                for k in list(craton_id_remap):
+                    if k != enclosed and craton_id_remap[k] == enclosed:
+                        craton_id_remap[k] = enclosing
+        _ct['enclosed_repair'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons,
                                                   raster_spacing=raster_spacing)
