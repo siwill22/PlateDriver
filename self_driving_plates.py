@@ -568,9 +568,22 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
     split_info = []
     next_pid = int(new_plate_polygons['PLATEID1'].max()) + 1
 
+    # Detect dateline-spanning plates: any plate with raster cells in BOTH the
+    # first (westernmost) and last (easternmost) columns wraps around ±180° and
+    # must never be fragmented — toposimplify can move polygon vertices enough
+    # that touches_dateline() misses them, but the raster check is always robust.
+    _first_col = vals[:, 0]
+    _last_col  = vals[:, -1]
+    _dateline_pids = (
+        set(int(v) for v in _first_col if not np.isnan(v) and v > 0) &
+        set(int(v) for v in _last_col  if not np.isnan(v) and v > 0)
+    )
+
     for _, row in new_plate_polygons.iterrows():
         pid = int(row['PLATEID1'])
         if pid in cooldown_pids:
+            continue
+        if pid in _dateline_pids:
             continue
         geom = row.geometry
         if geom is None or geom.is_empty:
@@ -615,34 +628,32 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
         max_cos  = float(cos_lats.max())
         nr, nc   = sub.shape
 
-        # Guard: if the plate spans > 75% of the raster longitude (dateline-
-        # wrapping or genuinely circumpolar), skip equal-area resampling and
-        # fall back to using the sub-array as-is.
+        # Guard: if a plate's bounding box spans > 75% of the raster longitude
+        # it is either dateline-wrapping or genuinely circumpolar; skip it.
+        # (Dateline-spanning plates are already caught by _dateline_pids above,
+        # but this handles circumpolar plates whose bbox is wide in pixel space.)
         full_width_frac = (c1 - c0 + 1) / mask.shape[1]
         if full_width_frac > 0.75:
-            ea = sub.copy()
-            # Map ea coords → orig raster coords is trivial (no column offset)
-            def _ea_col_to_orig(ri, c_ea):
-                return c0 + min(c_ea, nc - 1)
-        else:
-            # Build equal-area mask: for each row resample columns by cos(lat).
-            # Each column in ea-space represents equal physical longitude width.
-            ea = np.zeros((nr, nc), dtype=np.uint8)
-            for ri in range(nr):
-                scale = cos_lats[ri] / max_cos   # 1.0 at most-equatorial row
-                if scale >= 0.99:
-                    ea[ri] = sub[ri]
-                else:
-                    ea_w = max(1, int(round(nc * scale)))
-                    ea_c = np.arange(ea_w)
-                    # Inverse sample: which source column feeds each ea column?
-                    src_c = np.clip(np.round(ea_c / scale).astype(int), 0, nc - 1)
-                    ea[ri, :ea_w] = sub[ri, src_c]
+            continue
 
-            def _ea_col_to_orig(ri, c_ea):
-                scale = cos_lats[ri] / max_cos
-                c_sub = int(round(c_ea / max(scale, 1e-3)))
-                return c0 + min(c_sub, nc - 1)
+        # Build equal-area mask: for each row resample columns by cos(lat).
+        # Each column in ea-space represents equal physical longitude width.
+        ea = np.zeros((nr, nc), dtype=np.uint8)
+        for ri in range(nr):
+            scale = cos_lats[ri] / max_cos   # 1.0 at most-equatorial row
+            if scale >= 0.99:
+                ea[ri] = sub[ri]
+            else:
+                ea_w = max(1, int(round(nc * scale)))
+                ea_c = np.arange(ea_w)
+                # Inverse sample: which source column feeds each ea column?
+                src_c = np.clip(np.round(ea_c / scale).astype(int), 0, nc - 1)
+                ea[ri, :ea_w] = sub[ri, src_c]
+
+        def _ea_col_to_orig(ri, c_ea):
+            scale = cos_lats[ri] / max_cos
+            c_sub = int(round(c_ea / max(scale, 1e-3)))
+            return c0 + min(c_sub, nc - 1)
 
         try:
             skeleton = skeletonize(ea)
@@ -767,7 +778,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     _ct['update_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     new_plate_polygons = resolve_duplicate_plateids(new_plate_polygons, next_plateid=None,
-                                                    cratons_gdf=valid_cratons if cratons is not None else None)
+                                                    cratons_gdf=valid_cratons if cratons is not None else None,
+                                                    plate_id_raster=plate_id_raster)
     _ct['resolve_duplicates'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     def _rebuild_polygons(raster):
@@ -776,7 +788,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
         polys = polys.explode(index_parts=False).reset_index(drop=True)
         polys = polys[polys.geometry.geom_type.isin(['Polygon'])]
         return resolve_duplicate_plateids(polys, next_plateid=None,
-                                          cratons_gdf=valid_cratons if cratons is not None else None)
+                                          cratons_gdf=valid_cratons if cratons is not None else None,
+                                          plate_id_raster=raster)
 
     # Apply merges requested by caller (plates whose relative motion dropped to zero)
     if merge_pairs:
@@ -798,7 +811,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
             new_plate_polygons = _rebuild_polygons(plate_id_raster)
         _ct['fragment'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons)
+    boundaries_gdf = topo_polygons_to_boundaries(new_plate_polygons,
+                                                  raster_spacing=raster_spacing)
     _ct['topo_boundaries'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     boundaries_gdf = compute_boundary_divergence(boundaries_gdf, stage_pole_dict, delta_time, plate_id_raster,
@@ -1931,10 +1945,21 @@ def write_rotation_file(rotation_records, path, fixed_plate_id=0):
         f.write('\n'.join(lines) + '\n')
 
 
-def remove_boundary_segments(arc, lon_threshold=179.9, lat_threshold=89.9):
-    """Remove segments along dateline/poles but keep connecting segments"""
+def remove_boundary_segments(arc, lon_threshold=None, lat_threshold=None,
+                             raster_spacing=0.25):
+    """Remove arc segments that run along the dateline or poles.
+
+    Only called for arcs shared between two different plates (outer-boundary
+    arcs are excluded upstream).  Uses a narrow threshold (raster_spacing/4)
+    so only vertices at exactly ±180°/±90° (from clip) are filtered, while
+    real plate-boundary vertices at ±179.875° (0.25° grid cell edges) are kept.
+    """
+    if lon_threshold is None:
+        lon_threshold = 180.0 - raster_spacing / 4   # e.g. 179.9375 for 0.25° grid — catches
+    if lat_threshold is None:                        # exactly ±180° but not 179.875° cell edges
+        lat_threshold = 90.0 - raster_spacing / 4
     arc = np.asarray(arc)
-    
+
     # Check which points are on boundaries
     on_dateline = np.abs(np.abs(arc[:, 0]) - 180) < (180 - lon_threshold)
     on_pole = np.abs(arc[:, 1]) > lat_threshold
@@ -1963,8 +1988,8 @@ def remove_boundary_segments(arc, lon_threshold=179.9, lat_threshold=89.9):
     return sub_arcs
 
 
-def topo_polygons_to_boundaries(plate_polygons):
-    
+def topo_polygons_to_boundaries(plate_polygons, raster_spacing=0.25):
+
     topo = tp.Topology(plate_polygons, prequantize=False, toposimplify=False)
 
     topo_dict = topo.to_dict()
@@ -1991,18 +2016,28 @@ def topo_polygons_to_boundaries(plate_polygons):
     # Apply to all arcs with polygon IDs and PLATEID1
     boundaries = []
     for arc_idx, arc in enumerate(arcs):
-        sub_arcs = remove_boundary_segments(arc)
-
         poly_list = arc_to_polys.get(arc_idx, [])
         unique_polys = list(set(poly_list))
+
+        # Only process arcs shared between exactly two polygons with different PLATEIDs.
+        # Outer-boundary arcs (world edge at ±180°/±90°) have len==1 and are never real
+        # plate boundaries; same-plate arcs (duplicate ID fragments) are internal artifacts.
+        if len(unique_polys) < 2:
+            continue
+        pid1 = feat_to_plateid.get(unique_polys[0])
+        pid2 = feat_to_plateid.get(unique_polys[1])
+        if pid1 == pid2:
+            continue
+
+        sub_arcs = remove_boundary_segments(arc, raster_spacing=raster_spacing)
 
         for sub_arc in sub_arcs:
             boundaries.append({
                 'geometry': LineString(sub_arc),
-                'poly1': unique_polys[0] if len(unique_polys) > 0 else None,
-                'poly2': unique_polys[1] if len(unique_polys) > 1 else None,
-                'plateid1_poly1': feat_to_plateid.get(unique_polys[0]) if len(unique_polys) > 0 else None,
-                'plateid1_poly2': feat_to_plateid.get(unique_polys[1]) if len(unique_polys) > 1 else None
+                'poly1': unique_polys[0],
+                'poly2': unique_polys[1],
+                'plateid1_poly1': pid1,
+                'plateid1_poly2': pid2
             })
 
     boundaries_gdf = gpd.GeoDataFrame(boundaries, geometry='geometry').set_crs(epsg=4326)
@@ -2018,9 +2053,22 @@ def touches_dateline(geom, tol=1e-6):
     coords = np.array(geom.exterior.coords)
     return np.any(np.abs(np.abs(coords[:, 0]) - 180) < tol)
 
-def resolve_duplicate_plateids(gdf, next_plateid=None, cratons_gdf=None):
+def resolve_duplicate_plateids(gdf, next_plateid=None, cratons_gdf=None,
+                                plate_id_raster=None):
     if next_plateid is None:
         next_plateid = gdf['PLATEID1'].max() + 1
+
+    # Pre-compute which plate IDs span the dateline using the raster.
+    # A plate that has cells in both the first and last raster column wraps around
+    # ±180° and must NOT be split into fragments with different IDs — toposimplify
+    # can move polygon vertices far enough from ±180° that touches_dateline() misses them.
+    dateline_spanning_ids = set()
+    if plate_id_raster is not None:
+        first_col = plate_id_raster.values[:, 0]
+        last_col  = plate_id_raster.values[:, -1]
+        ids_west = set(int(v) for v in first_col if not np.isnan(v) and v > 0)
+        ids_east = set(int(v) for v in last_col  if not np.isnan(v) and v > 0)
+        dateline_spanning_ids = ids_west & ids_east
 
     gdf = gdf.copy()
 
@@ -2032,6 +2080,11 @@ def resolve_duplicate_plateids(gdf, next_plateid=None, cratons_gdf=None):
 
     for plateid, group in gdf.groupby('PLATEID1'):
         if len(group) <= 1:
+            continue
+
+        # All fragments of a dateline-spanning plate are the same physical plate —
+        # keep them all with the original ID regardless of vertex positions.
+        if int(plateid) in dateline_spanning_ids:
             continue
 
         # Identify which can be reassigned (not touching dateline)

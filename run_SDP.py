@@ -81,13 +81,15 @@ cumulative_rotation_dict = {}
 rotation_records      = []
 collision_state       = {}  # tracks collision age per plate pair; persists across timesteps
 
+# Trust the user's initial plate configuration — skip fragmentation check on step 0.
+_params_step0 = {**params, 'fragmentation_enabled': False}
 (new_plate_polygons,
  stage_pole_dict,
  rasters,
  boundaries_gdf,
  _,
  collision_state) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
-                                          params=params, polarity_dict=polarity_dict,
+                                          params=_params_step0, polarity_dict=polarity_dict,
                                           collision_state=collision_state)
 
 tracers = sdp.generate_seafloor_age_tracers(
@@ -131,8 +133,6 @@ def _do_plot(i, active_tracers, new_plate_polygons, boundaries_gdf,
         fig.plot(x=active_tracers.geometry.x.values, y=active_tracers.geometry.y.values,
                  style='c0.08c', fill=active_tracers.age.values.astype(float),
                  cmap=True, pen='0.1p,black')
-    pygmt.makecpt(cmap='polar', series=[-0.001, 0.001], background='o')
-    fig.plot(data=new_plate_polygons.iloc[:], pen='1p,black', transparency=50)
     if 'divergence' in boundaries_gdf.columns:
         ridge_bounds = boundaries_gdf[boundaries_gdf['divergence'] > params['div_threshold_ridge']]
         sub_bounds   = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
