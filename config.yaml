@@ -13,27 +13,35 @@ output_dir: ./output
 run:
   reconstruction_time: 0
   delta_time: 1.0
-  total_time: 200.0
+  total_time: 1000.0
 
 forces:
   slab_pull: 6
   slab_suction: 6
   ridge_push: 3
-  continental_collision: 18
+  continental_collision: 18   # only used when collision_mode: resistance
 
 params:
+
+  # --- Numerics ---
   raster_spacing:              0.25     # degrees; controls velocity grid resolution and polygon rasterise
   tessellation_deg:            0.2      # polygon edge densification before rasterising
   topo_simplify_tolerance:     0.4      # polygon smoothing tolerance after polygonise
   boundary_search_radius_deg:  2        # plate ID neighbour search radius at boundaries
   div_threshold_subduction:   -0.0001   # cm/yr relative normal velocity below this → subduction
   div_threshold_ridge:         0.2      # cm/yr relative normal velocity above this → ridge
+
+  # --- Output ---
+  csv_save_interval:           5        # save outputs every N timesteps
+  plot_interval:               1        # make plots every N timesteps; set to null to disable
+
+  # --- Seafloor & ridge tracers ---
   tracer_spacing_deg:          1.0      # seed point spacing along ridge boundaries
   tracer_offset_deg:           0.6      # perpendicular offset from ridge axis at seeding
   seafloor_spacing_deg:        1.0      # grid spacing for initial seafloor age tracers
   spreading_rate_km_per_myr:   50.0     # assumed spreading rate for age estimation
-  csv_save_interval:           5        # save outputs every N timesteps
-  plot_interval:               1        # make plots every N timesteps; set to null to disable
+
+  # --- Seismicity ---
   eq_n_candidates:             100000   # random sphere points sampled for earthquake generation
   eq_ridge_max_dist_deg:       1.0      # max distance from ridge axis for ridge earthquakes
   eq_ridge_max_depth_km:       50.0     # max depth for ridge earthquakes (km)
@@ -41,6 +49,8 @@ params:
   eq_slab_max_depth_km:        650.0    # maximum slab depth (km)
   eq_ridge_prob:               0.15     # fraction of ridge candidates accepted (controls density)
   eq_subduction_prob:          1.0      # fraction of subduction candidates accepted
+
+  # --- Topography ---
   topo_continental_base_m:     400      # background continental elevation (m)
   topo_noise_fraction:         0.3      # noise amplitude as fraction of local elevation
   topo_spectral_beta:          2.0      # SH power-law exponent (2 = brown / realistic terrain)
@@ -49,6 +59,8 @@ params:
   topo_andean_peak_m:          3000     # peak Andean elevation (m)
   topo_himalayan_max_dist_deg: 8.0      # half-width of Himalayan collision zone (degrees)
   topo_himalayan_peak_m:       5000     # peak Himalayan elevation (m)
+
+  # --- Hotspots ---
   n_hotspots:                  30       # number of randomly placed hot spot sources (ignored if hotspot_locations is set)
   hotspot_prob:                1.0      # probability of eruption per hot spot per timestep
   #hotspot_locations:                 # optional: fix hotspot positions as [[lon,lat], ...]; overrides n_hotspots
@@ -57,19 +69,38 @@ params:
   #  - [12, -31]
   #  - [-5, -27]
   #  - [13, 17]
-  #  - 
-  slab_tracers_enabled:        true    # set true to track slab sinking and produce mantle_temp_NNNN.nc
+  #  -
+
+  # --- Slab tracers & mantle dynamics ---
+  slab_tracers_enabled:        true     # set true to track slab sinking and produce mantle_temp_NNNN.nc
   slab_slowing_factor:         4        # lower-mantle sinking slowdown (Lithgow-Bertelloni & Richards 1998)
   slab_max_sink_rate:          400      # km/Myr; cap on sinking rate (real Earth max ~100-200 km/Myr)
-  slab_thermal_tau_myr:        4       # Myr; thermal decay timescale for slablets (lower = faster fade)
-  mantle_grid_spacing_deg:     5.0     # degrees; horizontal resolution of 3D mantle temp field
+  slab_thermal_tau_myr:        4        # Myr; thermal decay timescale for slablets (lower = faster fade)
+  mantle_grid_spacing_deg:     5.0      # degrees; horizontal resolution of 3D mantle temp field
   mantle_depth_interval_km:    100      # km; depth layer thickness
-  cmb_heating_rate:            0.02    # heat units added per Myr everywhere (core heating)
-  cmb_slab_suppression:        0.05    # heat units removed per slablet per Myr (at full coupling)
-  cmb_surface_coupling:        0.1     # fractional coupling at surface (0=thermal only, 1=full instantaneous)
-  cmb_sigma_deg:               10.0    # horizontal smoothing of CMB heat field (degrees)
-  cmb_max_heat:                3.0     # cap on heat accumulation units
-  cmb_dVs_scale:               -0.5   # dVs % per heat unit injected into 3D field (negative = warm)
-  cmb_decay_km:                400.0  # Gaussian decay length upward from CMB (km)
-  tomo_smooth_horiz_deg:       5.0    # tomographic blurring: horizontal Gaussian sigma (degrees; 0 = off)
-  tomo_smooth_depth_km:        150.0  # tomographic blurring: vertical Gaussian sigma (km; 0 = off)
+  cmb_heating_rate:            0.02     # heat units added per Myr everywhere (core heating)
+  cmb_slab_suppression:        0.05     # heat units removed per slablet per Myr (at full coupling)
+  cmb_surface_coupling:        0.1      # fractional coupling at surface (0=thermal only, 1=full instantaneous)
+  cmb_sigma_deg:               10.0     # horizontal smoothing of CMB heat field (degrees)
+  cmb_max_heat:                3.0      # cap on heat accumulation units
+  cmb_dVs_scale:               -0.5     # dVs % per heat unit injected into 3D field (negative = warm)
+  cmb_decay_km:                400.0    # Gaussian decay length upward from CMB (km)
+  tomo_smooth_horiz_deg:       5.0      # tomographic blurring: horizontal Gaussian sigma (degrees; 0 = off)
+  tomo_smooth_depth_km:        150.0    # tomographic blurring: vertical Gaussian sigma (km; 0 = off)
+
+  # --- Continental collision ---
+  collision_mode:                resistance  # 'resistance' (original push-back torque) or 'coupling' (progressive velocity blending)
+  collision_coupling_max:        0.5         # [coupling mode] max per-step blend fraction (0–1)
+  collision_coupling_timescale:  30          # [coupling mode] timesteps to ramp from zero to max
+
+  # --- Plate lifecycle (fragmentation & merging) ---
+  fragmentation_enabled:       false    # split geometrically implausible plates at their neck
+  min_concavity_ratio:         0.85     # concavity below this triggers neck check (1=convex)
+  max_aspect_ratio:            4.0      # aspect ratio above this triggers neck check
+  min_child_area_deg2:         25.0     # minimum child plate area in deg² (prevents slivers)
+  fragmentation_cooldown_myr:  5.0      # Myr before a plate can fragment again
+  merging_enabled:             false    # absorb plates with persistently near-zero relative motion
+  merge_conservative_threshold: 0.05   # cm/yr; boundary |divergence| below this = near-zero
+  merge_min_steps:             5        # consecutive near-zero steps before merge fires
+  merge_require_no_driver:     true     # only merge if smaller plate has no ridge/subduction boundaries
+  merge_cooldown_myr:          10.0     # Myr before merged plate is eligible again
