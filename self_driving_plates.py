@@ -368,7 +368,7 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                                                 craton_raster.rename({k: v for k, v in {'x': 'lon', 'y': 'lat'}.items() if k in craton_raster.dims}),
                                                 radius_deg=boundary_search_radius_deg)
                     if craton_id1 and craton_id2 and craton_id1 > 0 and craton_id2 > 0:
-                        print(craton_id1, craton_id2)
+                        # print(craton_id1, craton_id2)
                         continental_collision = True
 
 
@@ -564,7 +564,7 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
     min_child_px  = max(4, int(params.get('min_child_area_deg2', 25.0) / rsp ** 2))
 
     vals = plate_id_raster.values.copy()
-    lats = plate_id_raster.lat.values   # latitude of each raster row
+    lats = plate_id_raster.y.values   # latitude of each raster row
     split_info = []
     next_pid = int(new_plate_polygons['PLATEID1'].max()) + 1
 

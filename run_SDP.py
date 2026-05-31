@@ -79,13 +79,16 @@ rpolygons = sdp.nudge_topological_polygons(snapshot,
 polarity_dict         = {}
 cumulative_rotation_dict = {}
 rotation_records      = []
+collision_state       = {}  # tracks collision age per plate pair; persists across timesteps
 
 (new_plate_polygons,
  stage_pole_dict,
  rasters,
  boundaries_gdf,
- _) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
-                            params=params, polarity_dict=polarity_dict)
+ _,
+ collision_state) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
+                                          params=params, polarity_dict=polarity_dict,
+                                          collision_state=collision_state)
 
 tracers = sdp.generate_seafloor_age_tracers(
     new_plate_polygons, boundaries_gdf,
@@ -304,8 +307,6 @@ _output_thread.start()
 # ---------------------------------------------------------------------------
 # Main time loop
 # ---------------------------------------------------------------------------
-
-collision_state = {}  # tracks continental collision age per plate pair; persists across timesteps
 
 for i in range(1, int(total_time / delta_time) + 1):
     t = i * delta_time
