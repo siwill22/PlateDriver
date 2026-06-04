@@ -46,10 +46,6 @@ import xarray as xr
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_TOPO_FILE        = './output/topo_bathy_0060.nc'
-DEFAULT_BATHY_FILE       = '/Users/simon/GIT/AbFab/output/atlantis5_world_bathymetry.nc'
-DEFAULT_OUTPUT_FILE      = './output/blended_0060.nc'
-
 # Blend
 DEFAULT_ELEV_THRESHOLD_M = -1500.0
 DEFAULT_BUFFER_DEG       =    4.0
@@ -544,12 +540,12 @@ def main():
     # Required inputs
     parser.add_argument('--boundaries', required=True, metavar='GEOJSON',
                         help='Plate boundary GeoJSON (boundaries_NNNN.geojson)')
-    parser.add_argument('--topo', default=DEFAULT_TOPO_FILE,
-                        help='Synthetic topo NetCDF (default: %(default)s)')
-    parser.add_argument('--bathy', default=DEFAULT_BATHY_FILE,
-                        help='Reference bathy NetCDF (default: %(default)s)')
-    parser.add_argument('--output', '-o', default=DEFAULT_OUTPUT_FILE,
-                        help='Output NetCDF (default: %(default)s)')
+    parser.add_argument('--topo', required=True, metavar='NETCDF',
+                        help='Synthetic topo NetCDF')
+    parser.add_argument('--bathy', required=True, metavar='NETCDF',
+                        help='Reference bathy NetCDF')
+    parser.add_argument('--output', '-o', required=True, metavar='NETCDF',
+                        help='Output NetCDF')
 
     # Blend parameters
     blend = parser.add_argument_group('blend parameters')
