@@ -102,10 +102,13 @@ def timeseries(runs, labels, out):
 
 def _velocity_arrows(plate_id, plate_rows, spacing_deg=6.0):
     """Arrow positions, azimuths and speeds (km/Myr) from plate IDs and plate poles."""
-    lons = np.arange(-180 + spacing_deg / 2, 180, spacing_deg)
-    lats = np.arange(-84 + spacing_deg / 2, 84, spacing_deg)
-    lon2d, lat2d = np.meshgrid(lons, lats)
-    lon, lat = lon2d.ravel(), lat2d.ravel()
+    # Roughly equal-area sampling: fewer arrows along a parallel towards the poles
+    lon, lat = [], []
+    for la in np.arange(-78 + spacing_deg / 2, 78, spacing_deg):
+        n = max(1, int(round(360 / spacing_deg * np.cos(np.radians(la)))))
+        lon.append(-180 + (np.arange(n) + 0.5) * 360 / n)
+        lat.append(np.full(n, la))
+    lon, lat = np.concatenate(lon), np.concatenate(lat)
     pid = sdp.raster_lookup(plate_id, lon, lat)
     poles = {int(r.plate_id): sdp.lonlat_to_xyz(r.pole_lon, r.pole_lat) * np.radians(r.rate_deg_per_myr)
              for r in plate_rows.itertuples()}
@@ -141,12 +144,12 @@ def maps(paths, runs, labels, out, steps_wanted):
                          margins=['0.2c', '0.6c'], title='Step {}'.format(step)):
             for k, (path, (steps, plates), label) in enumerate(zip(paths, runs, labels)):
                 with fig.set_panel(panel=k):
-                    fig.basemap(region='d', projection='N?', frame=['f', '+t' + label])
+                    # grey map interior shows through where the age grid is NaN (continents)
+                    fig.basemap(region='d', projection='N?', frame=['f', '+ggray75+t' + label])
                     age_file = os.path.join(path, 'seafloor_age_{:04d}.nc'.format(step))
                     if os.path.exists(age_file):
-                        with pygmt.config(COLOR_NAN='gray75'):   # continents
-                            pygmt.makecpt(cmap='batlow', series=[0, 150], reverse=True)
-                            fig.grdimage(age_file, cmap=True)
+                        pygmt.makecpt(cmap='batlow', series=[0, 150], reverse=True)
+                        fig.grdimage(age_file, cmap=True, nan_transparent=True)
                     bfile = os.path.join(path, 'boundaries_{:04d}.geojson'.format(step))
                     if os.path.exists(bfile):
                         b = gpd.read_file(bfile)
