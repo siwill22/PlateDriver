@@ -1,8 +1,10 @@
 import argparse
 import os
 import queue
+import sys
 import threading
 import time
+import traceback
 
 import pygplates
 import numpy as np
@@ -46,6 +48,18 @@ def _out(filename):
     return os.path.join(output_dir, filename)
 
 
+# All randomness (hotspots, seamounts, earthquakes, topography noise)
+# comes from one generator, so a run is repeatable when random_seed is set.
+rng = np.random.default_rng(params.get('random_seed'))
+topo_noise_seed = int(rng.integers(2**31 - 1))   # same noise pattern for every saved frame
+
+_missing = [f for f in [files['rotation_model'], files['cratons'], *files['dynamic_polygons']]
+            if not os.path.exists(f)]
+if _missing:
+    raise SystemExit('Input file(s) listed in {} not found:\n  {}'.format(
+        args.config, '\n  '.join(_missing)))
+
+
 # ---------------------------------------------------------------------------
 # Build reconstruction model
 # ---------------------------------------------------------------------------
@@ -55,31 +69,41 @@ reconstruction_model.add_rotation_model(files['rotation_model'])
 for poly_file in files['dynamic_polygons']:
     reconstruction_model.add_dynamic_polygons(poly_file)
 cratons = pygplates.FeatureCollection(files['cratons'])
+if reconstruction_time != 0:
+    # Cratons are stored at present-day positions; move them to the starting snapshot
+    _rotation_model = pygplates.RotationModel(files['rotation_model'])
+    cratons = sdp.nudge_polygons(cratons, {
+        c.get_reconstruction_plate_id(): _rotation_model.get_rotation(
+            reconstruction_time, c.get_reconstruction_plate_id())
+        for c in cratons})
 
 
 # ---------------------------------------------------------------------------
-# Initial timestep
+# Initial state (step 0, t = 0)
 # ---------------------------------------------------------------------------
+#
+# Time convention: step i is the state at t = i * delta_time Myr after the starting
+# snapshot.  Each step first moves everything (plates, cratons, tracers, seamounts)
+# with the stage rotations computed at the previous step, then rebuilds the plate
+# configuration and computes the stage rotations for the next move.
 
 snapshot = reconstruction_model.plate_snapshot(reconstruction_time)
-result   = pdriver.get_torques_for_plate_snapshot(snapshot, reconstruction_time, delta_time, forces)
+if not snapshot.resolved_topologies:
+    raise SystemExit('No plate polygons resolve at reconstruction_time = {} Ma; check the '
+                     'dynamic_polygons files and their valid time range.'.format(reconstruction_time))
 
-stage_pole_dict = {}
-for res in result:
-    stage_pole_dict[res[0]] = res[3]
-    # print(res[0], res[3])
+# Torques from the GPlates boundary feature types (subduction zones, ridges) give a
+# first set of stage rotations.  They are only used to classify the plate boundaries
+# of the initial configuration; the plates are not moved with them.
+result = pdriver.get_torques_for_plate_snapshot(snapshot, reconstruction_time, delta_time, forces)
+seed_stage_poles = {res[0]: res[3] for res in result}
 
-cratons = sdp.nudge_polygons(cratons, stage_pole_dict)
+rpolygons = sdp.nudge_topological_polygons(snapshot)
 
-rpolygons = sdp.nudge_topological_polygons(snapshot,
-                                           forces=forces,
-                                           reconstruction_time=reconstruction_time,
-                                           delta_time=delta_time)
-
-polarity_dict         = {}
-cumulative_rotation_dict = {}
-rotation_records      = []
-collision_state       = {}  # tracks collision age per plate pair; persists across timesteps
+polarity_dict            = {}
+cumulative_rotation_dict = {}   # {pid: FiniteRotation from t=0 to the current step}
+rotation_records         = []   # [(t, pid, FiniteRotation)] written to rotations_NNNN.rot
+collision_state          = {}   # tracks collision age per plate pair; persists across timesteps
 
 # Trust the user's initial plate configuration — skip fragmentation check on step 0.
 _params_step0 = {**params, 'fragmentation_enabled': False}
@@ -88,9 +112,11 @@ _params_step0 = {**params, 'fragmentation_enabled': False}
  rasters,
  boundaries_gdf,
  _,
- collision_state) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
-                                          params=_params_step0, polarity_dict=polarity_dict,
-                                          collision_state=collision_state)
+ collision_state,
+ next_plate_id) = sdp.compute_timestep(rpolygons, forces, seed_stage_poles, delta_time,
+                                       cratons=cratons, params=_params_step0,
+                                       polarity_dict=polarity_dict,
+                                       collision_state=collision_state)
 
 tracers = sdp.generate_seafloor_age_tracers(
     new_plate_polygons, boundaries_gdf,
@@ -99,7 +125,7 @@ tracers = sdp.generate_seafloor_age_tracers(
     div_threshold=params['div_threshold_ridge'])
 
 _hs_locs = params.get('hotspot_locations', None)
-hotspot_locs = sdp.generate_hotspot_locations(n=params['n_hotspots'], locations=_hs_locs)
+hotspot_locs = sdp.generate_hotspot_locations(n=params['n_hotspots'], locations=_hs_locs, seed=rng)
 seamounts = gpd.GeoDataFrame(columns=['geometry', 'hotspot_id', 'age', 'active'],
                              geometry='geometry').set_crs(epsg=4326)
 
@@ -113,7 +139,7 @@ _fragmentation_cooldown_pids = set()
 _craton_plate_remap     = {}   # {craton_plateid: host_plateid} for absorbed cratons
 if _slab_enabled:
     slab_tracers = pd.DataFrame(
-        columns=['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr'])
+        columns=['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight'])
     _mantle_spacing = params.get('mantle_grid_spacing_deg', 5.0)
     _cmb_nlat = len(np.arange(-90  + _mantle_spacing / 2, 90,  _mantle_spacing))
     _cmb_nlon = len(np.arange(-180 + _mantle_spacing / 2, 180, _mantle_spacing))
@@ -125,7 +151,7 @@ if _slab_enabled:
 # ---------------------------------------------------------------------------
 
 def _do_plot(i, active_tracers, new_plate_polygons, boundaries_gdf,
-             rasters, seamounts, cratons_gdf, params, output_dir, delta_time):
+             rasters, seamounts, cratons_gdf, params, output_dir):
     fig = pygmt.Figure()
     fig.basemap(frame='f', projection='W10i', region='d')
     if len(active_tracers):
@@ -156,7 +182,7 @@ def _do_plot(i, active_tracers, new_plate_polygons, boundaries_gdf,
     fig.plot(data={'x': glon[::stride, ::stride].flatten(),
                    'y': glat[::stride, ::stride].flatten(),
                    'azimuth': azimuth,
-                   'magnitude': magnitude / (2000. * delta_time)},
+                   'magnitude': magnitude / 2000.},     # km/Myr → arrow length (cm)
              style='V0.15c+e+a45+ggray40+n', pen='0.1p,black', fill='black')
     _active_sm = seamounts[seamounts.active.astype(bool)]
     if len(_active_sm):
@@ -171,34 +197,50 @@ def _do_plot(i, active_tracers, new_plate_polygons, boundaries_gdf,
 
 def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
              new_plate_polygons, seamounts, rotation_records, params, output_dir,
-             slab_tracers=None, cmb_heat=None):
+             slab_tracers=None, cmb_heat=None, noise_seed=None):
+    """Write all outputs for step i.  Each output is written independently, so one
+    failure does not prevent the others; failures are reported with a traceback."""
     def _out(filename):
-        return os.path.join(output_dir, filename)
+        return os.path.join(output_dir, filename.format(i))
 
-    active_tracers[['geometry', 'age']].assign(
-        lon=active_tracers.geometry.x,
-        lat=active_tracers.geometry.y
-    ).drop(columns='geometry').to_csv(_out('tracers_{:04d}.csv'.format(i)), index=False)
+    def _try(name, fn):
+        try:
+            return fn()
+        except Exception:
+            _report_error('save step {} ({})'.format(i, name))
+            return None
 
-    age_grid = None
-    if len(active_tracers):
-        age_grid = sdp.generate_seafloor_age_grid(
-            _out('tracers_{:04d}.csv'.format(i)),
+    def _tracers():
+        active_tracers[['geometry', 'age']].assign(
+            lon=active_tracers.geometry.x,
+            lat=active_tracers.geometry.y
+        ).drop(columns='geometry').to_csv(_out('tracers_{:04d}.csv'), index=False)
+        return True
+
+    def _age_grid():
+        grid = sdp.generate_seafloor_age_grid(
+            _out('tracers_{:04d}.csv'),
             craton_raster=rasters.get('craton'),
             spacing=params['raster_spacing'])
-        age_grid.to_netcdf(_out('seafloor_age_{:04d}.nc'.format(i)))
+        grid.to_netcdf(_out('seafloor_age_{:04d}.nc'))
+        return grid
 
-    rasters['divergence'].to_netcdf(_out('divergence_{:04d}.nc'.format(i)))
-    rasters['plate_id'].to_netcdf(_out('plate_id_{:04d}.nc'.format(i)))
+    wrote_tracers = _try('tracers', _tracers)
+    age_grid = None
+    if wrote_tracers and len(active_tracers):
+        age_grid = _try('seafloor age grid', _age_grid)
+
+    _try('divergence', lambda: rasters['divergence'].to_netcdf(_out('divergence_{:04d}.nc')))
+    _try('plate_id', lambda: rasters['plate_id'].to_netcdf(_out('plate_id_{:04d}.nc')))
     if 'craton' in rasters:
-        rasters['craton'].to_netcdf(_out('craton_{:04d}.nc'.format(i)))
+        _try('craton', lambda: rasters['craton'].to_netcdf(_out('craton_{:04d}.nc')))
 
     craton_counts = sdp.craton_counts_from_raster(
         rasters['craton'] if 'craton' in rasters else None)
 
-    if 'divergence' in boundaries_gdf.columns:
+    def _boundaries():
         bdf = boundaries_gdf[['geometry', 'plateid1_poly1', 'plateid1_poly2',
-                               'divergence']].copy()
+                              'divergence']].copy()
         def _btype(d):
             if d > params['div_threshold_ridge']:      return 'ridge'
             if d < params['div_threshold_subduction']: return 'subduction'
@@ -218,26 +260,32 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             overriding.append(ov)
         bdf['downgoing_plate']  = downgoing
         bdf['overriding_plate'] = overriding
-        bdf.to_file(_out('boundaries_{:04d}.geojson'.format(i)), driver='GeoJSON')
+        bdf.to_file(_out('boundaries_{:04d}.geojson'), driver='GeoJSON')
 
-    earthquakes = sdp.generate_synthetic_earthquakes(
-        boundaries_gdf, polarity_dict, new_plate_polygons,
-        craton_counts=craton_counts,
-        plate_id_raster=rasters['plate_id'],
-        n_candidates=params['eq_n_candidates'],
-        ridge_max_dist_deg=params['eq_ridge_max_dist_deg'],
-        ridge_max_depth_km=params['eq_ridge_max_depth_km'],
-        slab_dip_deg=params['eq_slab_dip_deg'],
-        slab_max_depth_km=params['eq_slab_max_depth_km'],
-        div_threshold_ridge=params['div_threshold_ridge'],
-        div_threshold_subduction=params['div_threshold_subduction'],
-        ridge_eq_prob=params['eq_ridge_prob'],
-        subduction_eq_prob=params['eq_subduction_prob'])
-    earthquakes.to_file(_out('earthquakes_{:04d}.geojson'.format(i)), driver='GeoJSON')
+    if 'divergence' in boundaries_gdf.columns and len(boundaries_gdf):
+        _try('boundaries', _boundaries)
 
-    topo = None
-    if 'craton' in rasters:
-        topo = sdp.compute_topography_raster(
+    def _earthquakes():
+        earthquakes = sdp.generate_synthetic_earthquakes(
+            boundaries_gdf, polarity_dict, new_plate_polygons,
+            craton_counts=craton_counts,
+            plate_id_raster=rasters['plate_id'],
+            n_candidates=params['eq_n_candidates'],
+            ridge_max_dist_deg=params['eq_ridge_max_dist_deg'],
+            ridge_max_depth_km=params['eq_ridge_max_depth_km'],
+            slab_dip_deg=params['eq_slab_dip_deg'],
+            slab_max_depth_km=params['eq_slab_max_depth_km'],
+            div_threshold_ridge=params['div_threshold_ridge'],
+            div_threshold_subduction=params['div_threshold_subduction'],
+            ridge_eq_prob=params['eq_ridge_prob'],
+            subduction_eq_prob=params['eq_subduction_prob'],
+            rng=np.random.default_rng(None if noise_seed is None else noise_seed + i))
+        earthquakes.to_file(_out('earthquakes_{:04d}.geojson'), driver='GeoJSON')
+
+    _try('earthquakes', _earthquakes)
+
+    def _topography():
+        grid = sdp.compute_topography_raster(
             rasters['plate_id'], rasters['craton'], boundaries_gdf,
             polarity_dict=polarity_dict, craton_counts=craton_counts,
             continental_base_m=params['topo_continental_base_m'],
@@ -248,22 +296,26 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             andean_peak_m=params['topo_andean_peak_m'],
             himalayan_max_dist_deg=params['topo_himalayan_max_dist_deg'],
             himalayan_peak_m=params['topo_himalayan_peak_m'],
-            div_threshold_subduction=params['div_threshold_subduction'])
-        topo.to_netcdf(_out('topography_{:04d}.nc'.format(i)))
+            div_threshold_subduction=params['div_threshold_subduction'],
+            noise_seed=noise_seed)
+        grid.to_netcdf(_out('topography_{:04d}.nc'))
+        return grid
+
+    topo = _try('topography', _topography) if 'craton' in rasters else None
 
     if age_grid is not None:
-        topo_bathy = sdp.generate_topo_bathy_grid(age_grid, topography_raster=topo)
-        topo_bathy.to_netcdf(_out('topo_bathy_{:04d}.nc'.format(i)))
+        _try('topo_bathy', lambda: sdp.generate_topo_bathy_grid(
+            age_grid, topography_raster=topo).to_netcdf(_out('topo_bathy_{:04d}.nc')))
 
-    sdp.write_rotation_file(rotation_records, _out('rotations_{:04d}.rot'.format(i)))
+    _try('rotations', lambda: sdp.write_rotation_file(rotation_records, _out('rotations_{:04d}.rot')))
 
     _active_seamounts = seamounts[seamounts.active.astype(bool)]
     if len(_active_seamounts):
-        _active_seamounts[['geometry', 'hotspot_id', 'age']].to_file(
-            _out('seamounts_{:04d}.geojson'.format(i)), driver='GeoJSON')
+        _try('seamounts', lambda: _active_seamounts[['geometry', 'hotspot_id', 'age']].to_file(
+            _out('seamounts_{:04d}.geojson'), driver='GeoJSON'))
 
     if slab_tracers is not None and cmb_heat is not None:
-        mantle_temp = sdp.generate_mantle_temp_field(
+        _try('mantle_temp', lambda: sdp.generate_mantle_temp_field(
             slab_tracers,
             spacing_deg=params.get('mantle_grid_spacing_deg', 5.0),
             depth_interval_km=params.get('mantle_depth_interval_km', 100.0),
@@ -272,15 +324,21 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             cmb_dVs_scale=params.get('cmb_dVs_scale', -0.5),
             cmb_decay_km=params.get('cmb_decay_km', 400.0),
             tomo_smooth_horiz_deg=params.get('tomo_smooth_horiz_deg', 0.0),
-            tomo_smooth_depth_km=params.get('tomo_smooth_depth_km', 0.0))
-        mantle_temp.to_netcdf(_out('mantle_temp_{:04d}.nc'.format(i)))
+            tomo_smooth_depth_km=params.get('tomo_smooth_depth_km', 0.0)
+        ).to_netcdf(_out('mantle_temp_{:04d}.nc')))
 
 
 # ---------------------------------------------------------------------------
 # Output worker thread
 # ---------------------------------------------------------------------------
 
-_output_queue = queue.Queue(maxsize=3)
+_output_queue  = queue.Queue(maxsize=3)
+_output_errors = []
+
+
+def _report_error(what):
+    _output_errors.append(what)
+    print('[output worker] ERROR in {}:\n{}'.format(what, traceback.format_exc()), flush=True)
 
 
 def _output_worker():
@@ -295,8 +353,8 @@ def _output_worker():
                 _do_plot(**payload)
             elif task == 'save':
                 _do_save(**payload)
-        except Exception as exc:
-            print('[output worker] ERROR in {}: {}'.format(task, exc), flush=True)
+        except Exception:
+            _report_error('{} step {}'.format(task, payload.get('i')))
         finally:
             _output_queue.task_done()
 
@@ -305,178 +363,10 @@ _output_thread = threading.Thread(target=_output_worker, daemon=True)
 _output_thread.start()
 
 
-# ---------------------------------------------------------------------------
-# Main time loop
-# ---------------------------------------------------------------------------
-
-for i in range(1, int(total_time / delta_time) + 1):
-    t = i * delta_time
-
-    print('t = {:.1f} Myr (step {})'.format(t, i))
-    _step_times = {}
-    _t0 = time.perf_counter()
-
-    rpolygons = sdp.nudge_polygons(
-        new_plate_polygons.explode(index_parts=False).reset_index(drop=True),
-        stage_pole_dict)
-    # Absorbed cratons no longer have their own stage pole — supply the host's pole
-    # so the craton feature moves with the plate it was absorbed into.
-    _craton_stage_poles = dict(stage_pole_dict)
-    for _old_pid, _new_pid in _craton_plate_remap.items():
-        if _new_pid in stage_pole_dict:
-            _craton_stage_poles[_old_pid] = stage_pole_dict[_new_pid]
-    cratons = sdp.nudge_polygons(cratons, _craton_stage_poles)
-    _step_times['nudge_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
-
-    (new_plate_polygons,
-     stage_pole_dict,
-     rasters,
-     boundaries_gdf,
-     _split_info,
-     collision_state) = sdp.compute_timestep(rpolygons, forces, stage_pole_dict, delta_time,
-                                              cratons=cratons, params=params,
-                                              polarity_dict=polarity_dict,
-                                              merge_pairs=_merge_pairs,
-                                              fragmentation_cooldown_pids=_fragmentation_cooldown_pids,
-                                              collision_state=collision_state,
-                                              craton_id_remap=_craton_plate_remap)
-    _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
-
-    # for key, item in stage_pole_dict.items():
-    #     print(key, item.get_lat_lon_euler_pole_and_angle_degrees())
-
-    if _split_info:
-        print('  [fragment] {} split(s): {}'.format(
-            len(_split_info),
-            '  '.join('plate {} → child {}'.format(parent, new)
-                      for new, parent in _split_info)))
-
-    # Accumulate finite rotations: F(t) = S_t * F(t-dt)
-    for pid, stage_rot in stage_pole_dict.items():
-        prev = cumulative_rotation_dict.get(pid, pygplates.FiniteRotation())
-        cumulative_rotation_dict[pid] = stage_rot * prev
-        rotation_records.append((t, pid, cumulative_rotation_dict[pid]))
-    _step_times['rotations'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
-
-    # -----------------------------------------------------------------------
-    # Fragmentation / merging bookkeeping
-    # -----------------------------------------------------------------------
-    _merge_pairs = []
-    if params.get('merging_enabled', False) and 'divergence' in boundaries_gdf.columns:
-        _merge_thresh   = params.get('merge_conservative_threshold', 0.05)  # cm/yr
-        _merge_min_steps = int(params.get('merge_min_steps', 5))
-        _merge_cooldown = params.get('merge_cooldown_myr', 10.0)
-        _no_driver_req  = params.get('merge_require_no_driver', True)
-        _div_sub        = params['div_threshold_subduction']
-        _div_ridge      = params['div_threshold_ridge']
-
-        # Accumulate per-pair mean |divergence| and per-plate driver flags
-        _pair_divs, _plate_driver = {}, {}
-        for _, _br in boundaries_gdf.iterrows():
-            _p1 = _br.get('plateid1_poly1'); _p2 = _br.get('plateid1_poly2')
-            if not _p1 or not _p2 or _p1 == 0 or _p2 == 0:
-                continue
-            _pair = (min(int(_p1), int(_p2)), max(int(_p1), int(_p2)))
-            _div  = float(_br.get('divergence', 0))
-            _pair_divs.setdefault(_pair, []).append(abs(_div))
-            for _pid in (_pair[0], _pair[1]):
-                if _div > _div_ridge or _div < _div_sub:
-                    _plate_driver[_pid] = True
-                else:
-                    _plate_driver.setdefault(_pid, False)
-
-        _new_contact = {}
-        for _pair, _divs in _pair_divs.items():
-            _mean_div = float(np.mean(_divs))
-            _prev     = _conservative_contact.get(_pair, 0)
-            _new_contact[_pair] = _prev + 1 if _mean_div < _merge_thresh else 0
-
-            if _new_contact[_pair] >= _merge_min_steps:
-                _p1, _p2 = _pair
-                if _p1 in _plate_cooldown or _p2 in _plate_cooldown:
-                    continue
-                if _no_driver_req and _plate_driver.get(_p1, False) and _plate_driver.get(_p2, False):
-                    continue
-                _px1 = int((rasters['plate_id'].values == _p1).sum())
-                _px2 = int((rasters['plate_id'].values == _p2).sum())
-                _big, _small = (_p1, _p2) if _px1 >= _px2 else (_p2, _p1)
-                _merge_pairs.append((_big, _small))
-                _plate_cooldown[_p1] = _merge_cooldown
-                _plate_cooldown[_p2] = _merge_cooldown
-                _new_contact[_pair]  = 0
-
-        _conservative_contact = _new_contact
-
-    if params.get('fragmentation_enabled', False) and _split_info:
-        _frag_cooldown = params.get('fragmentation_cooldown_myr', 5.0)
-        for _new_pid, _parent_pid in _split_info:
-            _plate_cooldown[_new_pid]    = _frag_cooldown
-            _plate_cooldown[_parent_pid] = _frag_cooldown
-
-    # Decrement all cooldowns
-    _plate_cooldown = {_pid: _rem - delta_time
-                       for _pid, _rem in _plate_cooldown.items() if _rem > delta_time}
-    _fragmentation_cooldown_pids = set(_plate_cooldown.keys())
-    _step_times['frag_merge_bookkeeping'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
-
-    new_tracers = sdp.seed_ridge_tracers(boundaries_gdf,
-                                         spacing_deg=params['tracer_spacing_deg'],
-                                         threshold=params['div_threshold_ridge'],
-                                         offset_deg=params['tracer_offset_deg'])
-    tracers = pd.concat([tracers, new_tracers], ignore_index=True)
-    tracers = sdp.advect_tracers(tracers, rasters['plate_id'], stage_pole_dict, delta_time,
-                                  boundaries_gdf=boundaries_gdf,
-                                  div_threshold=params['div_threshold_subduction'])
-    tracers = sdp.deactivate_subducted_tracers(tracers, boundaries_gdf,
-                                               threshold=params['div_threshold_subduction'])
-    _step_times['tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
-
-    if _slab_enabled:
-        slab_tracers = sdp.update_slab_tracers(
-            slab_tracers, boundaries_gdf, delta_time,
-            div_threshold_subduction=params['div_threshold_subduction'],
-            slowing_factor=params.get('slab_slowing_factor', 4),
-            max_sink_rate_km_per_myr=params.get('slab_max_sink_rate', 200.0))
-        _step_times['slab_tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
-        cmb_heat = sdp.update_cmb_heat(
-            cmb_heat, slab_tracers, delta_time,
-            spacing_deg=_mantle_spacing,
-            heating_rate=params.get('cmb_heating_rate', 0.02),
-            slab_suppression=params.get('cmb_slab_suppression', 0.05),
-            surface_coupling=params.get('cmb_surface_coupling', 0.1),
-            sigma_deg=params.get('cmb_sigma_deg', 10.0),
-            max_heat=params.get('cmb_max_heat', 3.0))
-        _step_times['cmb_heat'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
-        if 'divergence' in boundaries_gdf.columns:
-            _sub = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
-            _active_slabs = slab_tracers[slab_tracers['active'].astype(bool)]
-            print('  [slab] sub-bdry div (cm/yr): min={:.3f} max={:.3f}  '
-                  'sink_rate (km/Myr): max={:.1f}  '
-                  'slablets: n={:d} depth={:.0f}-{:.0f} km'.format(
-                      float(_sub['divergence'].min()) if len(_sub) else 0.0,
-                      float(_sub['divergence'].max()) if len(_sub) else 0.0,
-                      float(_active_slabs['sink_rate_km_per_myr'].max()) if len(_active_slabs) else 0.0,
-                      len(_active_slabs),
-                      float(_active_slabs['depth_km'].min()) if len(_active_slabs) else 0.0,
-                      float(_active_slabs['depth_km'].max()) if len(_active_slabs) else 0.0))
-
-    seamounts = sdp.advect_tracers(seamounts, rasters['plate_id'], stage_pole_dict, delta_time,
-                                   boundaries_gdf=boundaries_gdf,
-                                   div_threshold=params['div_threshold_subduction'])
-    seamounts = sdp.deactivate_subducted_tracers(seamounts, boundaries_gdf,
-                                                  threshold=params['div_threshold_subduction'])
-    new_seamounts = sdp.seed_hotspot_seamounts(hotspot_locs, prob=params['hotspot_prob'])
-    if len(new_seamounts):
-        seamounts = gpd.GeoDataFrame(
-            pd.concat([seamounts, new_seamounts], ignore_index=True),
-            geometry='geometry').set_crs(epsg=4326)
-    _step_times['seamounts'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
-
+def _enqueue_outputs(i, force_save=False):
+    """Queue the plot and/or save for step i (worker renders in the background)."""
     active_tracers = tracers[tracers.active.astype(bool)]
 
-    # ------------------------------------------------------------------
-    # Enqueue plot (non-blocking; worker renders in background)
-    # ------------------------------------------------------------------
     _plot_interval = params.get('plot_interval')
     if _plot_interval is not None and i % _plot_interval == 0:
         _output_queue.put(('plot', dict(
@@ -489,13 +379,9 @@ for i in range(1, int(total_time / delta_time) + 1):
             cratons_gdf=gpml2gdf(cratons),   # convert in main thread
             params=params,
             output_dir=output_dir,
-            delta_time=delta_time,
         )))
 
-    # ------------------------------------------------------------------
-    # Enqueue periodic save (non-blocking; worker writes files in background)
-    # ------------------------------------------------------------------
-    if i % params['csv_save_interval'] == 0:
+    if force_save or i % params['csv_save_interval'] == 0:
         _save_payload = dict(
             i=i,
             active_tracers=active_tracers,
@@ -507,27 +393,237 @@ for i in range(1, int(total_time / delta_time) + 1):
             rotation_records=rotation_records[:],    # list copy
             params=params,
             output_dir=output_dir,
+            noise_seed=topo_noise_seed,
         )
         if _slab_enabled:
             _save_payload['slab_tracers'] = slab_tracers.copy()
             _save_payload['cmb_heat']     = cmb_heat.copy()
         _output_queue.put(('save', _save_payload))
-
-    total = sum(_step_times.values())
-    print('  --- step timing (step {:d}, {:.1f}s total) ---'.format(i, total))
-    for _name, _dt in sorted(_step_times.items(), key=lambda x: -x[1]):
-        print('  {:20s}  {:5.1f}s  ({:4.1f}%)'.format(_name, _dt, 100 * _dt / total))
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
-# Drain output queue, then do final saves
+# Main time loop
 # ---------------------------------------------------------------------------
 
-_output_queue.join()      # wait for all enqueued plot/save tasks to finish
-_output_queue.put(None)   # stop worker
-_output_thread.join()
+n_steps = int(round(total_time / delta_time))
+identity = pygplates.FiniteRotation()
+
+try:
+    _enqueue_outputs(0)
+    for i in range(1, n_steps + 1):
+        t = i * delta_time
+
+        print('t = {:.1f} Myr (step {})'.format(t, i))
+        _step_times = {}
+        _t0 = time.perf_counter()
+
+        # ------------------------------------------------------------------
+        # Move plates and cratons with the stage rotations from the last step
+        # ------------------------------------------------------------------
+        moving_poles = stage_pole_dict
+        previous_plate_id = rasters['plate_id']
+
+        rpolygons = sdp.nudge_polygons(
+            new_plate_polygons.explode(index_parts=False).reset_index(drop=True),
+            moving_poles)
+        # Absorbed cratons no longer have their own stage pole — supply the host's pole
+        # so the craton feature moves with the plate it was absorbed into.
+        _craton_stage_poles = dict(moving_poles)
+        for _old_pid, _new_pid in _craton_plate_remap.items():
+            if _new_pid in moving_poles:
+                _craton_stage_poles[_old_pid] = moving_poles[_new_pid]
+        cratons = sdp.nudge_polygons(cratons, _craton_stage_poles)
+
+        # Accumulate finite rotations: F(t) = S * F(t - dt), for the move just made
+        for pid, stage_rot in moving_poles.items():
+            prev = cumulative_rotation_dict.get(pid, identity)
+            cumulative_rotation_dict[pid] = stage_rot * prev
+            rotation_records.append((t, pid, cumulative_rotation_dict[pid]))
+        _step_times['nudge_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+        # ------------------------------------------------------------------
+        # Rebuild the plate configuration and compute the next stage rotations
+        # ------------------------------------------------------------------
+        (new_plate_polygons,
+         stage_pole_dict,
+         rasters,
+         boundaries_gdf,
+         _new_plates,
+         collision_state,
+         next_plate_id) = sdp.compute_timestep(rpolygons, forces, moving_poles, delta_time,
+                                               cratons=cratons, params=params,
+                                               polarity_dict=polarity_dict,
+                                               merge_pairs=_merge_pairs,
+                                               fragmentation_cooldown_pids=_fragmentation_cooldown_pids,
+                                               collision_state=collision_state,
+                                               craton_id_remap=_craton_plate_remap,
+                                               next_plate_id=next_plate_id)
+        _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+        # New plates (fragments) inherit their parent's rotation history, so the
+        # rotation file reconstructs them from t = 0 like any other plate.
+        if _new_plates:
+            print('  [fragment] {} new plate(s): {}'.format(
+                len(_new_plates),
+                '  '.join('plate {} → child {}'.format(parent, new)
+                          for new, parent in _new_plates)))
+            for _new_pid, _parent_pid in _new_plates:
+                cumulative_rotation_dict[_new_pid] = cumulative_rotation_dict.get(_parent_pid, identity)
+                rotation_records.extend([(tt, _new_pid, rot) for tt, p, rot in rotation_records
+                                         if p == _parent_pid])
+
+        # -----------------------------------------------------------------------
+        # Fragmentation / merging bookkeeping
+        # -----------------------------------------------------------------------
+        _merge_pairs = []
+        if params.get('merging_enabled', False) and 'divergence' in boundaries_gdf.columns:
+            _merge_thresh   = params.get('merge_conservative_threshold', 0.05)  # km/Myr
+            _merge_min_steps = int(params.get('merge_min_steps', 5))
+            _merge_cooldown = params.get('merge_cooldown_myr', 10.0)
+            _no_driver_req  = params.get('merge_require_no_driver', True)
+            _div_sub        = params['div_threshold_subduction']
+            _div_ridge      = params['div_threshold_ridge']
+            _areas          = sdp.plate_areas(rasters['plate_id'])
+
+            # Accumulate per-pair mean |divergence| and per-plate driver flags
+            _pair_divs, _plate_driver = {}, {}
+            for _, _br in boundaries_gdf.iterrows():
+                _p1 = _br.get('plateid1_poly1'); _p2 = _br.get('plateid1_poly2')
+                if not _p1 or not _p2 or _p1 == 0 or _p2 == 0:
+                    continue
+                _pair = (min(int(_p1), int(_p2)), max(int(_p1), int(_p2)))
+                _div  = float(_br.get('divergence', 0))
+                _pair_divs.setdefault(_pair, []).append(abs(_div))
+                for _pid in (_pair[0], _pair[1]):
+                    if _div > _div_ridge or _div < _div_sub:
+                        _plate_driver[_pid] = True
+                    else:
+                        _plate_driver.setdefault(_pid, False)
+
+            _new_contact = {}
+            for _pair, _divs in _pair_divs.items():
+                _mean_div = float(np.mean(_divs))
+                _prev     = _conservative_contact.get(_pair, 0)
+                _new_contact[_pair] = _prev + 1 if _mean_div < _merge_thresh else 0
+
+                if _new_contact[_pair] >= _merge_min_steps:
+                    _p1, _p2 = _pair
+                    if _p1 in _plate_cooldown or _p2 in _plate_cooldown:
+                        continue
+                    _big, _small = (_p1, _p2) if _areas.get(_p1, 0) >= _areas.get(_p2, 0) else (_p2, _p1)
+                    # only absorb a plate that is not itself driven by a ridge or trench
+                    if _no_driver_req and _plate_driver.get(_small, False):
+                        continue
+                    _merge_pairs.append((_big, _small))
+                    _plate_cooldown[_p1] = _merge_cooldown
+                    _plate_cooldown[_p2] = _merge_cooldown
+                    _new_contact[_pair]  = 0
+
+            _conservative_contact = _new_contact
+
+        if params.get('fragmentation_enabled', False) and _new_plates:
+            _frag_cooldown = params.get('fragmentation_cooldown_myr', 5.0)
+            for _new_pid, _parent_pid in _new_plates:
+                _plate_cooldown[_new_pid]    = _frag_cooldown
+                _plate_cooldown[_parent_pid] = _frag_cooldown
+
+        # Decrement all cooldowns
+        _plate_cooldown = {_pid: _rem - delta_time
+                           for _pid, _rem in _plate_cooldown.items() if _rem > delta_time}
+        _fragmentation_cooldown_pids = set(_plate_cooldown.keys())
+        _step_times['frag_merge_bookkeeping'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+        # ------------------------------------------------------------------
+        # Seafloor tracers: move with the same rotations as the plates, remove
+        # subducted ones, then seed new crust at the ridges
+        # ------------------------------------------------------------------
+        _craton_counts = sdp.craton_counts_from_raster(rasters['craton'] if 'craton' in rasters else None)
+        tracers = sdp.advect_tracers(tracers, previous_plate_id, moving_poles, delta_time,
+                                     boundaries_gdf=boundaries_gdf,
+                                     div_threshold=params['div_threshold_subduction'],
+                                     new_plate_id_raster=rasters['plate_id'])
+        tracers = sdp.deactivate_subducted_tracers(tracers, boundaries_gdf,
+                                                   threshold=params['div_threshold_subduction'],
+                                                   plate_id_raster=rasters['plate_id'],
+                                                   polarity_dict=polarity_dict,
+                                                   craton_counts=_craton_counts)
+        tracers = tracers[tracers.active.astype(bool)]
+        new_tracers = sdp.seed_ridge_tracers(boundaries_gdf,
+                                             spacing_deg=params['tracer_spacing_deg'],
+                                             threshold=params['div_threshold_ridge'],
+                                             offset_deg=params['tracer_offset_deg'])
+        tracers = gpd.GeoDataFrame(pd.concat([tracers, new_tracers], ignore_index=True),
+                                   geometry='geometry').set_crs(epsg=4326, allow_override=True)
+        _step_times['tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+        if _slab_enabled:
+            slab_tracers = sdp.update_slab_tracers(
+                slab_tracers, boundaries_gdf, delta_time,
+                div_threshold_subduction=params['div_threshold_subduction'],
+                slowing_factor=params.get('slab_slowing_factor', 4),
+                max_sink_rate_km_per_myr=params.get('slab_max_sink_rate', 200.0),
+                sink_rate_factor=params.get('slab_sink_rate_factor', 1.0))
+            _step_times['slab_tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+            cmb_heat = sdp.update_cmb_heat(
+                cmb_heat, slab_tracers, delta_time,
+                spacing_deg=_mantle_spacing,
+                heating_rate=params.get('cmb_heating_rate', 0.02),
+                slab_suppression=params.get('cmb_slab_suppression', 0.05),
+                surface_coupling=params.get('cmb_surface_coupling', 0.1),
+                sigma_deg=params.get('cmb_sigma_deg', 10.0),
+                max_heat=params.get('cmb_max_heat', 3.0))
+            _step_times['cmb_heat'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+            if 'divergence' in boundaries_gdf.columns:
+                _sub = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
+                _active_slabs = slab_tracers[slab_tracers['active'].astype(bool)]
+                print('  [slab] sub-bdry div (km/Myr): min={:.3f} max={:.3f}  '
+                      'sink_rate (km/Myr): max={:.1f}  '
+                      'slablets: n={:d} depth={:.0f}-{:.0f} km'.format(
+                          float(_sub['divergence'].min()) if len(_sub) else 0.0,
+                          float(_sub['divergence'].max()) if len(_sub) else 0.0,
+                          float(_active_slabs['sink_rate_km_per_myr'].max()) if len(_active_slabs) else 0.0,
+                          len(_active_slabs),
+                          float(_active_slabs['depth_km'].min()) if len(_active_slabs) else 0.0,
+                          float(_active_slabs['depth_km'].max()) if len(_active_slabs) else 0.0))
+
+        seamounts = sdp.advect_tracers(seamounts, previous_plate_id, moving_poles, delta_time,
+                                       boundaries_gdf=boundaries_gdf,
+                                       div_threshold=params['div_threshold_subduction'],
+                                       new_plate_id_raster=rasters['plate_id'])
+        seamounts = sdp.deactivate_subducted_tracers(seamounts, boundaries_gdf,
+                                                      threshold=params['div_threshold_subduction'],
+                                                      plate_id_raster=rasters['plate_id'],
+                                                      polarity_dict=polarity_dict,
+                                                      craton_counts=_craton_counts)
+        new_seamounts = sdp.seed_hotspot_seamounts(hotspot_locs, prob=params['hotspot_prob'], rng=rng)
+        if len(new_seamounts):
+            seamounts = gpd.GeoDataFrame(
+                pd.concat([seamounts, new_seamounts], ignore_index=True),
+                geometry='geometry').set_crs(epsg=4326, allow_override=True)
+        _step_times['seamounts'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+        # Plot / save (non-blocking; the worker writes files in the background).
+        # The last step is always saved.
+        _enqueue_outputs(i, force_save=(i == n_steps))
+
+        total = sum(_step_times.values())
+        print('  --- step timing (step {:d}, {:.1f}s total) ---'.format(i, total))
+        for _name, _dt in sorted(_step_times.items(), key=lambda x: -x[1]):
+            print('  {:20s}  {:5.1f}s  ({:4.1f}%)'.format(_name, _dt, 100 * _dt / total))
+
+finally:
+    # Drain output queue (also after an error or Ctrl-C in the main loop)
+    _output_queue.join()      # wait for all enqueued plot/save tasks to finish
+    _output_queue.put(None)   # stop worker
+    _output_thread.join()
 
 active_seamounts = seamounts[seamounts.active.astype(bool)]
 if len(active_seamounts):
     active_seamounts[['geometry', 'hotspot_id', 'age']].to_file(
         _out('seamounts_final.geojson'), driver='GeoJSON')
+
+if _output_errors:
+    print('\n{} output task(s) failed:\n  {}'.format(len(_output_errors), '\n  '.join(_output_errors)))
+    sys.exit(1)

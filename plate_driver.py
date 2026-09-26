@@ -26,7 +26,24 @@ def get_velocity_vector_at_centroid(equivalent_stage_rotation, centroid_point, d
     return velocity_ne
 
 
+def torque_to_stage_rotation(net_torque, delta_time=1):
+    '''Convert a net torque vector into a stage rotation over delta_time (Myr).
+
+    The torque magnitude is treated as an angular rate (radians per Myr), so the
+    rotation angle scales with the time step: the same forces move plates the same
+    distance per Myr whatever delta_time is.  Zero torque gives the identity rotation.
+    '''
+    if net_torque.is_zero_magnitude():
+        return pygplates.FiniteRotation()
+    return pygplates.FiniteRotation(
+        pygplates.PointOnSphere(net_torque.to_normalised().to_xyz()).to_lat_lon(),
+        net_torque.get_magnitude() * delta_time)
+
+
 def get_torque_for_segment(segment, subducting_normal_reversal=1):
+    '''Torque from a force acting on one boundary segment.  The force pushes the plate
+    along subducting_normal_reversal * (segment great-circle normal), with magnitude
+    proportional to the segment length.'''
 
     # If segment is zero length, assume that the torque is zero
     if segment.is_zero_length():
@@ -51,7 +68,7 @@ def get_torque_for_segment(segment, subducting_normal_reversal=1):
 
 
 def get_torques_for_plate_snapshot(snapshot, reconstruction_time, delta_time,
-                                   forces = ['slab_pull','slap_suction']):
+                                   forces=None):
 
     computed_plate_motions = []
 
@@ -69,7 +86,10 @@ def get_torques_for_plate_snapshot(snapshot, reconstruction_time, delta_time,
 
 
 def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time, delta_time,
-                                 forces = ['slab_pull','slab_suction']):
+                                 forces=None):
+
+    if forces is None:
+        forces = {'slab_pull': 1, 'slab_suction': 1}
 
     net_torque = pygplates.Vector3D(0, 0, 0)
 
@@ -188,14 +208,8 @@ def get_torque_for_plate_polygon(snapshot, target_plate_id, reconstruction_time,
         if topology.get_resolved_feature().get_reconstruction_plate_id() == target_plate_id:
             centroid_point = topology.get_resolved_geometry().get_interior_centroid()
 
-    if not net_torque.is_zero_magnitude():
-        computed_stage_rotation = pygplates.FiniteRotation(pygplates.PointOnSphere(net_torque.to_normalised().to_xyz()).to_lat_lon(),
-                                                           net_torque.get_magnitude())
-
-        computed_velocity_ne = get_velocity_vector_at_centroid(computed_stage_rotation, centroid_point, delta_time)
-    else:
-        computed_stage_rotation = None
-        computed_velocity_ne = None
+    computed_stage_rotation = torque_to_stage_rotation(net_torque, delta_time)
+    computed_velocity_ne = get_velocity_vector_at_centroid(computed_stage_rotation, centroid_point, delta_time)
 
     # get the reconstruction model vector at the centroid for comparison
     reconstruction_stage_rotation = snapshot.rotation_model.get_rotation(reconstruction_time,

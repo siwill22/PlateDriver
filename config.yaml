@@ -28,12 +28,13 @@ params:
   tessellation_deg:            0.2      # polygon edge densification before rasterising
   topo_simplify_tolerance:     0.4      # polygon smoothing tolerance after polygonise
   boundary_search_radius_deg:  2        # plate ID neighbour search radius at boundaries
-  div_threshold_subduction:   -0.0001   # cm/yr relative normal velocity below this → subduction
-  div_threshold_ridge:         0.2      # cm/yr relative normal velocity above this → ridge
+  div_threshold_subduction:   -0.0001   # km/Myr (= mm/yr) relative normal velocity below this → subduction
+  div_threshold_ridge:         0.2      # km/Myr (= mm/yr) relative normal velocity above this → ridge
 
   # --- Output ---
   csv_save_interval:           5        # save outputs every N timesteps
   plot_interval:               1        # make plots every N timesteps; set to null to disable
+  random_seed:                 null     # integer → repeatable run (hotspots, seamounts, earthquakes, terrain noise)
 
   # --- Seafloor & ridge tracers ---
   tracer_spacing_deg:          1.0      # seed point spacing along ridge boundaries
@@ -69,19 +70,19 @@ params:
   #  - [12, -31]
   #  - [-5, -27]
   #  - [13, 17]
-  #  -
 
   # --- Slab tracers & mantle dynamics ---
   slab_tracers_enabled:        true     # set true to track slab sinking and produce mantle_temp_NNNN.nc
   slab_slowing_factor:         4        # lower-mantle sinking slowdown (Lithgow-Bertelloni & Richards 1998)
+  slab_sink_rate_factor:       1.0      # upper-mantle sinking rate = factor × convergence rate (km/Myr); 10 reproduces runs before the unit fix
   slab_max_sink_rate:          400      # km/Myr; cap on sinking rate (real Earth max ~100-200 km/Myr)
   slab_thermal_tau_myr:        4        # Myr; thermal decay timescale for slablets (lower = faster fade)
   mantle_grid_spacing_deg:     5.0      # degrees; horizontal resolution of 3D mantle temp field
   mantle_depth_interval_km:    100      # km; depth layer thickness
   cmb_heating_rate:            0.02     # heat units added per Myr everywhere (core heating)
-  cmb_slab_suppression:        0.05     # heat units removed per slablet per Myr (at full coupling)
+  cmb_slab_suppression:        0.05     # heat units removed per (full-weight) slablet per Myr (at full coupling)
   cmb_surface_coupling:        0.1      # fractional coupling at surface (0=thermal only, 1=full instantaneous)
-  cmb_sigma_deg:               10.0     # horizontal smoothing of CMB heat field (degrees)
+  cmb_sigma_deg:               10.0     # horizontal smoothing of CMB heat field (degrees, per Myr; spherical Gaussian)
   cmb_max_heat:                3.0      # cap on heat accumulation units
   cmb_dVs_scale:               -0.5     # dVs % per heat unit injected into 3D field (negative = warm)
   cmb_decay_km:                400.0    # Gaussian decay length upward from CMB (km)
@@ -95,14 +96,15 @@ params:
 
   # --- Plate lifecycle (fragmentation & merging) ---
   fragmentation_enabled:       true    # split geometrically implausible plates at their neck
-  min_neck_ratio:              0.35    # cut if neck width < this fraction of typical plate body width
-  min_concavity_ratio:         0.85    # secondary trigger: concavity below this → also attempt cut
-  max_aspect_ratio:            2.0     # secondary trigger: aspect ratio above this → also attempt cut
-  min_child_area_deg2:         25.0    # minimum child plate area in deg² (prevents slivers)
-  min_peninsula_area_deg2:     5.0     # minimum fragment area when neck_ratio < 0.2 (thin peninsulas)
+  min_neck_ratio:              0.35    # cut if neck half-width < this fraction of the smaller part's inscribed radius
+  min_concavity_ratio:         0.85    # screening: plates with concavity below this are searched for a neck
+  max_aspect_ratio:            2.0     # screening: plates with aspect ratio above this are searched for a neck
+  min_child_area_deg2:         25.0    # minimum child plate area (equatorial deg², area-weighted; prevents slivers)
+  min_peninsula_area_deg2:     5.0     # minimum fragment area when neck_ratio < 0.2; also the size below which a
+                                       # disconnected piece of a plate is absorbed by its neighbour
   fragmentation_cooldown_myr:  5.0     # Myr before a plate can fragment again
   merging_enabled:             false    # absorb plates with persistently near-zero relative motion
-  merge_conservative_threshold: 0.05   # cm/yr; boundary |divergence| below this = near-zero
+  merge_conservative_threshold: 0.05   # km/Myr (= mm/yr); boundary |divergence| below this = near-zero
   merge_min_steps:             5        # consecutive near-zero steps before merge fires
   merge_require_no_driver:     true     # only merge if smaller plate has no ridge/subduction boundaries
   merge_cooldown_myr:          10.0     # Myr before merged plate is eligible again
