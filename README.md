@@ -71,6 +71,9 @@ All outputs go to the directory specified by `output_dir` in `config.yaml`.
 | `craton_NNNN.nc` | Every `csv_save_interval` steps | Craton ID raster (lon/lat) |
 | `divergence_NNNN.nc` | Every `csv_save_interval` steps | Horizontal divergence of the plate velocity field (1/Myr); ≈0 inside rigid plates, positive at spreading and negative at converging boundaries |
 | `seamounts_final.geojson` | End of run | All active seamounts at final timestep |
+| `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, seconds per step by phase |
+| `plate_stats.csv` | Every step | One row per plate per step: angular velocity (pole, rate), RMS speed, area, continental fraction, perimeter and trench (downgoing/overriding), ridge and conservative lengths |
+| `run_info.yaml` | Start of run | The config used, the resolved force modes and the git commit |
 | `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file with finite rotations for all plates up to step NNNN. The time column is elapsed model time (see [Rotation file format](#rotation-file-format)) |
 
 ## Key parameters (`config.yaml`)
@@ -83,6 +86,22 @@ run:
   delta_time: 1.0             # timestep size (Myr)
   total_time: 200.0           # run duration (Myr)
 ```
+
+### Force model
+
+```yaml
+force_model: simple      # simple | physical
+force_modes: {}          # per-component overrides, e.g. {collision: coupling}
+```
+
+`force_model` picks a preset for every component of the force model; an entry under
+`force_modes` overrides one component. `simple` is the original boundary-force model
+(and the fastest). `physical` is the v1 force model (basal drag, age-dependent slab
+pull and ridge push, and so on), which is being built in stages; see
+`force_model_v1_plan.md`. Until it is complete, choosing a mode that does not exist
+yet stops the run with a message. The resolved modes are printed at the start of the
+run and written to `run_info.yaml`. The collision mode (`resistance` or `coupling`)
+is `force_modes.collision`; the older `params.collision_mode` is still read.
 
 ### Forces
 
@@ -268,6 +287,28 @@ python analyse_boundaries.py --output_dir ./output [--delta_time 1.0]
 
 Output: `boundary_stats.csv` with columns `timestep` (plus `time_myr` when `--delta_time` is given), `ridge_length_km`, `subduction_length_km`, `conservative_length_km`, `ridge_flux_km2_per_myr`, `subduction_flux_km2_per_myr`. Arc lengths computed using pygplates spherical geometry; flux = length × |divergence| (km × km/Myr).
 
+### `diagnose_run.py`
+
+Diagnostic figures (PyGMT) for one or more runs, overlaid for comparison:
+
+```bash
+python diagnose_run.py ./output_a ./output_b --labels simple physical [--out figs] [--steps 0 50 100]
+```
+
+- `fu_plot.png`: plate RMS speed against trench fraction and against continental fraction (Forsyth & Uyeda 1975 found speed rises with the first and falls with the second).
+- `timeseries.png`: RMS speed and fastest plate, net rotation, number of plates, seconds per step.
+- `maps_NNNN.png`: seafloor age, boundaries by type and plate velocity arrows.
+
+### `regression_check.py`
+
+Compares two output folders file by file (grids, CSVs, GeoJSONs, rotation files) and exits with status 1 if anything differs:
+
+```bash
+python regression_check.py ./output_reference ./output_new [--tol 0]
+```
+
+Runs with the same `random_seed` are repeatable, so `force_model: simple` is checked against a reference run this way.
+
 ---
 
 ## Codebase reference
@@ -279,6 +320,10 @@ Output: `boundary_stats.csv` with columns `timestep` (plus `time_myr` when `--de
 | `self_driving_plates.py` | Library — all simulation logic as importable functions |
 | `run_SDP.py` | Driver script — config loading, bootstrapping, main loop, plotting, output |
 | `plate_driver.py` | Torque helpers: segment torque, torque → stage rotation, and the bootstrap torques from the GPlates boundary feature types |
+| `force_modes.py` | Force-model presets (`simple`, `physical`), mode choices and their validation |
+| `step_stats.py` | Per-step kinematic statistics (`step_stats.csv`, `plate_stats.csv`) |
+| `diagnose_run.py` | Diagnostic figures for one or more runs |
+| `regression_check.py` | File-by-file comparison of two output folders |
 | `analyse_boundaries.py` | Standalone post-processing — boundary length and flux time series |
 | `generate_topography.py` | Standalone script: blends synthetic topography with a reference bathymetry and adds trenches (from `boundaries_NNNN.geojson`, ocean pixels only) and optional seamounts. Accepts −180..180 or 0..360 grids. Holds the shared helpers used by the two scripts below |
 | `generate_trench_raster.py` | Standalone script: trench-depth anomaly raster from `boundaries_NNNN.geojson` (writes `trench_NNNN.nc` next to the input by default) |
@@ -352,7 +397,7 @@ compute_boundary_divergence   per-arc-segment relative normal velocity; sign fro
 velocity_grid                 east/north velocity at each raster cell (ω × r)
 spherical_divergence          divergence raster (1/Myr)
 polygons_to_stage_poles       integrate boundary torques → stage rotation per plate
-[apply_collision_coupling]    collision_mode: coupling only
+[apply_collision_coupling]    force_modes.collision: coupling only
 ```
 
 ### Key data structures

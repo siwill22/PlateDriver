@@ -153,6 +153,54 @@ def plate_areas(plate_id_raster):
     return {int(p): float(s) for p, s in zip(pids, sums)}
 
 
+def grid_stride(raster, grid_deg):
+    """Row/column slices that sample a regular global raster at about grid_deg spacing,
+    taking the cell nearest the centre of each coarse cell.  Returns (slices, k)."""
+    lons, _ = raster_coords(raster)
+    k = max(1, int(round(grid_deg / abs(lons[1] - lons[0])))) if grid_deg else 1
+    return (slice(k // 2, None, k), slice(k // 2, None, k)), k
+
+
+def plate_area_tensors(plate_id_raster, weight=None, grid_deg=1.0):
+    """Area tensor of each plate on the unit sphere: T_p = Σ w (𝟙 − r rᵀ) dA.
+
+    For a rigid plate rotating at angular velocity ω, ωᵀ T ω = ∫ w |ω × r|² dA, so with
+    w = 1 the tensor gives the plate's mean-square speed, and with w = a drag weight it
+    is the basal drag tensor (torque = −c T ω).  dA is in steradians (cos(lat)
+    weighted); the raster is sampled at about grid_deg spacing for speed.
+
+    weight : optional array, same shape as the raster (e.g. a continental drag factor).
+    Returns (pids, tensors (n, 3, 3), areas (n,) in steradians).
+    """
+    sl, _ = grid_stride(plate_id_raster, grid_deg)
+    lons, lats = raster_coords(plate_id_raster)
+    vals = plate_id_raster.values[sl]
+    lon2d, lat2d = np.meshgrid(lons[sl[1]], lats[sl[0]])
+    dlon = np.radians(abs(lons[sl[1]][1] - lons[sl[1]][0]))
+    dlat = np.radians(abs(lats[sl[0]][1] - lats[sl[0]][0]))
+    dA = np.cos(np.radians(lat2d)) * dlon * dlat
+    ok = np.isfinite(vals) & (vals > 0)
+    pids, inv = np.unique(vals[ok].astype(int), return_inverse=True)
+    r = lonlat_to_xyz(lon2d[ok], lat2d[ok])
+    area_w = dA[ok]
+    w = area_w if weight is None else area_w * np.asarray(weight)[sl][ok]
+    tensors = np.zeros((len(pids), 3, 3))
+    for i in range(3):
+        for j in range(i, 3):
+            comp = np.bincount(inv, weights=w * ((i == j) - r[:, i] * r[:, j]),
+                               minlength=len(pids))
+            tensors[:, i, j] = comp
+            tensors[:, j, i] = comp
+    areas = np.bincount(inv, weights=area_w, minlength=len(pids))
+    return pids, tensors, areas
+
+
+def stage_pole_omega(rotation, delta_time):
+    """Angular velocity vector (rad/Myr) of a stage rotation over delta_time."""
+    axis, angle = rotation_axis_angle(rotation)
+    return axis * angle / delta_time
+
+
 def wrap_neighbours(mask):
     """4-connected neighbour shifts of a boolean/int array on a global grid:
     longitude wraps (np.roll), latitude does not (poles are edges)."""

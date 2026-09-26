@@ -16,8 +16,10 @@ import yaml
 from gprm import ReconstructionModel
 from gprm.utils.create_gpml import gpml2gdf
 
+import force_modes
 import plate_driver as pdriver
 import self_driving_plates as sdp
+import step_stats
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +48,42 @@ os.makedirs(output_dir, exist_ok=True)
 
 def _out(filename):
     return os.path.join(output_dir, filename)
+
+
+# Force model: a preset (simple | physical) plus per-component overrides
+force_preset, modes = force_modes.resolve_force_modes(cfg)
+print(force_modes.describe(force_preset, modes))
+params['collision_mode'] = modes['collision']
+
+
+def _git_commit():
+    try:
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        commit = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=here,
+                                capture_output=True, text=True).stdout.strip()
+        dirty = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=no'],
+                               cwd=here, capture_output=True, text=True).stdout.strip()
+        return commit + ('-dirty' if dirty else '') if commit else 'unknown'
+    except Exception:
+        return 'unknown'
+
+
+# Record exactly what this run used
+with open(_out('run_info.yaml'), 'w') as fh:
+    yaml.safe_dump({'config_file': os.path.abspath(args.config),
+                    'git_commit': _git_commit(),
+                    'started': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'force_model': force_preset,
+                    'force_modes_resolved': modes,
+                    'config': cfg}, fh, sort_keys=False)
+
+# Per-step statistics are appended every step; start them afresh
+_step_stats_csv  = _out('step_stats.csv')
+_plate_stats_csv = _out('plate_stats.csv')
+for _f in (_step_stats_csv, _plate_stats_csv):
+    if os.path.exists(_f):
+        os.remove(_f)
 
 
 # All randomness (hotspots, seamounts, earthquakes, topography noise)
@@ -168,11 +206,11 @@ def _do_plot(i, active_tracers, new_plate_polygons, boundaries_gdf,
             (boundaries_gdf['divergence'] <= params['div_threshold_ridge'])
         ]
         if len(cons_bounds):
-            fig.plot(data=cons_bounds, pen='1p,black')
+            fig.plot(data=cons_bounds.copy(), pen='1p,black')
         if len(ridge_bounds):
-            fig.plot(data=ridge_bounds, pen='2p,red')
+            fig.plot(data=ridge_bounds.copy(), pen='2p,red')
         if len(sub_bounds):
-            fig.plot(data=sub_bounds, pen='2p,blue')
+            fig.plot(data=sub_bounds.copy(), pen='2p,blue')
     glon, glat = np.meshgrid(rasters.lon, rasters.lat)
     stride = 10
     magnitude = np.sqrt(rasters['velocity_east'].data[::stride, ::stride].flatten()**2 +
@@ -403,6 +441,28 @@ def _enqueue_outputs(i, force_save=False):
     return False
 
 
+_step_rows = []
+
+
+def _record_step_stats(i, step_times=None):
+    """Append this step's rows to step_stats.csv and plate_stats.csv."""
+    step_row, plate_rows = step_stats.compute(
+        i, i * delta_time, rasters, stage_pole_dict, delta_time, boundaries_gdf,
+        polarity_dict, params)
+    step_row['n_tracers'] = int(tracers.active.astype(bool).sum())
+    step_row['n_slab_tracers'] = (int(slab_tracers['active'].astype(bool).sum())
+                                  if _slab_enabled else 0)
+    for name, dt in (step_times or {}).items():
+        step_row['seconds_' + name] = dt
+    step_row['seconds_step'] = sum((step_times or {}).values()) if step_times else np.nan
+    # step_stats.csv is rewritten each step (columns can appear after step 0);
+    # plate_stats.csv has fixed columns and is appended
+    _step_rows.append(step_row)
+    pd.DataFrame(_step_rows).to_csv(_step_stats_csv, index=False)
+    step_stats.append_csv(_plate_stats_csv, plate_rows)
+    return step_row
+
+
 # ---------------------------------------------------------------------------
 # Main time loop
 # ---------------------------------------------------------------------------
@@ -411,6 +471,7 @@ n_steps = int(round(total_time / delta_time))
 identity = pygplates.FiniteRotation()
 
 try:
+    _record_step_stats(0)
     _enqueue_outputs(0)
     for i in range(1, n_steps + 1):
         t = i * delta_time
@@ -599,14 +660,22 @@ try:
                                                       craton_counts=_craton_counts)
         new_seamounts = sdp.seed_hotspot_seamounts(hotspot_locs, prob=params['hotspot_prob'], rng=rng)
         if len(new_seamounts):
+            _parts = [df for df in (seamounts, new_seamounts) if len(df)]
             seamounts = gpd.GeoDataFrame(
-                pd.concat([seamounts, new_seamounts], ignore_index=True),
+                pd.concat(_parts, ignore_index=True),
                 geometry='geometry').set_crs(epsg=4326, allow_override=True)
         _step_times['seamounts'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-        # Plot / save (non-blocking; the worker writes files in the background).
-        # The last step is always saved.
+        # Plot / save (non-blocking; the worker writes files in the background, but
+        # this waits when the queue is full).  The last step is always saved.
         _enqueue_outputs(i, force_save=(i == n_steps))
+        _step_times['outputs_enqueue'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+        _stats_t0 = time.perf_counter()
+        _row = _record_step_stats(i, {**_step_times, 'step_stats': 0.0})
+        _step_times['step_stats'] = time.perf_counter() - _stats_t0
+        print('  [kinematics] plates={n_plates}  rms speed={rms_speed_km_per_myr:.1f} km/Myr  '
+              'max plate rms={max_plate_rms_km_per_myr:.1f}  net rotation={net_rotation_deg_per_myr:.3f} deg/Myr'.format(**_row))
 
         total = sum(_step_times.values())
         print('  --- step timing (step {:d}, {:.1f}s total) ---'.format(i, total))
