@@ -869,23 +869,66 @@ def split_disconnected_plates(plate_id_raster, craton_raster=None, next_pid=None
     return raster, new_plates, next_pid
 
 
-def _plate_shape_metrics(geoms, lon_c, lat_c):
-    """Concavity (area / convex-hull area) and aspect ratio of a plate, measured in a
-    Lambert azimuthal equal-area projection centred on the plate, so both are
-    physical rather than lon/lat-degree quantities."""
-    from pyproj import Transformer
-    from shapely.ops import transform as shp_transform
-    to_laea = Transformer.from_crs(
-        'EPSG:4326', f'+proj=laea +lat_0={lat_c} +lon_0={lon_c} +R=6371000', always_xy=True)
-    projected = unary_union([shp_transform(to_laea.transform, g) for g in geoms]).buffer(0)
-    hull_area = projected.convex_hull.area
-    if projected.is_empty or hull_area <= 0:
-        return 1.0, 1.0
-    rect = projected.minimum_rotated_rectangle
-    xs, ys = rect.exterior.coords.xy
-    sides = sorted([np.hypot(xs[1] - xs[0], ys[1] - ys[0]), np.hypot(xs[2] - xs[1], ys[2] - ys[1])])
-    aspect = sides[1] / max(sides[0], 1e-9)
-    return projected.area / hull_area, aspect
+def _plate_shape_metrics(mask, lon2d, lat2d, cell_area):
+    """Concavity (area / convex-hull area) and aspect ratio of a plate, from its raster
+    cells and measured on the sphere.
+
+    Aspect ratio: square root of the ratio of the principal second moments of the plate
+    area in an azimuthal-equidistant frame about the plate centroid (a/b for an a x b
+    rectangle or ellipse).  Convex hull: taken in a gnomonic projection about the
+    centroid, where great circles are straight lines, so the planar hull of the edge
+    cells is the spherical convex hull; its area comes from pygplates.
+
+    A plate reaching more than 85 degrees from its centroid has no gnomonic hull; it is
+    returned as concavity 0 so that the neck search always examines it.
+    """
+    w = cell_area[mask]
+    xyz = lonlat_to_xyz(lon2d[mask], lat2d[mask])
+    centre = (xyz * w[:, None]).sum(axis=0)
+    centre /= np.linalg.norm(centre)
+    # Tangent-plane basis at the centroid (east, north)
+    east = np.cross([0.0, 0.0, 1.0], centre)
+    if np.linalg.norm(east) < 1e-9:
+        east = np.array([1.0, 0.0, 0.0])
+    east /= np.linalg.norm(east)
+    north = np.cross(centre, east)
+
+    cos_d = np.clip(xyz @ centre, -1.0, 1.0)
+    x, y = xyz @ east, xyz @ north
+    # Azimuthal-equidistant coordinates: angular distance along the azimuth
+    dist = np.arccos(cos_d)
+    norm_xy = np.hypot(x, y)
+    scale = np.divide(dist, norm_xy, out=np.ones_like(dist), where=norm_xy > 1e-12)
+    ax, ay = x * scale, y * scale
+    wsum = w.sum()
+    mx, my = (w * ax).sum() / wsum, (w * ay).sum() / wsum
+    cxx = (w * (ax - mx) ** 2).sum() / wsum
+    cyy = (w * (ay - my) ** 2).sum() / wsum
+    cxy = (w * (ax - mx) * (ay - my)).sum() / wsum
+    eig = np.linalg.eigvalsh([[cxx, cxy], [cxy, cyy]])
+    aspect = float(np.sqrt(eig[1] / eig[0])) if eig[0] > 0 else np.inf
+
+    if cos_d.min() < np.cos(np.radians(85.0)):
+        return 0.0, aspect
+
+    # Spherical convex hull of the edge cells, via the gnomonic projection
+    from scipy.spatial import ConvexHull, QhullError
+    up, down, east_n, west_n = wrap_neighbours(mask)
+    edge = (mask & ~(up & down & east_n & west_n))[mask]
+    gx, gy = x[edge] / cos_d[edge], y[edge] / cos_d[edge]
+    if len(gx) < 3:
+        return 1.0, aspect
+    try:
+        hull = ConvexHull(np.column_stack([gx, gy]))
+    except QhullError:
+        return 1.0, aspect
+    verts = centre + gx[hull.vertices, None] * east + gy[hull.vertices, None] * north
+    hull_lon, hull_lat = xyz_to_lonlat(verts)
+    hull_area = pygplates.PolygonOnSphere(list(zip(hull_lat, hull_lon))).get_area()  # steradians
+    hull_area *= np.degrees(1.0) ** 2   # equatorial deg², the units of cell_area
+    if hull_area <= 0:
+        return 1.0, aspect
+    return float(min(1.0, wsum / hull_area)), aspect
 
 
 def _find_neck(mask, lon2d, lat2d, cell_area, min_part_area):
@@ -942,8 +985,8 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
     """Detect geometric necks and split implausible plates in the raster.
 
     1. Screening: plates whose concavity is below min_concavity_ratio or whose aspect
-       ratio exceeds max_aspect_ratio (both measured in an equal-area projection) are
-       examined further.
+       ratio exceeds max_aspect_ratio (both measured on the sphere from the plate's raster
+       cells) are examined further.
     2. Neck search (_find_neck): spherical erosion finds the narrowest constriction that
        separates two substantial parts.  The plate is cut there if
        neck half-width / inscribed radius of the smaller part < min_neck_ratio.
@@ -985,9 +1028,7 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
         area = cell_area[mask].sum()
         if area < 2 * min_peninsula:
             continue
-        centre_lon, centre_lat = xyz_to_lonlat(
-            (lonlat_to_xyz(lon2d[mask], lat2d[mask]) * cell_area[mask][:, None]).sum(axis=0))
-        concavity, aspect = _plate_shape_metrics(list(group.geometry), float(centre_lon), float(centre_lat))
+        concavity, aspect = _plate_shape_metrics(mask, lon2d, lat2d, cell_area)
         if concavity >= min_concavity and aspect <= max_aspect:
             continue
 
