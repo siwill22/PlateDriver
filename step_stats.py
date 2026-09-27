@@ -4,9 +4,12 @@ step_stats.csv   one row per step: global RMS speed, net rotation, boundary leng
 plate_stats.csv  one row per plate per step: angular velocity, RMS speed, area,
                  continental fraction and boundary lengths (for Forsyth & Uyeda style plots)
 
-Velocities are those of the stage rotations computed at the step, i.e. the motion of the
-step's plate configuration over the next delta_time.  Everything is spherical: speeds
-come from the plate area tensors, lengths are great-circle lengths.
+Timing convention: the boundary types of step i are classified with the rotations that
+moved the plates into that configuration (computed at step i - 1); the forces from those
+boundary types give the new rotations of step i, which are the velocities reported here.
+So each row pairs a boundary configuration with the motion it drives.  pole_change_deg is
+the angle between a plate's angular velocity at step i and at step i - 1.  Everything is
+spherical: speeds come from the plate area tensors, lengths are great-circle lengths.
 """
 
 import os
@@ -65,7 +68,7 @@ def boundary_lengths_by_plate(boundaries_gdf, polarity_dict, craton_counts, para
 
 
 def compute(step, time_myr, rasters, stage_pole_dict, delta_time, boundaries_gdf,
-            polarity_dict, params, grid_deg=1.0):
+            polarity_dict, params, grid_deg=1.0, previous_stage_pole_dict=None):
     """Return (step_row, plate_rows) for one step."""
     plate_id = rasters['plate_id']
     pids, J, areas = sdp.plate_area_tensors(plate_id, grid_deg=grid_deg)
@@ -89,12 +92,18 @@ def compute(step, time_myr, rasters, stage_pole_dict, delta_time, boundaries_gdf
         pole_lon, pole_lat = sdp.xyz_to_lonlat(w) if rate > 0 else (0.0, 90.0)
         L = lengths.get(pid, {})
         perim = L.get('perimeter', 0.0)
+        pole_change = np.nan
+        if previous_stage_pole_dict is not None and pid in previous_stage_pole_dict:
+            w_prev = sdp.stage_pole_omega(previous_stage_pole_dict[pid], delta_time)
+            n0, n1 = np.linalg.norm(w_prev), np.linalg.norm(w)
+            if n0 > 0 and n1 > 0:
+                pole_change = float(np.degrees(np.arccos(np.clip(w_prev @ w / (n0 * n1), -1, 1))))
         plate_rows.append(dict(
             step=step, time_myr=time_myr, plate_id=pid,
             area_frac=Ap / (4 * np.pi), area_km2=Ap * R * R,
             continental_frac=cont_area.get(pid, 0.0) / Ap if Ap > 0 else 0.0,
             pole_lat=float(pole_lat), pole_lon=float(pole_lon), rate_deg_per_myr=rate,
-            rms_speed_km_per_myr=rms,
+            rms_speed_km_per_myr=rms, pole_change_deg=pole_change,
             perimeter_km=perim,
             trench_down_km=L.get('trench_down', 0.0), trench_over_km=L.get('trench_over', 0.0),
             ridge_km=L.get('ridge', 0.0), conservative_km=L.get('conservative', 0.0),
@@ -117,9 +126,20 @@ def compute(step, time_myr, rasters, stage_pole_dict, delta_time, boundaries_gdf
         net_rotation_deg_per_myr=nr_rate, net_rotation_pole_lat=float(nr_lat),
         net_rotation_pole_lon=float(nr_lon),
         trench_km=sum(r['trench_down_km'] for r in plate_rows),
+        # area-weighted share of the plates whose pole swung more than 10 / 30 degrees this step
+        pole_change_gt10_area_frac=_area_share(plate_rows, 10.0),
+        pole_change_gt30_area_frac=_area_share(plate_rows, 30.0),
         ridge_km=sum(r['ridge_km'] for r in plate_rows) / 2,
     )
     return step_row, plate_rows
+
+
+def _area_share(plate_rows, threshold_deg):
+    ok = [r for r in plate_rows if np.isfinite(r['pole_change_deg'])]
+    total = sum(r['area_frac'] for r in ok)
+    if total <= 0:
+        return np.nan
+    return sum(r['area_frac'] for r in ok if r['pole_change_deg'] > threshold_deg) / total
 
 
 def append_csv(path, rows):

@@ -444,11 +444,11 @@ def _enqueue_outputs(i, force_save=False):
 _step_rows = []
 
 
-def _record_step_stats(i, step_times=None):
+def _record_step_stats(i, step_times=None, previous_poles=None):
     """Append this step's rows to step_stats.csv and plate_stats.csv."""
     step_row, plate_rows = step_stats.compute(
         i, i * delta_time, rasters, stage_pole_dict, delta_time, boundaries_gdf,
-        polarity_dict, params)
+        polarity_dict, params, previous_stage_pole_dict=previous_poles)
     step_row['n_tracers'] = int(tracers.active.astype(bool).sum())
     step_row['n_slab_tracers'] = (int(slab_tracers['active'].astype(bool).sum())
                                   if _slab_enabled else 0)
@@ -672,7 +672,7 @@ try:
         _step_times['outputs_enqueue'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         _stats_t0 = time.perf_counter()
-        _row = _record_step_stats(i, {**_step_times, 'step_stats': 0.0})
+        _row = _record_step_stats(i, {**_step_times, 'step_stats': 0.0}, previous_poles=moving_poles)
         _step_times['step_stats'] = time.perf_counter() - _stats_t0
         print('  [kinematics] plates={n_plates}  rms speed={rms_speed_km_per_myr:.1f} km/Myr  '
               'max plate rms={max_plate_rms_km_per_myr:.1f}  net rotation={net_rotation_deg_per_myr:.3f} deg/Myr'.format(**_row))

@@ -70,6 +70,7 @@ def timeseries(runs, labels, out):
     panels = [
         ('rms_speed_km_per_myr', 'RMS speed (km/Myr)', 'max_plate_rms_km_per_myr'),
         ('net_rotation_deg_per_myr', 'Net rotation (deg/Myr)', None),
+        ('pole_change_gt10_area_frac', 'Area with pole swing > 10 deg/step', 'pole_change_gt30_area_frac'),
         ('n_plates', 'Number of plates', None),
         ('seconds_step', 'Seconds per step', None),
     ]
@@ -96,8 +97,9 @@ def timeseries(runs, labels, out):
                     fig.plot(x=steps.time_myr[ok], y=steps[col][ok], pen='1.2p,' + colour,
                              label=label if panel == 0 else None)
                     if col2 and col2 in steps:
-                        fig.plot(x=steps.time_myr, y=steps[col2], pen='0.8p,{},--'.format(colour),
-                                 label=(label + ' fastest plate') if panel == 0 else None)
+                        ok2 = steps[col2].notna()
+                        fig.plot(x=steps.time_myr[ok2], y=steps[col2][ok2], pen='0.8p,{},--'.format(colour),
+                                 label=(label + ' (dashed: fastest plate; > 30 deg swing)') if panel == 0 else None)
                 if panel == 0:
                     fig.legend(position='jTR+o0.1c', box='+gwhite+p0.5p')
     fig.savefig(os.path.join(out, 'timeseries.png'), dpi=200)
