@@ -138,6 +138,10 @@ stays the same.
 
 `diagnose_run.py <output_dir>` makes PyGMT figures:
 
+0. **Map sequence (the main check):** the plate configuration at each saved step, showing
+   seafloor age, ridges, trenches with polarity, velocities and plate IDs. When runs are
+   compared, each run gets a column at the same model times. Gate figures are presented
+   through `show-me/`.
 1. **Forsyth & Uyeda plot:** plate speed against trench fraction (the trend should be
    positive) and against continental fraction (the trend should be negative).
 2. **Time series:** RMS speed, net rotation, maximum plate speed and step time.
