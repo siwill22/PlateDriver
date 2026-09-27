@@ -153,8 +153,11 @@ stays the same.
 2. **Time series:** RMS speed, net rotation, maximum plate speed and step time.
 3. **Map snapshots:** velocity arrows over the age grid, with trenches coloured by slab
    length.
-4. **Regression test:** `force_model: simple` must reproduce the `review-fixes` outputs
-   exactly (rotations, plate IDs, tracers) over 10 steps.
+4. **Regression test:** `force_model: simple` must reproduce the reference run exactly
+   (rotations, plate IDs, tracers) over 10 steps. The reference was reset at 102d8b9,
+   after the S2 tie-breaking rule. Before that, ties between equally near cells were
+   broken by whatever the search method happened to do, and the model amplifies such
+   differences into a different trajectory (see `show-me/2026-09-27-s2-faster-search/`).
 
 Each gate shows the new mode side by side with `simple`.
 
