@@ -1344,7 +1344,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     _ct['resolve_overlaps'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     plate_id_raster = update_plate_id_raster(clipped_polygons, raster_spacing=raster_spacing,
-                                             tie_break=params.get('tie_break', 'hash'),
+                                             tie_break=params.get('tie_break', 'previous_owner'),
                                              previous_plate_id=previous_plate_id,
                                              tie_break_seed=params.get('tie_break_seed', 0))
     if next_plate_id is None:
