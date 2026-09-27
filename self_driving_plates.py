@@ -2344,6 +2344,55 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
                         attrs={'units': 'meters', 'long_name': 'synthetic elevation'})
 
 
+def physics_grid_age(tracer_lon, tracer_lat, tracer_age, plate_id_raster, craton_raster=None,
+                     grid_deg=1.0, tracer_plate_id=None):
+    """Seafloor age (Myr) on the physics grid, from the seafloor tracers, for the force model.
+
+    The grid is the raster sampled at about grid_deg (the same cells as plate_area_tensors).
+    Each ocean cell takes the age of the nearest tracer (great-circle distance); in a gap
+    that has just opened at a ridge this is the youngest tracer beside it.  If
+    tracer_plate_id is given, tracers that now sit on a different plate in plate_id_raster
+    are left out (they crossed a boundary, i.e. are being subducted), so old crust is not
+    smeared onto the overriding plate.  Continental cells (craton raster > 0) are NaN.
+    Returns a DataArray (lat, lon) on the sampled grid.
+    """
+    sl, _ = grid_stride(plate_id_raster, grid_deg)
+    lons, lats = raster_coords(plate_id_raster)
+    g_lon, g_lat = lons[sl[1]], lats[sl[0]]
+    lon2d, lat2d = np.meshgrid(g_lon, g_lat)
+    tracer_lon, tracer_lat = np.asarray(tracer_lon, float), np.asarray(tracer_lat, float)
+    tracer_age = np.asarray(tracer_age, float)
+    if tracer_plate_id is not None and len(tracer_age):
+        keep = raster_lookup(plate_id_raster, tracer_lon, tracer_lat) == np.asarray(tracer_plate_id)
+        tracer_lon, tracer_lat, tracer_age = tracer_lon[keep], tracer_lat[keep], tracer_age[keep]
+    age = np.full(lon2d.shape, np.nan)
+    if len(tracer_age):
+        tree = SphereTree(np.deg2rad(np.column_stack([tracer_lat, tracer_lon])))
+        _, idx = tree.query(np.deg2rad(np.column_stack([lat2d.ravel(), lon2d.ravel()])), k=1)
+        age = tracer_age[idx[:, 0]].reshape(lon2d.shape)
+    if craton_raster is not None:
+        age[np.nan_to_num(np.asarray(craton_raster.values)[sl]) > 0] = np.nan
+    return xr.DataArray(age, dims=('lat', 'lon'), coords={'lat': g_lat, 'lon': g_lon},
+                        attrs={'units': 'Myr', 'long_name': 'seafloor age (physics grid)'})
+
+
+def predict_tracers(lon, lat, age, plate_id_raster, stage_pole_dict, delta_time):
+    """Tracer positions and ages one step ahead: each tracer rotated with the stage pole of
+    the plate it sits on in plate_id_raster (the raster before the move), age + delta_time.
+    Returns (lon, lat, age, plate_id).  No tracers are removed or added here (that needs
+    the new boundaries); pass plate_id to physics_grid_age to drop those that crossed."""
+    lon, lat = np.asarray(lon, float), np.asarray(lat, float)
+    pids = raster_lookup(plate_id_raster, lon, lat)
+    new_lon, new_lat = lon.copy(), lat.copy()
+    for pid in np.unique(pids[np.isfinite(pids)]):
+        rotation = stage_pole_dict.get(int(pid))
+        if rotation is None:
+            continue
+        m = pids == pid
+        new_lon[m], new_lat[m] = rotate_lonlat(rotation, lon[m], lat[m])
+    return new_lon, new_lat, np.asarray(age, float) + delta_time, pids
+
+
 def generate_seafloor_age_grid(tracer_csv, craton_raster=None, region='d', spacing='1d'):
     """Interpolate seafloor age tracers to a global grid and optionally mask continents.
 
