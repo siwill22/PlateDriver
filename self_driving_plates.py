@@ -704,6 +704,66 @@ def _rings_with_outward_sign(polygon):
                -_ring_sign(polygon.get_interior_ring_points(k)))
 
 
+# polarity: age — a plate counts as continental at a contact if its own continent lies
+# within the search radius along at least this share of the contact length.
+CONTACT_CONTINENT_SHARE = 0.5
+
+
+def _decide_polarity_at_contact(polarity_dict, convergent, seg_pid, pair_lo, pair_hi, seg_len,
+                                inner_age, mid_lon, mid_lat, craton_raster, radius_deg):
+    """polarity: age.  For every plate pair converging this step:
+
+    - continent at the contact: the share of each plate's side of the contact (by length)
+      with its own continent within radius_deg.  A side with at least
+      CONTACT_CONTINENT_SHARE is continental and does not subduct: if only one side is,
+      it overrides; if both are, the side with the larger share overrides.
+    - otherwise, for a pair converging for the first time, the plate with the older
+      seafloor along the contact subducts (lower plate ID if the ages are unknown).
+    - a pair already decided keeps its polarity, unless its downgoing side has become
+      continental at the contact and the overriding side is not: then it flips.  Where
+      both sides are continental (a collision) the polarity is kept, so it cannot flicker.
+    polarity_dict is updated in place and is the final word on polarity in this mode.
+    """
+    idx = np.where(convergent)[0]
+    if not len(idx):
+        return
+    cont = np.zeros(len(seg_pid), bool)
+    cont[idx] = continent_at_contact(mid_lon[idx], mid_lat[idx], seg_pid[idx], craton_raster, radius_deg)
+    seen = []
+    for k in idx:
+        pair = (int(pair_lo[k]), int(pair_hi[k]))
+        if pair not in seen:
+            seen.append(pair)
+    for pair in seen:
+        on_pair = convergent & (pair_lo == pair[0]) & (pair_hi == pair[1])
+        share, age = [], []
+        for p in pair:
+            side = on_pair & (seg_pid == p)
+            share.append(float(np.sum(seg_len[side] * cont[side]) / np.sum(seg_len[side])) if side.any() else 0.0)
+            a = inner_age[side]
+            age.append(float(np.nanmean(a)) if np.isfinite(a).any() else np.nan)
+        continental = [s >= CONTACT_CONTINENT_SHARE for s in share]
+        if pair not in polarity_dict:
+            if any(continental):
+                downgoing = pair[1] if share[0] > share[1] else pair[0] if share[1] > share[0] else pair[0]
+                why = 'continent at contact {:.0%} / {:.0%}'.format(*share)
+            elif np.all(np.isfinite(age)) and age[0] != age[1]:
+                downgoing = pair[0] if age[0] > age[1] else pair[1]
+                why = 'seafloor age {:.0f} / {:.0f} Myr'.format(*age)
+            else:
+                downgoing = pair[0]
+                why = 'no age or continent: lower plate ID'
+            polarity_dict[pair] = downgoing
+            print('  [polarity] pair ({},{}): {} -> {} subducts'.format(pair[0], pair[1], why, downgoing))
+        else:
+            down = polarity_dict[pair]
+            d, o = (0, 1) if down == pair[0] else (1, 0)
+            if continental[d] and not continental[o]:
+                polarity_dict[pair] = pair[o]
+                print('  [polarity] pair ({},{}): continent reached the trench on {} ({:.0%} / {:.0%}); '
+                      'polarity flips, {} now subducts'.format(pair[0], pair[1], down, share[d], share[o], pair[o]))
+
+
 # Seafloor age for slab pull and polarity is read this far inside the plate from the
 # trench: the physics age grid is 1°, and the tracers nearest the trench are removed.
 TRENCH_AGE_PROBE_DEG = 1.0
@@ -826,24 +886,15 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
         # Polarity of plate pairs converging for the first time (sticky — only set once).
         # Skip when craton_raster is None so the craton rule is not contaminated by an
         # arbitrary oceanic fallback before craton info is available.
-        if craton_raster is not None:
+        if craton_raster is not None and modes['polarity'] == 'age':
+            _decide_polarity_at_contact(polarity_dict, convergent, seg_pid, pair_lo, pair_hi,
+                                        np.array(seg_len), inner_age, mid_lon, mid_lat,
+                                        craton_raster, boundary_search_radius_deg)
+        elif craton_raster is not None:
             for k in np.where(convergent)[0]:
                 pair = (int(pair_lo[k]), int(pair_hi[k]))
-                if pair in polarity_dict:
-                    continue
-                downgoing = resolve_downgoing_plate(pair[0], pair[1], {}, craton_pixel_counts)
-                if (modes['polarity'] == 'age' and age_grid is not None
-                        and not craton_pixel_counts.get(pair[0]) and not craton_pixel_counts.get(pair[1])):
-                    # ocean–ocean: the older side along this step's contact subducts
-                    on_pair = convergent & (pair_lo == pair[0]) & (pair_hi == pair[1])
-                    side_age = [np.nanmean(inner_age[on_pair & (seg_pid == p)])
-                                if np.isfinite(inner_age[on_pair & (seg_pid == p)]).any() else np.nan
-                                for p in pair]
-                    if np.all(np.isfinite(side_age)) and side_age[0] != side_age[1]:
-                        downgoing = pair[0] if side_age[0] > side_age[1] else pair[1]
-                    print('  [polarity] pair ({},{}): seafloor age {:.0f} / {:.0f} Myr -> {} subducts'.format(
-                        pair[0], pair[1], side_age[0], side_age[1], downgoing))
-                polarity_dict[pair] = downgoing
+                if pair not in polarity_dict:
+                    polarity_dict[pair] = resolve_downgoing_plate(pair[0], pair[1], {}, craton_pixel_counts)
 
         # Segments that can carry slab forces.  Classic modes: convergent segments.
         # slab_length: any non-divergent segment of a pair that has subducted.
@@ -865,8 +916,9 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
         subduct = slab_set & ~collision
         is_down = np.zeros(len(seg_pid), bool)
         for k in np.where(subduct)[0]:
-            is_down[k] = resolve_downgoing_plate(int(seg_pid[k]), int(neighbour[k]),
-                                                 polarity_dict, craton_pixel_counts) == seg_pid[k]
+            is_down[k] = resolve_downgoing_plate(int(seg_pid[k]), int(neighbour[k]), polarity_dict,
+                                                 polarity_counts(craton_pixel_counts,
+                                                                 {'polarity_mode': modes['polarity']})) == seg_pid[k]
         w_pull = forces.get('slab_pull', 0)
         pull_w = np.where(convergent & is_down, w_pull, 0.0)
         suction_w = np.where(convergent & ~is_down, forces.get('slab_suction', 0), 0.0)
@@ -2288,6 +2340,40 @@ def craton_counts_from_raster(craton_raster):
     return {int(k): int(v) for k, v in zip(ids, counts)}
 
 
+def polarity_counts(craton_counts, params):
+    """Craton counts for resolve_downgoing_plate under the selected polarity mode.
+
+    polarity: id applies the continent rule to whole plates on every call, so the counts
+    are passed through.  polarity: age applies it at the contact when the pair's polarity
+    is decided (and flips it if continent arrives on the downgoing side), so the stored
+    polarity_dict decision is final and no counts are passed."""
+    return {} if (params or {}).get('polarity_mode', 'id') == 'age' else craton_counts
+
+
+def continent_at_contact(lon, lat, plate_ids, craton_raster, radius_deg=2.0, grid_deg=1.0):
+    """True where plate_ids[i]'s own continent (craton raster cells with that plate ID)
+    lies within radius_deg (great-circle) of the point, on a ~grid_deg sample of the raster."""
+    out = np.zeros(len(lon), bool)
+    if craton_raster is None or not len(lon):
+        return out
+    sl, _ = grid_stride(craton_raster, grid_deg)
+    c_lons, c_lats = raster_coords(craton_raster)
+    vals = np.nan_to_num(np.asarray(craton_raster.values, dtype=float)[sl])
+    lon2d, lat2d = np.meshgrid(c_lons[sl[1]], c_lats[sl[0]])
+    cont = vals > 0
+    if not cont.any():
+        return out
+    from scipy.spatial import cKDTree
+    c_xyz = lonlat_to_xyz(lon2d[cont], lat2d[cont])
+    p_xyz = lonlat_to_xyz(np.asarray(lon, float), np.asarray(lat, float))
+    pairs = cKDTree(p_xyz).sparse_distance_matrix(cKDTree(c_xyz), 2.0 * np.sin(np.radians(radius_deg) / 2.0),
+                                                  output_type='ndarray')
+    if len(pairs):
+        own = vals[cont][pairs['j']] == np.asarray(plate_ids, dtype=float)[pairs['i']]
+        out[pairs['i'][own]] = True
+    return out
+
+
 def resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts=None):
     """Return the downgoing plate ID for a convergent boundary between p1 and p2.
 
@@ -2410,6 +2496,7 @@ def generate_synthetic_earthquakes(boundaries_gdf, polarity_dict=None, plate_pol
 
 def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
                                polarity_dict=None, craton_counts=None,
+                               polarity_craton_counts='same',
                                continental_base_m=500,
                                noise_fraction=0.15,
                                spectral_beta=2.0,
@@ -2432,6 +2519,8 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
         locally, up to himalayan_max_dist_deg from the boundary)
     Distances are great-circle distances.  Ocean pixels remain at 0.
     noise_seed makes the noise pattern repeatable (e.g. identical between frames).
+    polarity_craton_counts are the counts used to decide polarity (see polarity_counts);
+    by default the same as craton_counts, which also decide where Andean relief goes.
     Returns an xr.DataArray with lon/lat dims.
     """
     import pyshtools as pysh
@@ -2441,6 +2530,8 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
         polarity_dict = {}
     if craton_counts is None:
         craton_counts = {}
+    if isinstance(polarity_craton_counts, str):
+        polarity_craton_counts = craton_counts
 
     def _ensure_lonlat(da):
         return da.rename({k: v for k, v in {'x': 'lon', 'y': 'lat'}.items()
@@ -2480,7 +2571,7 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
             if p1 == 0 or p2 == 0:
                 continue
 
-            dg = resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)
+            dg = resolve_downgoing_plate(p1, p2, polarity_dict, polarity_craton_counts)
             ov = p2 if dg == p1 else p1
             is_andean = craton_counts.get(ov, 0) > 0
             if not is_andean:

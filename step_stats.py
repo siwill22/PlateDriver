@@ -80,7 +80,8 @@ def compute(step, time_myr, rasters, stage_pole_dict, delta_time, boundaries_gdf
     else:
         cont_area = {}
     craton_counts = sdp.craton_counts_from_raster(craton)
-    lengths = boundary_lengths_by_plate(boundaries_gdf, polarity_dict, craton_counts, params)
+    lengths = boundary_lengths_by_plate(boundaries_gdf, polarity_dict,
+                                        sdp.polarity_counts(craton_counts, params), params)
 
     plate_rows = []
     sum_Jw = np.zeros(3)

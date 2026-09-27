@@ -186,11 +186,20 @@ Each stage ends at a review gate, and nothing moves to the next stage without ap
 
 - **Slabs at step 0:** each step-0 trench gets the slab column the model would have built,
   down to `initial_slab_depth_km: 1320`, so pull and suction are at full strength from the
-  start. RMS still falls by about 15% in the first 10 Myr as trenches move off those slabs.
+  start. RMS still falls from about 50 to 44 km/Myr over the first 20 Myr as trenches move
+  off those slabs.
 - **Deep-slab suction weight:** `forces.slab_suction_deep: 3`, half of pull. Acting on both
   plates, that keeps the pair's total at today's 6.
 - **Slab search:** the deepest slab tracer within 5° of the segment, on the overriding side
   (plus 1° across the trench line).
+- **Polarity (`polarity: age`):** the continent rule is applied at the contact, not to the
+  whole plate. A plate is continental at a contact if its own continent lies within
+  `boundary_search_radius_deg` along at least half the contact length. It then overrides; if
+  neither side is, the older seafloor subducts. The decision is kept, except that it flips when
+  the downgoing side becomes continental and the overriding side is not; it never flips at a
+  collision. The stored decision is final for every consumer (topography, earthquakes, tracers).
+  With the whole-plate rule, age decided only 3 pairs in 100 Myr on atlantis66; at the contact
+  it decides most ocean–ocean contacts.
 - **Age grid:** each cell takes the nearest tracer *on its own plate*. Otherwise the
   overriding plate takes the downgoing plate's ages at trenches.
 
@@ -201,9 +210,10 @@ Each stage ends at a review gate, and nothing moves to the next stage without ap
   last (up to about 190 Myr). A new trench near an old slab also takes its pull, as
   does a nearby trench's slab within 5°. Breakoff after collision comes in S5.
 - **Slab depth lags one step** (the slab tracers are updated after the forces).
-- **The continent polarity rule looks at whole plates** (any craton on the plate), so on
-  atlantis66 it decides 97% of ocean–ocean trench segments and `polarity: age` almost never
-  applies. See `show-me/2026-09-27-s3-slab-forces/`. Open question for the user.
+- **Polarity is decided once per plate pair** (at first convergence, by age or by continent
+  at the contact). Later the ages change, and they vary along a contact by about 18 Myr, so
+  the older side subducts at only about half the ocean–ocean trench length after 50 Myr.
+  Per-segment polarity is a v2 item (Q9c).
 
 - **Ridges are not split into spreading segments and transforms.** Boundaries are continuous
   lines whose obliquity varies continuously: in the S0 run the length-weighted mean is about 40°,

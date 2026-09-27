@@ -332,6 +332,7 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
 
     craton_counts = sdp.craton_counts_from_raster(
         rasters['craton'] if 'craton' in rasters else None)
+    _pol_counts = sdp.polarity_counts(craton_counts, params)   # counts that decide polarity
 
     def _boundaries():
         bdf = boundaries_gdf[['geometry', 'plateid1_poly1', 'plateid1_poly2',
@@ -347,7 +348,7 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             if br['boundary_type'] == 'subduction':
                 p1 = int(br['plateid1_poly1']) if pd.notna(br['plateid1_poly1']) else 0
                 p2 = int(br['plateid1_poly2']) if pd.notna(br['plateid1_poly2']) else 0
-                dg = sdp.resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)
+                dg = sdp.resolve_downgoing_plate(p1, p2, polarity_dict, _pol_counts)
                 ov = p2 if dg == p1 else p1
             else:
                 dg, ov = 0, 0
@@ -363,7 +364,7 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
     def _earthquakes():
         earthquakes = sdp.generate_synthetic_earthquakes(
             boundaries_gdf, polarity_dict, new_plate_polygons,
-            craton_counts=craton_counts,
+            craton_counts=_pol_counts,
             plate_id_raster=rasters['plate_id'],
             n_candidates=params['eq_n_candidates'],
             ridge_max_dist_deg=params['eq_ridge_max_dist_deg'],
@@ -383,6 +384,7 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
         grid = sdp.compute_topography_raster(
             rasters['plate_id'], rasters['craton'], boundaries_gdf,
             polarity_dict=polarity_dict, craton_counts=craton_counts,
+            polarity_craton_counts=_pol_counts,
             continental_base_m=params['topo_continental_base_m'],
             noise_fraction=params['topo_noise_fraction'],
             spectral_beta=params['topo_spectral_beta'],
@@ -700,7 +702,8 @@ try:
         # Seafloor tracers: move with the same rotations as the plates, remove
         # subducted ones, then seed new crust at the ridges
         # ------------------------------------------------------------------
-        _craton_counts = sdp.craton_counts_from_raster(rasters['craton'] if 'craton' in rasters else None)
+        _craton_counts = sdp.polarity_counts(
+            sdp.craton_counts_from_raster(rasters['craton'] if 'craton' in rasters else None), params)
         tracers = sdp.advect_tracers(tracers, previous_plate_id, moving_poles, delta_time,
                                      boundaries_gdf=boundaries_gdf,
                                      div_threshold=params['div_threshold_subduction'],

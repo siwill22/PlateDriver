@@ -141,10 +141,12 @@ Implemented so far:
   kept):
   - `id`: the lower plate ID.
   - `age` (`physical`): the plate with the older seafloor along the contact.
-  - In both modes the continent rule comes first: a plate with continent overrides one
-    without. The rule looks at the whole plate, not the contact, so on continent-rich
-    configurations age rarely decides (see
-    `show-me/2026-09-27-s3-slab-forces/`).
+  - The continent rule comes first. With `id` it looks at whole plates: a plate with
+    continent anywhere overrides one without, on every call. With `age` it looks at the
+    contact: a plate overrides if its own continent lies within
+    `boundary_search_radius_deg` along at least half the contact. The decision is then
+    kept, except that it flips if continent reaches the trench on the downgoing side
+    against an oceanic overriding side.
 
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
@@ -542,9 +544,12 @@ Ocean pixels with no tracer coverage receive a default depth of −3500 m. Conti
 `resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)`:
 1. One plate has craton pixels, other does not → continental plate is overriding
 2. Both have craton pixels → larger craton pixel count is overriding
-3. Neither has craton pixels → fall back to `polarity_dict` sticky assignment. It is
-   set when the pair first converges: the lower plate ID (`polarity: id`) or the plate
-   with the older seafloor along the contact (`polarity: age`).
+3. Neither has craton pixels → fall back to `polarity_dict` sticky assignment, set
+   when the pair first converges (lower plate ID).
+
+With `polarity: age`, steps 1–2 are replaced by the contact rule above and the
+`polarity_dict` entry is final: callers pass `sdp.polarity_counts(...)`, which is empty
+in that mode.
 
 ### Rotation file format
 
