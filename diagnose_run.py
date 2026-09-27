@@ -4,8 +4,11 @@
                            [--steps 0 50 100] [--every 5] [--min-area-frac 0.002]
 
 Reads step_stats.csv and plate_stats.csv (written every step by run_SDP.py) and the
-saved grids, and writes three PyGMT figures to --out (default: the first output_dir):
+saved grids, and writes PyGMT figures to --out (default: the first output_dir):
 
+  sequence.png        the main figure: the plate configuration through time as small
+                      multiples (seafloor age, ridges, trenches with their polarity,
+                      velocity arrows, plate IDs).  Several runs: one column per run.
   fu_plot.png         plate RMS speed against trench fraction (downgoing trench length
                       / perimeter) and against continental fraction, one point per plate
                       per sampled step.  Forsyth & Uyeda (1975) found speed rises with
@@ -136,7 +139,83 @@ def _plate_labels(plate_id):
     return out
 
 
+def _overriding_side_markers(b, plate_id, offset_deg=0.7, every=3):
+    """Points just inside the overriding plate along subduction segments (thinned), so
+    subduction polarity can be read off a map: markers sit on the overriding side."""
+    sub = b[(b.boundary_type == 'subduction') & (b.overriding_plate > 0)]
+    if not len(sub):
+        return np.array([]), np.array([])
+    sub = sub.iloc[::every]
+    coords = sub.geometry.get_coordinates()
+    first = coords.groupby(level=0).head(1)
+    last = coords.groupby(level=0).tail(1)
+    pa = sdp.lonlat_to_xyz(first.x.values, first.y.values)
+    pb = sdp.lonlat_to_xyz(last.x.values, last.y.values)
+    mid_lon, mid_lat = sdp.xyz_to_lonlat(pa + pb)
+    normal = np.cross(pa, pb)                      # left of the direction a -> b
+    lon_l, lat_l = sdp.offset_along_normal(mid_lon, mid_lat, normal, offset_deg)
+    lon_r, lat_r = sdp.offset_along_normal(mid_lon, mid_lat, -normal, offset_deg)
+    over = sub.overriding_plate.values
+    left = sdp.raster_lookup(plate_id, lon_l, lat_l) == over
+    right = sdp.raster_lookup(plate_id, lon_r, lat_r) == over
+    lon = np.where(left, lon_l, np.where(right, lon_r, np.nan))
+    lat = np.where(left, lat_l, np.where(right, lat_r, np.nan))
+    ok = np.isfinite(lon)
+    return lon[ok], lat[ok]
+
+
+def draw_map_panel(fig, path, steps, plates, step, title, arrow_spacing=6.0,
+                   label_font='9p', annotate=True):
+    """One map of a run's configuration at a saved step: seafloor age (continents grey),
+    ridges red, trenches blue with triangles on the overriding side, transforms and other
+    boundaries black, plate velocity arrows and plate IDs.  Draws into the current panel."""
+    # grey map interior shows through where the age grid is NaN (continents)
+    fig.basemap(region='d', projection='N?', frame=['f', '+ggray75+t' + title])
+    age_file = os.path.join(path, 'seafloor_age_{:04d}.nc'.format(step))
+    if os.path.exists(age_file):
+        pygmt.makecpt(cmap='batlow', series=[0, 150], reverse=True)
+        fig.grdimage(age_file, cmap=True, nan_transparent=True)
+    pid_file = os.path.join(path, 'plate_id_{:04d}.nc'.format(step))
+    plate_id = xr.open_dataarray(pid_file) if os.path.exists(pid_file) else None
+    bfile = os.path.join(path, 'boundaries_{:04d}.geojson'.format(step))
+    if os.path.exists(bfile):
+        b = gpd.read_file(bfile)
+        for kind, pen in [('conservative', '0.6p,black'), ('ridge', '1.2p,red'),
+                          ('subduction', '1.2p,blue')]:
+            sel = b[b.boundary_type == kind]
+            if len(sel):
+                fig.plot(data=sel, pen=pen)
+        if plate_id is not None:
+            lon, lat = _overriding_side_markers(b, plate_id)
+            if len(lon):
+                fig.plot(x=lon, y=lat, style='t0.13c', fill='blue', pen='0.2p,white')
+    rows = plates[plates.step == step]
+    if plate_id is not None and len(rows):
+        x, y, az, sp = _velocity_arrows(plate_id, rows, spacing_deg=arrow_spacing)
+        fig.plot(x=x, y=y, direction=[az, sp / 250.0],
+                 style='V0.1c+e+a45+n', pen='0.5p,black', fill='black')
+        for lon, lat, text in _plate_labels(plate_id):
+            fig.text(x=lon, y=lat, text=text, font=label_font + ',Helvetica-Bold,white',
+                     fill='black@40', clearance='0.04c')
+    srow = steps[steps.step == step]
+    if annotate and len(srow):
+        fig.text(position='BL', offset='0.1c/0.1c', font='7p,Helvetica,black',
+                 fill='white@20', justify='BL',
+                 text='RMS {:.0f} km/Myr, net rot {:.2f} deg/Myr, {} plates'.format(
+                     float(srow.rms_speed_km_per_myr.iloc[0]),
+                     float(srow.net_rotation_deg_per_myr.iloc[0]), int(srow.n_plates.iloc[0])))
+
+
+def _map_key(fig, width='9c'):
+    pygmt.makecpt(cmap='batlow', series=[0, 150], reverse=True)
+    fig.colorbar(frame='xaf+lSeafloor age (Myr); grey = continent', position='JBC+w{}/0.3c+o0/0.7c'.format(width))
+    fig.text(position='BC', offset='0/-2.4c', no_clip=True, font='9p,Helvetica,black',
+             text='red: ridge   blue: trench (triangles on overriding plate)   black: other boundary   '
+                  'arrows: plate velocity, 1 cm = 250 km/Myr')
+
+
 def maps(paths, runs, labels, out, steps_wanted):
+    """One figure per step, one map per run."""
     for step in steps_wanted:
         fig = pygmt.Figure()
         n = len(paths)
@@ -144,41 +223,55 @@ def maps(paths, runs, labels, out, steps_wanted):
                          margins=['0.2c', '0.6c'], title='Step {}'.format(step)):
             for k, (path, (steps, plates), label) in enumerate(zip(paths, runs, labels)):
                 with fig.set_panel(panel=k):
-                    # grey map interior shows through where the age grid is NaN (continents)
-                    fig.basemap(region='d', projection='N?', frame=['f', '+ggray75+t' + label])
-                    age_file = os.path.join(path, 'seafloor_age_{:04d}.nc'.format(step))
-                    if os.path.exists(age_file):
-                        pygmt.makecpt(cmap='batlow', series=[0, 150], reverse=True)
-                        fig.grdimage(age_file, cmap=True, nan_transparent=True)
-                    bfile = os.path.join(path, 'boundaries_{:04d}.geojson'.format(step))
-                    if os.path.exists(bfile):
-                        b = gpd.read_file(bfile)
-                        for kind, pen in [('conservative', '0.8p,black'), ('ridge', '1.5p,red'),
-                                          ('subduction', '1.5p,blue')]:
-                            sel = b[b.boundary_type == kind]
-                            if len(sel):
-                                fig.plot(data=sel, pen=pen)
-                    pid_file = os.path.join(path, 'plate_id_{:04d}.nc'.format(step))
-                    rows = plates[plates.step == step]
-                    if os.path.exists(pid_file) and len(rows):
-                        plate_id = xr.open_dataarray(pid_file)
-                        x, y, az, sp = _velocity_arrows(plate_id, rows)
-                        fig.plot(x=x, y=y, direction=[az, sp / 250.0],
-                                 style='V0.12c+e+a45+n', pen='0.6p,black', fill='black')
-                        for lon, lat, text in _plate_labels(plate_id):
-                            fig.text(x=lon, y=lat, text=text, font='9p,Helvetica-Bold,white',
-                                     fill='black@40', clearance='0.05c')
-                    srow = steps[steps.step == step]
-                    if len(srow):
-                        fig.text(position='BL', offset='0.1c/0.1c', font='8p,Helvetica,black',
-                                 fill='white@20', justify='BL',
-                                 text='RMS {:.0f} km/Myr, net rot {:.2f} deg/Myr; arrow 1 cm = 250 km/Myr'.format(
-                                     float(srow.rms_speed_km_per_myr.iloc[0]),
-                                     float(srow.net_rotation_deg_per_myr.iloc[0])))
-        if n == 1:
-            pygmt.makecpt(cmap='batlow', series=[0, 150], reverse=True)
-            fig.colorbar(frame='xaf+lSeafloor age (Myr)', position='JBC+w8c/0.3c+o0/0.6c')
+                    draw_map_panel(fig, path, steps, plates, step, label)
+        _map_key(fig)
         fig.savefig(os.path.join(out, 'maps_{:04d}.png'.format(step)), dpi=200)
+
+
+def sequence(paths, runs, labels, out, seq_steps, ncols=3):
+    """The configuration through time as small multiples.  One run: a grid of time
+    slices read left to right.  Several runs: one row per time slice, one column per run,
+    so the runs can be compared at the same model time."""
+    n_runs = len(paths)
+    if n_runs == 1:
+        nrows = int(np.ceil(len(seq_steps) / ncols))
+        cells = [(k, seq_steps[k], 0) for k in range(len(seq_steps))]
+        cols = ncols
+    else:
+        nrows, cols = len(seq_steps), n_runs
+        cells = [(r * n_runs + c, st, c) for r, st in enumerate(seq_steps) for c in range(n_runs)]
+    width = 8.5 * cols
+    fig = pygmt.Figure()
+    with pygmt.config(FONT_TITLE='10p', FONT_HEADING='14p', MAP_HEADING_OFFSET='1.2c'):
+        with fig.subplot(nrows=nrows, ncols=cols, figsize=('{}c'.format(width), '{}c'.format(5.3 * nrows)),
+                         margins=['0.15c', '0.35c'],
+                         title='Plate configuration through time: ' + ' | '.join(labels)):
+            for panel, step, run in cells:
+                path, (steps, plates) = paths[run], runs[run]
+                t = steps.loc[steps.step == step, 'time_myr']
+                title = '{}t = {:.0f} Myr (step {})'.format(
+                    labels[run] + ', ' if n_runs > 1 else '',
+                    float(t.iloc[0]) if len(t) else float('nan'), step)
+                with fig.set_panel(panel=panel):
+                    draw_map_panel(fig, path, steps, plates, step, title, arrow_spacing=10.0,
+                                   label_font='6p', annotate=True)
+    _map_key(fig)
+    fig.savefig(os.path.join(out, 'sequence.png'), dpi=200)
+
+
+def saved_steps(dirs):
+    """Steps saved in every one of the output folders."""
+    return sorted(set.intersection(*[
+        {int(f[9:13]) for f in os.listdir(d) if f.startswith('plate_id_') and f.endswith('.nc')}
+        for d in dirs]))
+
+
+def pick_sequence_steps(saved, n=12):
+    """About n saved steps spread evenly over the run, always including the first and last."""
+    if len(saved) <= n:
+        return saved
+    idx = np.unique(np.round(np.linspace(0, len(saved) - 1, n)).astype(int))
+    return [saved[i] for i in idx]
 
 
 def main():
@@ -188,6 +281,9 @@ def main():
     parser.add_argument('--out')
     parser.add_argument('--steps', nargs='+', type=int,
                         help='steps to map (default: first, middle and last saved step)')
+    parser.add_argument('--sequence-steps', nargs='+', type=int,
+                        help='steps for sequence.png (default: about --sequence-n saved steps spread over the run)')
+    parser.add_argument('--sequence-n', type=int, default=12)
     parser.add_argument('--every', type=int, default=5, help='sample every Nth step in fu_plot')
     parser.add_argument('--min-area-frac', type=float, default=0.002,
                         help='leave plates smaller than this fraction of the sphere out of fu_plot')
@@ -201,11 +297,12 @@ def main():
     fu_plot(runs, labels, out, args.every, args.min_area_frac)
     timeseries(runs, labels, out)
 
+    saved = saved_steps(args.dirs)
+    seq_steps = args.sequence_steps or pick_sequence_steps(saved, args.sequence_n)
+    if seq_steps:
+        sequence(args.dirs, runs, labels, out, seq_steps)
     steps_wanted = args.steps
     if steps_wanted is None:
-        saved = sorted(set.intersection(*[
-            {int(f[9:13]) for f in os.listdir(d) if f.startswith('plate_id_') and f.endswith('.nc')}
-            for d in args.dirs]))
         steps_wanted = sorted({saved[0], saved[len(saved) // 2], saved[-1]}) if saved else []
     maps(args.dirs, runs, labels, out, steps_wanted)
     print('Figures written to', out)
