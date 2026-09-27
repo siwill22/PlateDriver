@@ -171,8 +171,9 @@ listed is `simple`'s):
     `drag: area` or `area_edge`.
   - `breakoff` (`physical`): after `breakoff_delay_myr` of collision the slab near the
     contact detaches. It stops pulling but stays in the mantle outputs. During the
-    collision the contact behaves as `coupling` or, with `breakoff_contact: viscous`,
-    as `viscous`.
+    collision the contact behaves as `viscous` (`breakoff_contact: viscous`, the
+    default) or as `coupling` (`breakoff_contact: coupling`). Coupling ignores contact
+    length, so a small continent on a large plate can weld it to a supercontinent.
 
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor

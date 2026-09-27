@@ -1690,7 +1690,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     # velocity coupling (breakoff_contact: coupling) or the viscous contact drag
     breakoff = collision_mode == 'breakoff'
     if breakoff:
-        collision_mode = 'viscous' if params.get('breakoff_contact', 'coupling') == 'viscous' else 'coupling'
+        collision_mode = 'viscous' if params.get('breakoff_contact', 'viscous') == 'viscous' else 'coupling'
     min_fragment_area         = params.get('min_peninsula_area_deg2',    5.0)
     drag_mode                 = params.get('drag_mode',                  'none')
     speed_mode                = params.get('speed_normalisation',        'none')

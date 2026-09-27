@@ -196,7 +196,8 @@ Each stage ends at a review gate, and nothing moves to the next stage without ap
 - **`breakoff` on coupling slows the world down.** Velocity coupling ignores contact
   length, so a microcontinent on the largest ocean plate welded it to the supercontinent:
   RMS fell from 50 to 24 km/Myr over 200 Myr. `breakoff_contact: viscous` (drag ∝ contact
-  length) holds RMS at about 39. Default pending the user's decision.
+  length) holds RMS at about 39, so it is the default (user decision). The default preset
+  stays `simple` until the S6 speed work is done (user decision).
 - **The supercontinent never breaks up** in 200 Myr of `physical`: nothing in v1 rifts a
   continent.
 - **Cost grows late in physical runs** (2.75 s per step over the last 50 of 200, against

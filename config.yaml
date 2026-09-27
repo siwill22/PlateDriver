@@ -128,7 +128,7 @@ params:
   collision_coupling_timescale:  30          # [coupling, breakoff] timesteps to ramp from zero to max
   collision_drag_factor:         10          # [viscous] drag on convergence across a continent-continent contact, × the edge drag
   breakoff_delay_myr:            10          # [breakoff] the slab of a collision detaches (stops pulling) after this long
-  breakoff_contact:              coupling    # [breakoff] contact model during the collision: coupling (velocity blending) | viscous (contact drag, scales with contact length)
+  breakoff_contact:              viscous     # [breakoff] contact model during the collision: viscous (contact drag, scales with contact length) | coupling (velocity blending; can weld a large plate to a small contact)
 
   # --- Plate lifecycle (fragmentation & merging) ---
   fragmentation_enabled:       true    # split geometrically implausible plates at their neck
