@@ -811,7 +811,7 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
             weight = np.where(cont, params.get('continent_drag_factor', 3.0), 1.0)
         _, D, _ = plate_area_tensors(plate_id_raster, weight=weight, grid_deg=grid_deg)
         D_of = dict(zip(pids.tolist(), D))
-        width = params.get('edge_drag_width_km', 1000.0) / EARTH_RADIUS_KM
+        width = params.get('edge_drag_width_km', 3000.0) / EARTH_RADIUS_KM
         omega = {}
         for pid, t in torques.items():
             Dp = D_of.get(pid, np.zeros((3, 3)))

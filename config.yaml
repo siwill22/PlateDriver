@@ -99,7 +99,7 @@ params:
 
   # --- Plate resistance and speed scale (force_modes.drag / speed_normalisation) ---
   continent_drag_factor:       3.0     # basal drag under continents relative to ocean (drag: area, area_edge)
-  edge_drag_width_km:          1000    # boundary resistance = basal drag over a strip this wide along every boundary (area_edge)
+  edge_drag_width_km:          3000    # boundary resistance = basal drag over a strip this wide along every boundary (area_edge)
   physics_grid_deg:            1.0     # grid for the plate area tensors (degrees)
   target_rms_speed:            50      # km/Myr (= mm/yr); area-weighted RMS plate speed after calibration
   max_rms_speed_factor:        3.0     # cap: RMS speed never exceeds this × target_rms_speed (capped steps are logged)

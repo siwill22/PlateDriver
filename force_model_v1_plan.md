@@ -45,7 +45,7 @@ force_modes:                     # optional; any key here overrides the preset
   speed_normalisation: calibrate_once   # none | calibrate_once | per_step
 params:
   continent_drag_factor: 3.0
-  edge_drag_width_km: 1000       # boundary resistance = basal drag over a strip this wide
+  edge_drag_width_km: 3000       # boundary resistance (S1 sweep: 1000 / 3000 / 10000 km) = basal drag over a strip this wide
   target_rms_speed: 50           # km/Myr (= mm/yr)
   max_rms_speed_factor: 3.0      # cap = factor × target; each capped step is logged
   speed_scale: null              # a number fixes k and skips calibration (compare runs)
