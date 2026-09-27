@@ -71,7 +71,8 @@ All outputs go to the directory specified by `output_dir` in `config.yaml`.
 | `craton_NNNN.nc` | Every `csv_save_interval` steps | Craton ID raster (lon/lat) |
 | `divergence_NNNN.nc` | Every `csv_save_interval` steps | Horizontal divergence of the plate velocity field (1/Myr); ≈0 inside rigid plates, positive at spreading and negative at converging boundaries |
 | `seamounts_final.geojson` | End of run | All active seamounts at final timestep |
-| `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, seconds per step by phase |
+| `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, slab-force totals and mean trench slab depth (slab modes), seconds per step by phase |
+| `trench_forces_NNNN.csv` | Every `csv_save_interval` steps | One row per trench segment of each plate: position, plates, downgoing or not, convergence, slab depth, seafloor age, pull and suction weights. Only with `slab_pull: ramp/slab_length`, `slab_suction: depth_split` or `polarity: age` |
 | `plate_stats.csv` | Every step | One row per plate per step: angular velocity (pole, rate), RMS speed, area, continental fraction, perimeter and trench (downgoing/overriding), ridge and conservative lengths |
 | `run_info.yaml` | Start of run | The config used, the resolved force modes and the git commit |
 | `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file with finite rotations for all plates up to step NNNN. The time column is elapsed model time (see [Rotation file format](#rotation-file-format)) |
@@ -122,6 +123,37 @@ Implemented so far:
   `target_rms_speed` is scaled down to that limit and logged. The k used is recorded in
   `run_info.yaml` and in each row of `step_stats.csv`. Setting `speed_scale` fixes k,
   which is useful for comparing two configs at the same scale.
+- **`slab_pull`:**
+  - `hard`: `forces.slab_pull` on every convergent segment of the downgoing plate, as
+    in the original model.
+  - `ramp`: the same, × min(1, convergence / `pull_ramp_km_per_myr`).
+  - `slab_length` (`physical`): × √(min(age, A)/A) × min(1, z / `slab_ref_depth_km`).
+    Here age is the seafloor age 1° inside the downgoing plate, A =
+    `slab_age_saturation_myr`, and z is the depth of the deepest slab tracer within
+    `slab_search_radius_deg` on the overriding side. The pull lasts as long as the slab
+    is there, whatever the convergence rate, and stops when the segment turns divergent.
+- **`slab_suction`:**
+  - `ratio`: `forces.slab_suction` on the overriding plate, as in the original model.
+  - `depth_split` (`physical`): the part of the slab below `slab_ref_depth_km` pulls
+    *both* plates toward the trench, with weight `forces.slab_suction_deep` ×
+    min(1, (z − z_ref) / z_ref).
+- **`polarity`** (which plate subducts when a pair first converges; the decision is
+  kept):
+  - `id`: the lower plate ID.
+  - `age` (`physical`): the plate with the older seafloor along the contact.
+  - In both modes the continent rule comes first: a plate with continent overrides one
+    without. The rule looks at the whole plate, not the contact, so on continent-rich
+    configurations age rarely decides (see
+    `show-me/2026-09-27-s3-slab-forces/`).
+
+The modes that read seafloor age or slab depth build them only when selected. The
+age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
+tracer on its own plate, moved one step ahead. With `slab_length` or `depth_split`,
+slab tracers are kept even if `slab_tracers_enabled` is false (that flag then only
+controls the mantle outputs). The step-0 trenches start with slab columns down to
+`initial_slab_depth_km`, as the model would have built them. Each saved step writes
+`trench_forces_NNNN.csv` with the slab depth, seafloor age and weights of every
+trench segment.
 
 ### Forces
 
@@ -130,7 +162,8 @@ Dimensionless scale factors applied to the torque from each boundary type.
 ```yaml
 forces:
   slab_pull:            6     # attractive force on downgoing plate at convergent boundaries
-  slab_suction:         6     # attractive force on overriding plate at convergent boundaries
+  slab_suction:         6     # attractive force on overriding plate at convergent boundaries (slab_suction: ratio)
+  slab_suction_deep:    3     # suction from the lower-mantle slab, on both plates (slab_suction: depth_split)
   ridge_push:           3     # repulsive force at divergent boundaries
   continental_collision: 18   # resistance at continent-continent boundaries
 ```
@@ -509,7 +542,9 @@ Ocean pixels with no tracer coverage receive a default depth of −3500 m. Conti
 `resolve_downgoing_plate(p1, p2, polarity_dict, craton_counts)`:
 1. One plate has craton pixels, other does not → continental plate is overriding
 2. Both have craton pixels → larger craton pixel count is overriding
-3. Neither has craton pixels → fall back to `polarity_dict` sticky assignment
+3. Neither has craton pixels → fall back to `polarity_dict` sticky assignment. It is
+   set when the pair first converges: the lower plate ID (`polarity: id`) or the plate
+   with the older seafloor along the contact (`polarity: age`).
 
 ### Rotation file format
 

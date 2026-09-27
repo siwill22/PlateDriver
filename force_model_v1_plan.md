@@ -182,7 +182,28 @@ Each stage ends at a review gate, and nothing moves to the next stage without ap
 - `force-model-v1` branches from it, and this work goes there.
 - Nothing is merged to `master` without approval.
 
+## Decisions made during S3
+
+- **Slabs at step 0:** each step-0 trench gets the slab column the model would have built,
+  down to `initial_slab_depth_km: 1320`, so pull and suction are at full strength from the
+  start. RMS still falls by about 15% in the first 10 Myr as trenches move off those slabs.
+- **Deep-slab suction weight:** `forces.slab_suction_deep: 3`, half of pull. Acting on both
+  plates, that keeps the pair's total at today's 6.
+- **Slab search:** the deepest slab tracer within 5° of the segment, on the overriding side
+  (plus 1° across the trench line).
+- **Age grid:** each cell takes the nearest tracer *on its own plate*. Otherwise the
+  overriding plate takes the downgoing plate's ages at trenches.
+
 ## Known limitations (accepted for v1)
+
+- **Slab memory has no detachment.** A slab left behind by a trench that turned divergent
+  pulls again at full strength if the boundary converges again while the slab tracers
+  last (up to about 190 Myr). A new trench near an old slab also takes its pull, as
+  does a nearby trench's slab within 5°. Breakoff after collision comes in S5.
+- **Slab depth lags one step** (the slab tracers are updated after the forces).
+- **The continent polarity rule looks at whole plates** (any craton on the plate), so on
+  atlantis66 it decides 97% of ocean–ocean trench segments and `polarity: age` almost never
+  applies. See `show-me/2026-09-27-s3-slab-forces/`. Open question for the user.
 
 - **Ridges are not split into spreading segments and transforms.** Boundaries are continuous
   lines whose obliquity varies continuously: in the S0 run the length-weighted mean is about 40°,

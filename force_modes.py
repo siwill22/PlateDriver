@@ -41,9 +41,9 @@ PRESETS = {
 IMPLEMENTED = {
     'drag':                {'none', 'area', 'area_edge'},
     'ridge_push':          {'boundary'},
-    'slab_pull':           {'hard'},
-    'slab_suction':        {'ratio'},
-    'polarity':            {'id'},
+    'slab_pull':           {'hard', 'ramp', 'slab_length'},
+    'slab_suction':        {'ratio', 'depth_split'},
+    'polarity':            {'id', 'age'},
     'collision':           {'resistance', 'coupling'},
     'speed_normalisation': {'none', 'calibrate_once', 'per_step'},
 }

@@ -704,6 +704,11 @@ def _rings_with_outward_sign(polygon):
                -_ring_sign(polygon.get_interior_ring_points(k)))
 
 
+# Seafloor age for slab pull and polarity is read this far inside the plate from the
+# trench: the physics age grid is 1°, and the tracers nearest the trench are removed.
+TRENCH_AGE_PROBE_DEG = 1.0
+
+
 def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             craton_raster=None,
                             stage_pole_dict=None,
@@ -714,7 +719,12 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             polarity_dict=None,
                             collision_pairs=None,
                             collision_mode='resistance',
-                            return_torques=False):
+                            return_torques=False,
+                            modes=None,
+                            age_grid=None,
+                            slab_tracers=None,
+                            force_params=None,
+                            diagnostics=None):
     """Sum boundary forces around every plate and convert the net torque to a stage rotation.
 
     With return_torques=True, also returns the net torque of each plate (xyz array) and
@@ -726,6 +736,26 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
       - convergent, continent-continent: collision resistance (or coupling)
       - convergent: slab pull on the downgoing plate, slab suction on the overriding plate
       - divergent: ridge push
+
+    modes (force_modes names; the defaults are the simple model):
+      slab_pull     hard         forces['slab_pull'] on every convergent segment
+                    ramp         × clip(convergence / pull_ramp_km_per_myr, 0, 1)
+                    slab_length  × √(min(age, A)/A) × min(1, z / z_ref), where age is the
+                                 seafloor age 1° inside the downgoing plate (age_grid; A =
+                                 slab_age_saturation_myr) and z the depth of the deepest
+                                 slab tracer near the segment (slab_depth_at_segments,
+                                 z_ref = slab_ref_depth_km).  Any segment that is not
+                                 divergent and whose plate pair has subducted (has a
+                                 polarity) is pulled if there is slab: a slab pulls by
+                                 hanging there, whatever the convergence rate.
+      slab_suction  ratio        forces['slab_suction'] on the overriding plate
+                    depth_split  forces['slab_suction_deep'] × min(1, max(0, z − z_ref)/z_ref)
+                                 on both plates, toward the trench (slab in the lower mantle)
+      polarity      id           a new ocean–ocean pair: the lower plate ID subducts
+                    age          the plate with the older ocean along the contact subducts
+      In every mode a plate with continent (cratons) overrides one without, as before.
+    diagnostics, if a dict, receives 'segments': a DataFrame of the subduction segments
+    and their forces (only when a mode other than the simple ones is used).
     """
     if polarity_dict is None:
         polarity_dict = {}
@@ -733,6 +763,8 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
         collision_pairs = set()
     if stage_pole_dict is None:
         stage_pole_dict = {}
+    modes = {'slab_pull': 'hard', 'slab_suction': 'ratio', 'polarity': 'id', **(modes or {})}
+    force_params = force_params or {}
     identity = pygplates.FiniteRotation()
 
     # Craton pixel count per plate ID — used to determine overriding plate at new boundaries
@@ -780,26 +812,109 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
 
         convergent = valid & (divergence < divergence_threshold_for_subduction)
         divergent  = valid & (divergence > divergence_threshold_for_ridge_push)
+        pair_lo = np.minimum(seg_pid, neighbour).astype(int)
+        pair_hi = np.maximum(seg_pid, neighbour).astype(int)
+
+        # Seafloor age 1° inside each segment's own plate (the downgoing side when the
+        # plate subducts), used by age polarity and the age term of slab pull.  NaN
+        # where the probe is on continent or there is no age grid.
+        inner_age = np.full(len(seg_pid), np.nan)
+        if age_grid is not None:
+            probe_lon, probe_lat = offset_along_normal(mid_lon, mid_lat, -outward, TRENCH_AGE_PROBE_DEG)
+            inner_age = np.asarray(raster_lookup(age_grid, probe_lon, probe_lat), dtype=float)
+
+        # Polarity of plate pairs converging for the first time (sticky — only set once).
+        # Skip when craton_raster is None so the craton rule is not contaminated by an
+        # arbitrary oceanic fallback before craton info is available.
+        if craton_raster is not None:
+            for k in np.where(convergent)[0]:
+                pair = (int(pair_lo[k]), int(pair_hi[k]))
+                if pair in polarity_dict:
+                    continue
+                downgoing = resolve_downgoing_plate(pair[0], pair[1], {}, craton_pixel_counts)
+                if (modes['polarity'] == 'age' and age_grid is not None
+                        and not craton_pixel_counts.get(pair[0]) and not craton_pixel_counts.get(pair[1])):
+                    # ocean–ocean: the older side along this step's contact subducts
+                    on_pair = convergent & (pair_lo == pair[0]) & (pair_hi == pair[1])
+                    side_age = [np.nanmean(inner_age[on_pair & (seg_pid == p)])
+                                if np.isfinite(inner_age[on_pair & (seg_pid == p)]).any() else np.nan
+                                for p in pair]
+                    if np.all(np.isfinite(side_age)) and side_age[0] != side_age[1]:
+                        downgoing = pair[0] if side_age[0] > side_age[1] else pair[1]
+                    print('  [polarity] pair ({},{}): seafloor age {:.0f} / {:.0f} Myr -> {} subducts'.format(
+                        pair[0], pair[1], side_age[0], side_age[1], downgoing))
+                polarity_dict[pair] = downgoing
+
+        # Segments that can carry slab forces.  Classic modes: convergent segments.
+        # slab_length: any non-divergent segment of a pair that has subducted.
+        slab_set = convergent.copy()
+        if modes['slab_pull'] == 'slab_length':
+            has_polarity = np.array([(int(a), int(b)) in polarity_dict for a, b in zip(pair_lo, pair_hi)])
+            slab_set |= valid & ~divergent & has_polarity
 
         # Continent-continent contact: two different cratons within the search radius
         collision = np.zeros(len(seg_pid), bool)
-        if craton_raster is not None and convergent.any():
-            c_ids = two_nearest_ids_batch(mid_lat[convergent], mid_lon[convergent], craton_raster,
+        if craton_raster is not None and slab_set.any():
+            c_ids = two_nearest_ids_batch(mid_lat[slab_set], mid_lon[slab_set], craton_raster,
                                           boundary_search_radius_deg, ignore_zero=True)
-            collision[convergent] = (c_ids[:, 0] > 0) & (c_ids[:, 1] > 0)
+            collision[slab_set] = (c_ids[:, 0] > 0) & (c_ids[:, 1] > 0)
+
+        # Slab forces per segment: pull on the downgoing plate, suction on the overriding
+        # plate (and on the downgoing plate too with depth_split).  Both draw the plate
+        # toward the trench.
+        subduct = slab_set & ~collision
+        is_down = np.zeros(len(seg_pid), bool)
+        for k in np.where(subduct)[0]:
+            is_down[k] = resolve_downgoing_plate(int(seg_pid[k]), int(neighbour[k]),
+                                                 polarity_dict, craton_pixel_counts) == seg_pid[k]
+        w_pull = forces.get('slab_pull', 0)
+        pull_w = np.where(convergent & is_down, w_pull, 0.0)
+        suction_w = np.where(convergent & ~is_down, forces.get('slab_suction', 0), 0.0)
+        slab_depth = np.zeros(len(seg_pid))
+        z_ref = force_params.get('slab_ref_depth_km', 660.0)
+        if modes['slab_pull'] == 'ramp':
+            ramp = force_params.get('pull_ramp_km_per_myr', 10.0)
+            pull_w = pull_w * np.clip(-divergence / ramp, 0.0, 1.0)
+        if (modes['slab_pull'] == 'slab_length' or modes['slab_suction'] == 'depth_split') \
+                and slab_tracers is not None and subduct.any():
+            # the slab lies on the overriding side: outward from the downgoing plate
+            side = np.where(is_down[:, None], outward, -outward)
+            slab_depth[subduct] = slab_depth_at_segments(
+                mid_lon[subduct], mid_lat[subduct], side[subduct],
+                slab_tracers['lon'].values, slab_tracers['lat'].values,
+                slab_tracers['depth_km'].values,
+                radius_deg=force_params.get('slab_search_radius_deg', 5.0),
+                line_tol_deg=force_params.get('slab_line_tol_deg', 1.0))
+        if modes['slab_pull'] == 'slab_length':
+            a_sat = force_params.get('slab_age_saturation_myr', 80.0)
+            f_age = np.sqrt(np.clip(np.nan_to_num(inner_age, nan=a_sat), 0.0, a_sat) / a_sat)
+            pull_w = np.where(subduct & is_down, w_pull * f_age * np.minimum(1.0, slab_depth / z_ref), 0.0)
+        if modes['slab_suction'] == 'depth_split':
+            deep = np.clip((slab_depth - z_ref) / z_ref, 0.0, 1.0)
+            suction_w = np.where(subduct, forces.get('slab_suction_deep', 0.0) * deep, 0.0)
+            slab_w = pull_w + suction_w
+        else:
+            slab_w = np.where(is_down, pull_w, suction_w)
+
+        if diagnostics is not None and any(modes[c] != d for c, d in
+                                           (('slab_pull', 'hard'), ('slab_suction', 'ratio'), ('polarity', 'id'))):
+            s = np.where(slab_set)[0]
+            diagnostics['segments'] = pd.DataFrame({
+                'lon': mid_lon[s], 'lat': mid_lat[s], 'plate_id': seg_pid[s].astype(int),
+                'neighbour_id': neighbour[s].astype(int), 'downgoing': is_down[s],
+                'collision': collision[s], 'convergence_km_per_myr': -divergence[s],
+                'length_km': np.array(seg_len)[s] * EARTH_RADIUS_KM,
+                'slab_depth_km': slab_depth[s], 'seafloor_age_myr': inner_age[s],
+                'pull_weight': pull_w[s], 'suction_weight': np.where(is_down[s], slab_w[s] - pull_w[s], slab_w[s])})
 
         # Pass 2: add up the torques plate by plate, in segment order
-        for k in np.where(convergent | divergent)[0]:
+        for k in np.where(slab_set | divergent)[0]:
             pid_current, pid_neighbor = int(seg_pid[k]), int(neighbour[k])
-            if convergent[k]:
-                # Record overriding/downgoing polarity for this plate pair (sticky — only set once).
-                # Skip when craton_raster is None so the craton rule is not contaminated by an
-                # arbitrary oceanic fallback before craton info is available.
-                pair = (min(pid_current, pid_neighbor), max(pid_current, pid_neighbor))
-                if craton_raster is not None and pair not in polarity_dict:
-                    polarity_dict[pair] = resolve_downgoing_plate(pair[0], pair[1], {},
-                                                                  craton_pixel_counts)
+            if slab_set[k]:
                 if collision[k]:
+                    if not convergent[k]:
+                        continue
+                    pair = (int(pair_lo[k]), int(pair_hi[k]))
                     if collision_mode == 'coupling':
                         # Contribute zero torque; record pair for post-step velocity
                         # blending.  There is no subducting slab to pull the plates.
@@ -807,14 +922,8 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                     elif 'continental_collision' in forces:
                         # Resistance torque pushing the plate away from the collision.
                         torque_dict[pid_current] = torque_dict[pid_current] - seg_torque[k] * forces['continental_collision']
-                else:
-                    downgoing = resolve_downgoing_plate(pid_current, pid_neighbor,
-                                                        polarity_dict, craton_pixel_counts)
-                    force_name = 'slab_pull' if downgoing == pid_current else 'slab_suction'
-                    if force_name in forces:
-                        # Both slab pull (downgoing plate) and slab suction (overriding
-                        # plate) draw the plate toward the trench.
-                        torque_dict[pid_current] = torque_dict[pid_current] + seg_torque[k] * forces[force_name]
+                elif slab_w[k]:
+                    torque_dict[pid_current] = torque_dict[pid_current] + seg_torque[k] * float(slab_w[k])
             elif 'ridge_push' in forces:
                 torque_dict[pid_current] = torque_dict[pid_current] - seg_torque[k] * forces['ridge_push']
 
@@ -1294,9 +1403,17 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
 def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None,
                      polarity_dict=None, merge_pairs=None, fragmentation_cooldown_pids=None,
                      collision_state=None, craton_id_remap=None, next_plate_id=None,
-                     speed_state=None, previous_plate_id=None):
+                     speed_state=None, previous_plate_id=None, force_fields=None,
+                     force_diag=None):
     """Rebuild the plate configuration from moved plate polygons and compute the next
     stage rotations.
+
+    force_fields feeds the force modes that need them (see force_fields_needed):
+      'tracers'       (lon, lat, age, plate_id) seafloor tracers at this step's positions
+                      (plate_id: the plate each was on before the move, or None)
+      'slab_tracers'  the slab tracer DataFrame
+    The seafloor-age grid is built from the tracers only if a mode reads it.
+    force_diag, if a dict, receives the per-segment slab-force table ('segments').
 
     stage_pole_dict holds the rotations that moved the plates to this configuration;
     they are used to classify boundaries and for the velocity fields.  Returns
@@ -1326,6 +1443,12 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                          and params.get('speed_scale') is None)
     if speed_state is None:
         speed_state = {}
+    force_modes_used = {'slab_pull':    params.get('slab_pull_mode', 'hard'),
+                        'slab_suction': params.get('slab_suction_mode', 'ratio'),
+                        'polarity':     params.get('polarity_mode', 'id')}
+    needs = force_fields_needed(params)
+    force_fields = force_fields or {}
+    absorbed_into = {}      # {absorbed pid: host pid} this step, to keep tracers on their plate
 
     # Local copy: children of split plates are added below
     stage_pole_dict = dict(stage_pole_dict)
@@ -1355,6 +1478,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
         # Cratons of an absorbed plate keep their original PLATEID1; remap them to
         # the host so that (a) the craton override uses the host's ID and (b) the
         # craton moves with the host via nudge_polygons in run_SDP.py.
+        for host, absorbed in pairs:
+            absorbed_into[absorbed] = host
         if craton_id_remap is None:
             return
         for host, absorbed in pairs:
@@ -1450,6 +1575,28 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     div = spherical_divergence(velocity_grid_east, velocity_grid_north)
     _ct['velocity_grid'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
+    # Fields for the force modes, built only if a selected mode reads them
+    age_grid = None
+    if needs['age'] and force_fields.get('tracers') is not None:
+        t_lon, t_lat, t_age, t_pid = force_fields['tracers']
+        if t_pid is not None:
+            # a tracer on a plate absorbed this step now belongs to the host; one on a
+            # plate split off this step still belongs to the parent
+            for _ in range(len(absorbed_into)):
+                t_pid = map_plate_ids(t_pid, absorbed_into)
+        age_grid = physics_grid_age(t_lon, t_lat, t_age, plate_id_raster, craton_raster,
+                                    grid_deg=params.get('physics_grid_deg', 1.0),
+                                    tracer_plate_id=t_pid,
+                                    raster_id_map={new: parent for new, parent in new_plates})
+        _ct['age_grid'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+    slab_tracers = None
+    if needs['slab'] and force_fields.get('slab_tracers') is not None:
+        slab_tracers = force_fields['slab_tracers']
+        slab_tracers = slab_tracers[slab_tracers['active'].astype(bool)]
+    force_params = {k: params[k] for k in ('slab_ref_depth_km', 'slab_age_saturation_myr',
+                                           'pull_ramp_km_per_myr', 'slab_search_radius_deg',
+                                           'slab_line_tol_deg') if k in params}
+
     _stage_out = polygons_to_stage_poles(
                                               new_plate_polygons, plate_id_raster, forces,
                                               craton_raster,
@@ -1460,7 +1607,12 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                               boundary_search_radius_deg=boundary_search_radius,
                                               polarity_dict=polarity_dict,
                                               collision_mode=collision_mode,
-                                              return_torques=solve_motions)
+                                              return_torques=solve_motions,
+                                              modes=force_modes_used,
+                                              age_grid=age_grid,
+                                              slab_tracers=slab_tracers,
+                                              force_params=force_params,
+                                              diagnostics=force_diag)
     if solve_motions:
         _, _collision_pairs, _torques, _edge_tensors = _stage_out
         new_stage_pole_dict = solve_plate_motions(_torques, _edge_tensors, plate_id_raster,
@@ -1488,6 +1640,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     }
     if craton_raster is not None:
         rasters_dict['craton'] = craton_raster.rename({'x': 'lon', 'y': 'lat'})
+    if force_diag is not None and age_grid is not None:
+        force_diag['age_grid'] = age_grid
 
     return new_plate_polygons, \
            new_stage_pole_dict, \
@@ -1815,6 +1969,79 @@ def update_slab_tracers(slab_tracers, boundaries_gdf, delta_time,
             'weight': delta_time * np.minimum(1.0, convergence / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR)})
         slab_tracers = new if len(slab_tracers) == 0 else pd.concat([slab_tracers, new], ignore_index=True)
     return slab_tracers
+
+
+def seed_initial_slabs(boundaries_gdf, depth_km, delta_time,
+                       div_threshold_subduction=-0.0001,
+                       sample_deg=1.0,
+                       upper_mantle_km=670.0,
+                       slowing_factor=4,
+                       max_sink_rate_km_per_myr=200.0,
+                       sink_rate_factor=1.0):
+    """Slab tracers for the trenches of the starting configuration.
+
+    Each convergent boundary (sampled every sample_deg, as in update_slab_tracers) gets
+    the column of slablets the model itself would have built had it been subducting at
+    its present rate until its slab reached depth_km: one slablet per delta_time of that
+    history, sinking at the same rates as update_slab_tracers.  The sink rate is floored
+    at SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR so a near-stalled trench does not need
+    thousands of Myr of history.  Columns are vertical (lon/lat fixed, mantle frame).
+    Returns a DataFrame with the update_slab_tracers columns (empty if no trenches).
+    """
+    columns = ['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight']
+    if (depth_km <= 0 or boundaries_gdf is None or len(boundaries_gdf) == 0
+            or 'divergence' not in boundaries_gdf.columns):
+        return pd.DataFrame(columns=columns)
+    sub = (boundaries_gdf['divergence'] < div_threshold_subduction).values
+    s_lat, s_lon, s_row, _ = _points_every(boundaries_gdf, sub, sample_deg)
+    if not len(s_lat):
+        return pd.DataFrame(columns=columns)
+    convergence = np.abs(boundaries_gdf['divergence'].values[s_row].astype(float))
+    rate = np.clip(convergence * sink_rate_factor, SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR,
+                   max_sink_rate_km_per_myr)
+    # time for the slab to reach depth_km: upper mantle at rate, lower at rate / slowing_factor
+    upper = min(depth_km, upper_mantle_km)
+    t_end = upper / rate + max(0.0, depth_km - upper_mantle_km) * slowing_factor / rate
+    n = np.ceil(t_end / delta_time).astype(int) + 1          # ages 0, dt, ..., >= t_end
+    point = np.repeat(np.arange(len(s_lat)), n)
+    age = (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n)) * delta_time
+    r = rate[point]
+    t_um = upper_mantle_km / r
+    depth = np.where(age <= t_um, r * age, upper_mantle_km + (age - t_um) * r / slowing_factor)
+    return pd.DataFrame({
+        'lon': s_lon[point], 'lat': s_lat[point],
+        'depth_km': np.minimum(depth, depth_km), 'age': age, 'active': True,
+        'sink_rate_km_per_myr': r,
+        'weight': delta_time * np.minimum(1.0, convergence[point] / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR)})
+
+
+def slab_depth_at_segments(mid_lon, mid_lat, side_xyz, slab_lon, slab_lat, slab_depth,
+                           radius_deg=5.0, line_tol_deg=1.0):
+    """Depth (km) of the deepest slab tracer near each boundary segment, on one side of it.
+
+    side_xyz (n, 3) is the segment's great-circle normal, signed to point to the side
+    where the slab lies (the overriding plate).  A tracer counts if it is within
+    radius_deg (great-circle) of the segment midpoint and not more than line_tol_deg on
+    the other side of the segment's great circle (slablets are seeded on the trench
+    line, and the line moves).  Slablets sink vertically where they were seeded, so the
+    deep part of a retreating trench's slab lies under the overriding plate, as a
+    dipping slab does.  0 where there is no slab.
+    """
+    z = np.zeros(len(mid_lon))
+    if len(slab_depth) == 0 or len(mid_lon) == 0:
+        return z
+    from scipy.spatial import cKDTree
+    s_xyz = lonlat_to_xyz(np.asarray(slab_lon, float), np.asarray(slab_lat, float))
+    m_xyz = lonlat_to_xyz(np.asarray(mid_lon, float), np.asarray(mid_lat, float))
+    chord = 2.0 * np.sin(np.radians(radius_deg) / 2.0)
+    pairs = cKDTree(m_xyz).sparse_distance_matrix(cKDTree(s_xyz), chord, output_type='ndarray')
+    if len(pairs) == 0:
+        return z
+    seg, idx = pairs['i'], pairs['j']
+    side = np.einsum('ij,ij->i', s_xyz[idx], np.asarray(side_xyz, float)[seg])   # sin(distance from the great circle), + on the slab side
+    ok = side > -np.sin(np.radians(line_tol_deg))
+    np.maximum.at(z, seg[ok], np.asarray(slab_depth, float)[idx[ok]])
+    return z
 
 
 def _mantle_grid(spacing_deg):
@@ -2345,15 +2572,19 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
 
 
 def physics_grid_age(tracer_lon, tracer_lat, tracer_age, plate_id_raster, craton_raster=None,
-                     grid_deg=1.0, tracer_plate_id=None):
+                     grid_deg=1.0, tracer_plate_id=None, raster_id_map=None):
     """Seafloor age (Myr) on the physics grid, from the seafloor tracers, for the force model.
 
     The grid is the raster sampled at about grid_deg (the same cells as plate_area_tensors).
-    Each ocean cell takes the age of the nearest tracer (great-circle distance); in a gap
-    that has just opened at a ridge this is the youngest tracer beside it.  If
-    tracer_plate_id is given, tracers that now sit on a different plate in plate_id_raster
-    are left out (they crossed a boundary, i.e. are being subducted), so old crust is not
-    smeared onto the overriding plate.  Continental cells (craton raster > 0) are NaN.
+    Each ocean cell takes the age of the nearest tracer on the same plate (great-circle
+    distance), so ages do not leak across plate boundaries (at a trench the overriding
+    plate would otherwise take the downgoing plate's ages).  A plate with no tracers
+    takes the nearest tracer of any plate.  In a gap that has just opened at a ridge the
+    nearest tracer is the youngest one beside it.  If tracer_plate_id is given, tracers
+    that now sit on a different plate in plate_id_raster are left out (they crossed a
+    boundary, i.e. are being subducted).  raster_id_map {raster pid: tracer pid} maps a
+    plate that was split off this step back to its parent, so its tracers still count.
+    Continental cells (craton raster > 0) are NaN.
     Returns a DataArray (lat, lon) on the sampled grid.
     """
     sl, _ = grid_stride(plate_id_raster, grid_deg)
@@ -2362,18 +2593,56 @@ def physics_grid_age(tracer_lon, tracer_lat, tracer_age, plate_id_raster, craton
     lon2d, lat2d = np.meshgrid(g_lon, g_lat)
     tracer_lon, tracer_lat = np.asarray(tracer_lon, float), np.asarray(tracer_lat, float)
     tracer_age = np.asarray(tracer_age, float)
-    if tracer_plate_id is not None and len(tracer_age):
-        keep = raster_lookup(plate_id_raster, tracer_lon, tracer_lat) == np.asarray(tracer_plate_id)
-        tracer_lon, tracer_lat, tracer_age = tracer_lon[keep], tracer_lat[keep], tracer_age[keep]
     age = np.full(lon2d.shape, np.nan)
     if len(tracer_age):
-        tree = SphereTree(np.deg2rad(np.column_stack([tracer_lat, tracer_lon])))
-        _, idx = tree.query(np.deg2rad(np.column_stack([lat2d.ravel(), lon2d.ravel()])), k=1)
-        age = tracer_age[idx[:, 0]].reshape(lon2d.shape)
+        on_pid = raster_lookup(plate_id_raster, tracer_lon, tracer_lat).astype(float)
+        cell_pid = np.asarray(plate_id_raster.values, dtype=float)[sl].ravel()
+        if raster_id_map:
+            on_pid = map_plate_ids(on_pid, raster_id_map)
+            cell_pid = map_plate_ids(cell_pid, raster_id_map)
+        if tracer_plate_id is not None:
+            keep = on_pid == np.asarray(tracer_plate_id)
+            tracer_lon, tracer_lat, tracer_age, on_pid = (tracer_lon[keep], tracer_lat[keep],
+                                                          tracer_age[keep], on_pid[keep])
+        cells = np.deg2rad(np.column_stack([lat2d.ravel(), lon2d.ravel()]))
+        flat = np.full(len(cells), np.nan)
+        if len(tracer_age):
+            done = np.zeros(len(cells), bool)
+            for pid in np.unique(cell_pid[np.isfinite(cell_pid)]):
+                mine = on_pid == pid
+                if not mine.any():
+                    continue
+                c = cell_pid == pid
+                _, idx = SphereTree(np.deg2rad(np.column_stack([tracer_lat[mine], tracer_lon[mine]]))).query(cells[c], k=1)
+                flat[c] = tracer_age[mine][idx[:, 0]]
+                done |= c
+            if not done.all():
+                _, idx = SphereTree(np.deg2rad(np.column_stack([tracer_lat, tracer_lon]))).query(cells[~done], k=1)
+                flat[~done] = tracer_age[idx[:, 0]]
+        age = flat.reshape(lon2d.shape)
     if craton_raster is not None:
         age[np.nan_to_num(np.asarray(craton_raster.values)[sl]) > 0] = np.nan
     return xr.DataArray(age, dims=('lat', 'lon'), coords={'lat': g_lat, 'lon': g_lon},
                         attrs={'units': 'Myr', 'long_name': 'seafloor age (physics grid)'})
+
+
+def map_plate_ids(ids, mapping):
+    """Replace plate IDs by mapping[id] where the mapping has one (vectorised)."""
+    ids = np.asarray(ids, dtype=float)
+    if not mapping or not len(ids):
+        return ids
+    uniq, inverse = np.unique(ids, return_inverse=True)
+    mapped = np.array([mapping.get(int(u), u) if np.isfinite(u) else u for u in uniq], dtype=float)
+    return mapped[inverse].reshape(ids.shape)
+
+
+def force_fields_needed(params):
+    """Which per-step fields the selected force modes read.  The simple modes need none,
+    so they cost exactly what a step cost before the force-model work."""
+    pull = params.get('slab_pull_mode', 'hard')
+    return {'age': (pull == 'slab_length' or params.get('polarity_mode', 'id') == 'age'
+                    or params.get('ridge_push_mode', 'boundary') == 'body'),
+            'slab': pull == 'slab_length' or params.get('slab_suction_mode', 'ratio') == 'depth_split'}
 
 
 def predict_tracers(lon, lat, age, plate_id_raster, stage_pole_dict, delta_time):

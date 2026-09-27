@@ -20,12 +20,16 @@ run:
 # Any component listed under force_modes overrides the preset, e.g.
 #   force_modes:
 #     collision: coupling      # resistance | coupling
+#     slab_pull: slab_length   # hard | ramp | slab_length
+#     slab_suction: depth_split   # ratio | depth_split
+#     polarity: age            # id | age
 force_model: simple
 force_modes: {}
 
 forces:
   slab_pull: 6
-  slab_suction: 6
+  slab_suction: 6              # slab_suction: ratio — on the overriding plate
+  slab_suction_deep: 3         # slab_suction: depth_split — lower-mantle slab, on both plates
   ridge_push: 3
   continental_collision: 18   # only used when force_modes.collision is resistance
 
@@ -106,6 +110,14 @@ params:
   target_rms_speed:            50      # km/Myr (= mm/yr); area-weighted RMS plate speed after calibration
   max_rms_speed_factor:        3.0     # cap: RMS speed never exceeds this × target_rms_speed (capped steps are logged)
   speed_scale:                 null    # a number fixes the scale k (skips calibration), e.g. to compare two configs
+
+  # --- Slab forces (force_modes.slab_pull / slab_suction / polarity) ---
+  slab_ref_depth_km:           660     # slab_length: full pull once the slab reaches this depth; depth_split: suction grows from here to 2x
+  slab_age_saturation_myr:     80      # slab_length: pull ∝ sqrt(min(age, this) / this), age of the seafloor arriving at the trench
+  slab_search_radius_deg:      5       # slab depth at a trench = deepest slab tracer within this distance, on the overriding side
+  slab_line_tol_deg:           1       # ... or up to this far on the downgoing side (slablets are seeded on the moving trench line)
+  initial_slab_depth_km:       1320    # slab_length / depth_split: the step-0 trenches start with slabs this deep
+  pull_ramp_km_per_myr:        10      # slab_pull: ramp — full pull at this convergence rate
 
   # --- Continental collision ---
   # (collision_mode now lives under force_modes.collision; params.collision_mode is still read)

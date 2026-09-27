@@ -56,6 +56,11 @@ print(force_modes.describe(force_preset, modes))
 params['collision_mode'] = modes['collision']
 params['drag_mode'] = modes['drag']
 params['speed_normalisation'] = modes['speed_normalisation']
+params['slab_pull_mode'] = modes['slab_pull']
+params['slab_suction_mode'] = modes['slab_suction']
+params['polarity_mode'] = modes['polarity']
+params['ridge_push_mode'] = modes['ridge_push']
+_needs = sdp.force_fields_needed(params)     # per-step fields the force modes read
 
 
 def _git_commit():
@@ -155,6 +160,48 @@ speed_state              = {}   # speed scale k (calibrate_once) and last step's
 
 # Trust the user's initial plate configuration — skip fragmentation check on step 0.
 _params_step0 = {**params, 'fragmentation_enabled': False}
+
+_slab_enabled = params.get('slab_tracers_enabled', False)   # mantle outputs (CMB heat, mantle_temp)
+_slab_track = _slab_enabled or _needs['slab']                # slab tracers kept (outputs or forces)
+_slab_columns = ['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight']
+slab_tracers = pd.DataFrame(columns=_slab_columns) if _slab_track else None
+
+
+def _new_seafloor_tracers(plate_polygons, bdry):
+    return sdp.generate_seafloor_age_tracers(
+        plate_polygons, bdry,
+        spacing_deg=params['seafloor_spacing_deg'],
+        spreading_rate_km_per_myr=params['spreading_rate_km_per_myr'],
+        div_threshold=params['div_threshold_ridge'])
+
+
+_step0_fields = None
+if _needs['age'] or _needs['slab']:
+    # The force modes read seafloor age and slab depth, which are seeded from the
+    # step-0 boundaries.  A first, simple pass gives those boundaries (the plate
+    # geometry does not depend on the force modes); the forces come from the second.
+    _params_pass1 = {**_params_step0, 'drag_mode': 'none', 'speed_normalisation': 'none',
+                     'speed_scale': None, 'slab_pull_mode': 'hard', 'slab_suction_mode': 'ratio',
+                     'polarity_mode': 'id', 'ridge_push_mode': 'boundary'}
+    _pass1 = sdp.compute_timestep(rpolygons, forces, seed_stage_poles, delta_time,
+                                  cratons=cratons, params=_params_pass1, polarity_dict={},
+                                  collision_state={}, speed_state={})
+    tracers = _new_seafloor_tracers(_pass1[0], _pass1[3])
+    _step0_fields = {'tracers': (tracers.geometry.x.values, tracers.geometry.y.values,
+                                 tracers.age.values.astype(float), None)}
+    if _needs['slab']:
+        slab_tracers = sdp.seed_initial_slabs(
+            _pass1[3], params.get('initial_slab_depth_km', 1320.0), delta_time,
+            div_threshold_subduction=params['div_threshold_subduction'],
+            slowing_factor=params.get('slab_slowing_factor', 4),
+            max_sink_rate_km_per_myr=params.get('slab_max_sink_rate', 200.0),
+            sink_rate_factor=params.get('slab_sink_rate_factor', 1.0))
+        _step0_fields['slab_tracers'] = slab_tracers
+        print('  [slab] {} initial slab tracers at the step-0 trenches, to {:.0f} km'.format(
+            len(slab_tracers), params.get('initial_slab_depth_km', 1320.0)))
+    del _pass1
+
+force_diag = {}
 (new_plate_polygons,
  stage_pole_dict,
  rasters,
@@ -165,24 +212,21 @@ _params_step0 = {**params, 'fragmentation_enabled': False}
                                        cratons=cratons, params=_params_step0,
                                        polarity_dict=polarity_dict,
                                        collision_state=collision_state,
-                                       speed_state=speed_state)
+                                       speed_state=speed_state,
+                                       force_fields=_step0_fields,
+                                       force_diag=force_diag)
 if 'last' in speed_state:
     run_info['speed_scale_k'] = float(speed_state['last']['k_used'])
     run_info['rms_speed_unscaled_step0_km_per_myr'] = float(speed_state['last']['rms_unscaled'])
     _write_run_info()
 
-tracers = sdp.generate_seafloor_age_tracers(
-    new_plate_polygons, boundaries_gdf,
-    spacing_deg=params['seafloor_spacing_deg'],
-    spreading_rate_km_per_myr=params['spreading_rate_km_per_myr'],
-    div_threshold=params['div_threshold_ridge'])
+if _step0_fields is None:
+    tracers = _new_seafloor_tracers(new_plate_polygons, boundaries_gdf)
 
 _hs_locs = params.get('hotspot_locations', None)
 hotspot_locs = sdp.generate_hotspot_locations(n=params['n_hotspots'], locations=_hs_locs, seed=rng)
 seamounts = gpd.GeoDataFrame(columns=['geometry', 'hotspot_id', 'age', 'active'],
                              geometry='geometry').set_crs(epsg=4326)
-
-_slab_enabled = params.get('slab_tracers_enabled', False)
 
 # Fragmentation / merging state (persists across timesteps)
 _conservative_contact   = {}   # {(min_pid, max_pid): int consecutive near-zero steps}
@@ -191,8 +235,6 @@ _merge_pairs            = []   # [(pid_large, pid_small)] passed to next compute
 _fragmentation_cooldown_pids = set()
 _craton_plate_remap     = {}   # {craton_plateid: host_plateid} for absorbed cratons
 if _slab_enabled:
-    slab_tracers = pd.DataFrame(
-        columns=['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight'])
     _mantle_spacing = params.get('mantle_grid_spacing_deg', 5.0)
     _cmb_nlat = len(np.arange(-90  + _mantle_spacing / 2, 90,  _mantle_spacing))
     _cmb_nlon = len(np.arange(-180 + _mantle_spacing / 2, 180, _mantle_spacing))
@@ -452,6 +494,8 @@ def _enqueue_outputs(i, force_save=False):
             _save_payload['slab_tracers'] = slab_tracers.copy()
             _save_payload['cmb_heat']     = cmb_heat.copy()
         _output_queue.put(('save', _save_payload))
+        if force_diag.get('segments') is not None:
+            force_diag['segments'].to_csv(_out('trench_forces_{:04d}.csv'.format(i)), index=False)
         return True
     return False
 
@@ -467,7 +511,16 @@ def _record_step_stats(i, step_times=None, previous_poles=None):
         polarity_dict, params, previous_stage_pole_dict=previous_poles)
     step_row['n_tracers'] = int(tracers.active.astype(bool).sum())
     step_row['n_slab_tracers'] = (int(slab_tracers['active'].astype(bool).sum())
-                                  if _slab_enabled else 0)
+                                  if _slab_track else 0)
+    seg = force_diag.get('segments')
+    if seg is not None and len(seg):
+        # slab forces along the subduction segments (each boundary counted from both plates)
+        down = seg[seg.downgoing & ~seg.collision]
+        step_row['slab_pull_total'] = float((seg.pull_weight * seg.length_km).sum())
+        step_row['slab_suction_total'] = float((seg.suction_weight * seg.length_km).sum())
+        step_row['trench_slab_depth_mean_km'] = (float(np.average(down.slab_depth_km, weights=down.length_km))
+                                                    if len(down) else np.nan)
+        step_row['n_polarity_pairs'] = len(polarity_dict)
     # Boundary migration and jitter on the fixed grid: cells whose plate changed since the
     # last step, and cells that went A -> B -> A over the last three steps
     pid_now = rasters['plate_id'].values
@@ -517,6 +570,18 @@ try:
         moving_poles = stage_pole_dict
         previous_plate_id = rasters['plate_id']
 
+        # Fields the force modes read, at this step's positions: the seafloor tracers
+        # moved one step ahead (they are updated only after the forces), and the slab
+        # tracers as they are (fixed in the mantle; depths lag one step)
+        _fields = None
+        if _needs['age'] or _needs['slab']:
+            _fields = {'slab_tracers': slab_tracers}
+            if _needs['age']:
+                _fields['tracers'] = sdp.predict_tracers(
+                    tracers.geometry.x.values, tracers.geometry.y.values,
+                    tracers.age.values.astype(float), previous_plate_id, moving_poles, delta_time)
+        force_diag = {}
+
         rpolygons = sdp.nudge_polygons(
             new_plate_polygons.explode(index_parts=False).reset_index(drop=True),
             moving_poles)
@@ -553,7 +618,9 @@ try:
                                                craton_id_remap=_craton_plate_remap,
                                                next_plate_id=next_plate_id,
                                                speed_state=speed_state,
-                                               previous_plate_id=previous_plate_id)
+                                               previous_plate_id=previous_plate_id,
+                                               force_fields=_fields,
+                                               force_diag=force_diag)
         _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         # New plates (fragments) inherit their parent's rotation history, so the
@@ -652,7 +719,7 @@ try:
                                    geometry='geometry').set_crs(epsg=4326, allow_override=True)
         _step_times['tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-        if _slab_enabled:
+        if _slab_track:
             slab_tracers = sdp.update_slab_tracers(
                 slab_tracers, boundaries_gdf, delta_time,
                 div_threshold_subduction=params['div_threshold_subduction'],
@@ -660,6 +727,7 @@ try:
                 max_sink_rate_km_per_myr=params.get('slab_max_sink_rate', 200.0),
                 sink_rate_factor=params.get('slab_sink_rate_factor', 1.0))
             _step_times['slab_tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+        if _slab_enabled:
             cmb_heat = sdp.update_cmb_heat(
                 cmb_heat, slab_tracers, delta_time,
                 spacing_deg=_mantle_spacing,
@@ -669,18 +737,18 @@ try:
                 sigma_deg=params.get('cmb_sigma_deg', 10.0),
                 max_heat=params.get('cmb_max_heat', 3.0))
             _step_times['cmb_heat'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
-            if 'divergence' in boundaries_gdf.columns:
-                _sub = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
-                _active_slabs = slab_tracers[slab_tracers['active'].astype(bool)]
-                print('  [slab] sub-bdry div (km/Myr): min={:.3f} max={:.3f}  '
-                      'sink_rate (km/Myr): max={:.1f}  '
-                      'slablets: n={:d} depth={:.0f}-{:.0f} km'.format(
-                          float(_sub['divergence'].min()) if len(_sub) else 0.0,
-                          float(_sub['divergence'].max()) if len(_sub) else 0.0,
-                          float(_active_slabs['sink_rate_km_per_myr'].max()) if len(_active_slabs) else 0.0,
-                          len(_active_slabs),
-                          float(_active_slabs['depth_km'].min()) if len(_active_slabs) else 0.0,
-                          float(_active_slabs['depth_km'].max()) if len(_active_slabs) else 0.0))
+        if _slab_track and 'divergence' in boundaries_gdf.columns:
+            _sub = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
+            _active_slabs = slab_tracers[slab_tracers['active'].astype(bool)]
+            print('  [slab] sub-bdry div (km/Myr): min={:.3f} max={:.3f}  '
+                  'sink_rate (km/Myr): max={:.1f}  '
+                  'slablets: n={:d} depth={:.0f}-{:.0f} km'.format(
+                      float(_sub['divergence'].min()) if len(_sub) else 0.0,
+                      float(_sub['divergence'].max()) if len(_sub) else 0.0,
+                      float(_active_slabs['sink_rate_km_per_myr'].max()) if len(_active_slabs) else 0.0,
+                      len(_active_slabs),
+                      float(_active_slabs['depth_km'].min()) if len(_active_slabs) else 0.0,
+                      float(_active_slabs['depth_km'].max()) if len(_active_slabs) else 0.0))
 
         seamounts = sdp.advect_tracers(seamounts, previous_plate_id, moving_poles, delta_time,
                                        boundaries_gdf=boundaries_gdf,

@@ -4,7 +4,8 @@
 
 Every output that exists in both folders is compared: NetCDF grids (all variables,
 NaN-aware), CSVs, GeoJSONs (attributes and vertex coordinates) and rotation files.
-Plots and run_info.yaml are skipped.  Prints one line per file and exits with status 1
+Plots and run_info.yaml are skipped, and so are the wall-clock columns (seconds_*) of
+the statistics CSVs.  Prints one line per file and exits with status 1
 if anything differs by more than --tol (default 0: exact).
 """
 
@@ -53,7 +54,9 @@ def compare_file(path_a, path_b):
             return np.inf, 'variables differ'
         return max((_max_diff(da[v].values, db[v].values) for v in da.data_vars), default=0.0), ''
     if ext == '.csv':
-        return _compare_frames(pd.read_csv(path_a), pd.read_csv(path_b))
+        a, b = pd.read_csv(path_a), pd.read_csv(path_b)
+        timing = [c for c in a.columns if c.startswith('seconds_')]
+        return _compare_frames(a.drop(columns=timing), b.drop(columns=timing, errors='ignore'))
     if ext == '.geojson':
         ga, gb = gpd.read_file(path_a), gpd.read_file(path_b)
         worst, note = _compare_frames(pd.DataFrame(ga.drop(columns='geometry')),
