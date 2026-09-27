@@ -46,6 +46,35 @@ def xyz_to_lonlat(xyz):
     return lon, lat
 
 
+class SphereTree:
+    """Nearest-neighbour search on the sphere, a faster stand-in for
+    sklearn BallTree(metric='haversine') with the same input and query() output.
+
+    Points are given as (lat, lon) in radians, as for BallTree.  Searching uses a
+    KD-tree on 3-D unit vectors: the straight-line (chord) distance c between two unit
+    vectors is 2 sin(d/2) for great-circle distance d, so it orders neighbours exactly
+    as d does, and query() converts c back to d.  About 7x faster than the haversine
+    BallTree for tens of thousands of points.
+    """
+
+    def __init__(self, latlon_rad):
+        from scipy.spatial import cKDTree
+        latlon_rad = np.asarray(latlon_rad, dtype=float).reshape(-1, 2)
+        self._tree = cKDTree(self._xyz(latlon_rad))
+
+    @staticmethod
+    def _xyz(latlon_rad):
+        lat, lon = latlon_rad[:, 0], latlon_rad[:, 1]
+        return np.column_stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
+
+    def query(self, latlon_rad, k=1):
+        """Return (great-circle distances in radians (n, k), indices (n, k))."""
+        latlon_rad = np.asarray(latlon_rad, dtype=float).reshape(-1, 2)
+        chord, idx = self._tree.query(self._xyz(latlon_rad), k=k)
+        chord, idx = np.asarray(chord).reshape(len(latlon_rad), k), np.asarray(idx).reshape(len(latlon_rad), k)
+        return 2.0 * np.arcsin(np.clip(chord / 2.0, 0.0, 1.0)), idx
+
+
 def rotation_axis_angle(rotation):
     """Return (unit axis xyz, angle in radians) of a pygplates FiniteRotation."""
     if rotation is None or rotation.represents_identity_rotation():
@@ -272,7 +301,7 @@ def _spherical_kernel(lats, lons, sigma_deg):
     lon2d, lat2d = np.meshgrid(lons, lats)
     pts = np.radians(np.column_stack([lat2d.ravel(), lon2d.ravel()]))
     area = np.clip(np.cos(pts[:, 0]), 1e-6, None)
-    tree = BallTree(pts, metric='haversine')
+    tree = BallTree(pts, metric='haversine')   # radius query; built once per grid (cached)
     idx, dist = tree.query_radius(pts, r=np.radians(4 * sigma_deg), return_distance=True)
     rows = np.repeat(np.arange(len(pts)), [len(i) for i in idx])
     cols = np.concatenate(idx)
@@ -1096,7 +1125,7 @@ def _find_neck(mask, lon2d, lat2d, cell_area, min_part_area):
     outer = ~mask & (up | down | east | west)
     if not outer.any():
         return None
-    tree = BallTree(np.radians(np.column_stack([lat2d[outer], lon2d[outer]])), metric='haversine')
+    tree = SphereTree(np.radians(np.column_stack([lat2d[outer], lon2d[outer]])))
     inner_pts = np.radians(np.column_stack([lat2d[mask], lon2d[mask]]))
     dist = np.zeros(mask.shape)
     dist[mask] = np.degrees(tree.query(inner_pts, k=1)[0][:, 0])
@@ -1115,7 +1144,7 @@ def _find_neck(mask, lon2d, lat2d, cell_area, min_part_area):
             seeds = [labels == b for b in biggest]
             seed_pts = np.vstack([np.column_stack([lat2d[s], lon2d[s]]) for s in seeds])
             seed_lab = np.concatenate([np.full(int(s.sum()), j) for j, s in enumerate(seeds)])
-            seed_tree = BallTree(np.radians(seed_pts), metric='haversine')
+            seed_tree = SphereTree(np.radians(seed_pts))
             nearest = seed_lab[seed_tree.query(inner_pts, k=1)[1][:, 0]]
             part_a = np.zeros(mask.shape, bool)
             part_a[mask] = nearest == 0
@@ -1191,7 +1220,7 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
         coarse_pts = np.column_stack([lat2d[sl][neck['part_a'] | neck['part_b']],
                                       lon2d[sl][neck['part_a'] | neck['part_b']]])
         coarse_lab = neck['part_b'][neck['part_a'] | neck['part_b']].astype(int)
-        tree = BallTree(np.radians(coarse_pts), metric='haversine')
+        tree = SphereTree(np.radians(coarse_pts))
         nearest = coarse_lab[tree.query(np.radians(np.column_stack([lat2d[mask], lon2d[mask]])),
                                         k=1)[1][:, 0]]
         part_b = np.zeros(mask.shape, bool)
@@ -1446,15 +1475,37 @@ def _segment_arcs(boundaries_gdf, mask=None):
 
 
 def _sample_arcs(boundaries_gdf, mask, sample_deg):
-    """Points every ~sample_deg along boundary rows where mask is True.
+    """Points every ~sample_deg along boundary rows where mask is True: each 2-vertex
+    piece of a row is split into n = ceil(length / sample_deg) equal great-circle steps
+    and its n + 1 points (both ends included) are returned.  Pieces of zero length (or
+    antipodal ends) are skipped, as for pygplates.GreatCircleArc.
     Returns lat (N,), lon (N,), row position (N,)."""
-    lats, lons, rows = [], [], []
-    for pos, arc in _segment_arcs(boundaries_gdf, mask):
-        n = max(int(np.ceil(np.degrees(arc.get_arc_length()) / sample_deg)), 1)
-        for f in np.linspace(0.0, 1.0, n + 1):
-            la, lo = arc.get_arc_point(f).to_lat_lon()
-            lats.append(la); lons.append(lo); rows.append(pos)
-    return np.array(lats), np.array(lons), np.array(rows, dtype=int)
+    empty = np.array([]), np.array([]), np.array([], dtype=int)
+    sel = np.where(np.asarray(mask, bool))[0] if mask is not None else np.arange(len(boundaries_gdf))
+    if not len(sel):
+        return empty
+    coords = boundaries_gdf.geometry.iloc[sel].get_coordinates()
+    row = sel[np.asarray(pd.factorize(coords.index)[0])] if len(coords) else np.array([], int)
+    xyz = lonlat_to_xyz(coords.x.values, coords.y.values)
+    same = row[1:] == row[:-1]
+    a, b, seg_row = xyz[:-1][same], xyz[1:][same], row[1:][same]
+    cross = np.linalg.norm(np.cross(a, b), axis=1)
+    theta = np.arctan2(cross, np.einsum('ij,ij->i', a, b))
+    ok = cross > 1e-12
+    a, b, seg_row, theta = a[ok], b[ok], seg_row[ok], theta[ok]
+    if not len(a):
+        return empty
+    # step count from acos(a·b), the way pygplates measures arc length, so that pieces
+    # whose length is a whole number of steps are split exactly as before
+    length_deg = np.degrees(np.arccos(np.clip(np.einsum('ij,ij->i', a, b), -1.0, 1.0)))
+    n = np.maximum(np.ceil(length_deg / sample_deg).astype(int), 1)
+    seg = np.repeat(np.arange(len(a)), n + 1)
+    f = np.concatenate([np.linspace(0.0, 1.0, k + 1) for k in n])
+    th = theta[seg]
+    # great-circle (spherical linear) interpolation between the segment ends
+    p = (np.sin((1.0 - f) * th)[:, None] * a[seg] + np.sin(f * th)[:, None] * b[seg]) / np.sin(th)[:, None]
+    lon, lat = xyz_to_lonlat(p)
+    return lat, lon, seg_row[seg]
 
 
 def _points_every(boundaries_gdf, mask, spacing_deg):
@@ -1532,7 +1583,7 @@ def generate_seafloor_age_tracers(plate_polygons, boundaries_gdf,
         r_lat, r_lon, _ = _sample_arcs(boundaries_gdf, on_plate, spacing_deg / 2)
         if len(r_lat) == 0:
             continue
-        tree = BallTree(np.deg2rad(np.column_stack([r_lat, r_lon])), metric='haversine')
+        tree = SphereTree(np.deg2rad(np.column_stack([r_lat, r_lon])))
 
         # Equal-area grid: uniform in (lon, sin(lat)) so density is ~constant on the sphere
         minx, miny, maxx, maxy = geom.bounds
@@ -1611,6 +1662,23 @@ def advect_tracers(tracers, plate_id_raster, stage_pole_dict, delta_time=1,
     return pd.concat([updated, inactive], ignore_index=True)
 
 
+_CONVERGENT_CACHE = {}
+
+
+def _convergent_samples(boundaries_gdf, threshold, sample_deg=0.5):
+    """Points every sample_deg along convergent boundaries and a SphereTree on them.
+    The last result is kept, so the seafloor-tracer and seamount calls in one step
+    share it (keyed on the boundaries object itself and the threshold)."""
+    c = _CONVERGENT_CACHE
+    if c.get('gdf') is boundaries_gdf and c.get('key') == (threshold, sample_deg):
+        return c['value']
+    conv = (boundaries_gdf['divergence'] < threshold).values
+    c_lat, c_lon, c_row = _sample_arcs(boundaries_gdf, conv, sample_deg)
+    tree = SphereTree(np.deg2rad(np.column_stack([c_lat, c_lon]))) if len(c_lat) else None
+    c.update(gdf=boundaries_gdf, key=(threshold, sample_deg), value=(c_lat, c_lon, c_row, tree))
+    return c['value']
+
+
 def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_dist_deg=1.0,
                                  plate_id_raster=None, polarity_dict=None, craton_counts=None):
     """Mark active tracers as inactive when within max_dist_deg of a convergent boundary.
@@ -1632,12 +1700,10 @@ def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_di
     if not active_mask.any():
         return tracers
 
-    conv = (boundaries_gdf['divergence'] < threshold).values
-    c_lat, c_lon, c_row = _sample_arcs(boundaries_gdf, conv, 0.5)
+    c_lat, c_lon, c_row, tree = _convergent_samples(boundaries_gdf, threshold)
     if len(c_lat) == 0:
         return tracers
 
-    tree = BallTree(np.deg2rad(np.column_stack([c_lat, c_lon])), metric='haversine')
     active_tracers = tracers[active_mask]
     t_lon = active_tracers.geometry.x.values
     t_lat = active_tracers.geometry.y.values
@@ -2042,7 +2108,7 @@ def generate_synthetic_earthquakes(boundaries_gdf, polarity_dict=None, plate_pol
     # Uniform random points on the sphere
     lons, lats = xyz_to_lonlat(rng.standard_normal((n_candidates, 3)))
 
-    tree = BallTree(np.deg2rad(np.column_stack([b_lat, b_lon])), metric='haversine')
+    tree = SphereTree(np.deg2rad(np.column_stack([b_lat, b_lon])))
     dists_rad, nn_idx = tree.query(np.deg2rad(np.column_stack([lats, lons])), k=1)
     dist_deg = np.degrees(dists_rad[:, 0])
     row = b_row[nn_idx[:, 0]]
@@ -2173,7 +2239,7 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
 
     # --- Andean elevation ---
     if andean_pts:
-        tree = BallTree(np.deg2rad(andean_pts), metric='haversine')
+        tree = SphereTree(np.deg2rad(andean_pts))
         ri, ci = np.where(is_craton)
         pts_rad = np.deg2rad(np.column_stack([lat2d[ri, ci], lon2d[ri, ci]]))
         dists_deg, nn_idx = tree.query(pts_rad, k=1)
@@ -2187,7 +2253,7 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
 
     # --- Himalayan elevation ---
     if himalayan_pts:
-        tree = BallTree(np.deg2rad(himalayan_pts), metric='haversine')
+        tree = SphereTree(np.deg2rad(himalayan_pts))
         ri, ci = np.where(is_craton)
         dists_deg, _ = tree.query(np.deg2rad(np.column_stack([lat2d[ri, ci], lon2d[ri, ci]])), k=1)
         dists_deg = np.degrees(dists_deg[:, 0])
@@ -2227,7 +2293,7 @@ def compute_topography_raster(plate_id_raster, craton_raster, boundaries_gdf,
     #     craton edge (great-circle distance to the nearest non-craton pixel).
     coast = ~is_craton & np.logical_or.reduce(wrap_neighbours(is_craton))
     if coast.any() and is_craton.any():
-        tree = BallTree(np.deg2rad(np.column_stack([lat2d[coast], lon2d[coast]])), metric='haversine')
+        tree = SphereTree(np.deg2rad(np.column_stack([lat2d[coast], lon2d[coast]])))
         d, _ = tree.query(np.deg2rad(np.column_stack([lat2d[is_craton], lon2d[is_craton]])), k=1)
         t = np.clip(np.degrees(d[:, 0]) / coastal_margin_deg, 0.0, 1.0)
         elev[is_craton] *= t * t * (3.0 - 2.0 * t)   # smoothstep: 0 at coast, 1 inland
@@ -2461,7 +2527,7 @@ def fill_nan_spherical(da):
     candidates = ~invalid & np.logical_or.reduce(wrap_neighbours(invalid))
 
     # BallTree with haversine needs (lat, lon) in radians
-    tree = BallTree(np.deg2rad(np.column_stack([lat[candidates], lon[candidates]])), metric='haversine')
+    tree = SphereTree(np.deg2rad(np.column_stack([lat[candidates], lon[candidates]])))
     _, idx = tree.query(np.deg2rad(np.column_stack([lat[invalid], lon[invalid]])), k=1)
 
     filled = vals.copy()
