@@ -23,6 +23,7 @@ run:
 #     slab_pull: slab_length   # hard | ramp | slab_length
 #     slab_suction: depth_split   # ratio | depth_split
 #     polarity: age            # id | age
+#     ridge_push: body         # boundary | body
 force_model: simple
 force_modes: {}
 
@@ -118,6 +119,8 @@ params:
   slab_line_tol_deg:           1       # ... or up to this far on the downgoing side (slablets are seeded on the moving trench line)
   initial_slab_depth_km:       1320    # slab_length / depth_split: the step-0 trenches start with slabs this deep
   pull_ramp_km_per_myr:        10      # slab_pull: ramp — full pull at this convergence rate
+  ridge_push_age_cutoff_myr:   80      # ridge_push: body — force ∝ ∇age on seafloor younger than this (none on older)
+  ridge_push_smooth_deg:       0       # ridge_push: body — optional per-plate smoothing of age before the gradient (0 = off; 1.5 costs ~0.2 s/step)
 
   # --- Continental collision ---
   # (collision_mode now lives under force_modes.collision; params.collision_mode is still read)

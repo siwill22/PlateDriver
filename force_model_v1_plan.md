@@ -82,11 +82,15 @@ approximation:
 - **Frame:** drag acts relative to the mantle, so the frame is fixed to the mantle. That
   is the same frame as the hotspots, and net rotation is a real output (Q10).
 
-**Ridge push as a body force (Q6).** The force per unit area is f = −C ∇age for ocean
-cells younger than the age cutoff, and 0 elsewhere. The plate's torque is Σ r × f dA.
+**Ridge push as a body force (Q6).** The force per unit area is f = +C ∇age for ocean
+cells younger than the age cutoff, and 0 elsewhere. It points toward older seafloor, down
+the subsidence slope. (An earlier version of this note had the sign wrong.) The plate's
+torque is Σ r × f dA, and C = `forces.ridge_push` / cutoff, so one full flank gives the
+boundary mode's force per unit ridge length.
 
-- Plan to add a gradient only after the age raster has been smoothed spherically; the
-  nearest-tracer raster is blocky.
+- The gradient is taken within each plate only (never across a boundary). Per-plate
+  spherical smoothing of the age before the gradient was tried in S4 and left off by
+  default: it cost 0.2 s per step for little change (`ridge_push_smooth_deg`).
 - The gradient is wrap-aware, with ∂/∂x = (1/(R cos φ)) ∂/∂λ.
 
 *Correction to what I said in Q6:* the magnitude is ∝ |∇age|, not constant per unit
@@ -181,6 +185,17 @@ Each stage ends at a review gate, and nothing moves to the next stage without ap
 - `review-fixes` holds the earlier review fixes and speed-ups, committed as 31832cb.
 - `force-model-v1` branches from it, and this work goes there.
 - Nothing is merged to `master` without approval.
+
+## Found in S4
+
+- **Collision resistance chatters.** `collision: resistance` switches a push-back of
+  weight 18 on at every converging continent–continent contact. The contact turns
+  divergent, the push stops, and the contact closes again. This makes period-2
+  oscillations of whole plates. It is the main source of the large step-to-step pole
+  swings: in 100-Myr runs the share of plate area swinging more than 10° per step is
+  10.2% (S3) and 22.5% (S3 + S4) with resistance, against 2.5% and 1.0% with `coupling`.
+  S5's `viscous` mode (a push-back that can stop plates but never reverse them) targets
+  this. Until then, compare force modes with `collision: coupling`.
 
 ## Decisions made during S3
 

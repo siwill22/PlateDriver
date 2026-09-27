@@ -704,6 +704,86 @@ def _rings_with_outward_sign(polygon):
                -_ring_sign(polygon.get_interior_ring_points(k)))
 
 
+def _one_plate_derivative(field, plus, minus, plus_ok, minus_ok, step):
+    """Derivative from neighbours on the same plate: central difference where both are,
+    one-sided where one is, 0 where neither is.  step is signed (radians)."""
+    out = np.zeros_like(field)
+    both, only_p, only_m = plus_ok & minus_ok, plus_ok & ~minus_ok, minus_ok & ~plus_ok
+    out[both] = (plus - minus)[both] / (2 * step)
+    out[only_p] = (plus - field)[only_p] / step
+    out[only_m] = (field - minus)[only_m] / step
+    return out
+
+
+def ridge_push_body_torques(age_grid, plate_id_raster, weight, cutoff_myr=80.0, smooth_deg=0.0,
+                            return_field=False):
+    """Torque on every plate from ridge push as a body force (ridge_push: body).
+
+    The force per unit area is f = (weight / cutoff) ∇min(age, cutoff) on ocean cells,
+    pointing down the thermal-subsidence slope, toward older seafloor.  It is non-zero only
+    where seafloor is younger than the cutoff; continental (NaN) cells feel none.  The
+    gradient is taken within each plate only (neighbours on another plate are not used),
+    so the age jump across a trench or ridge does not count.  Integrated across one ridge
+    flank from age 0 to the cutoff, the force per unit ridge length is `weight`, which is
+    what ridge_push: boundary applies per unit ridge length; here it follows how age grows
+    away from the ridge (Parsons & Richter 1980: force ∝ age, so force per area ∝ |∇age|).
+    The torque scale is that of plate_driver.get_torque_for_segment (a unit force per unit
+    length gives r × f × 0.1° in radians).  Gradients use the spherical metric
+    (∂/∂x = ∂/∂λ / cos φ).  Optionally (smooth_deg > 0) the clipped age is first smoothed
+    with a spherical Gaussian, separately on each plate (normalised by the plate's own
+    cells, so ages never mix across a boundary).  On atlantis66 1.5° smoothing changed the
+    step-to-step turning of plate torques little and cost 0.2 s per step, so it is off by
+    default.
+    Returns {pid: torque xyz}, and with return_field also the east and north force
+    components (lat, lon).
+    """
+    lons, lats = age_grid.lon.values, age_grid.lat.values
+    sl, _ = grid_stride(plate_id_raster, abs(lons[1] - lons[0]))
+    pid = np.asarray(plate_id_raster.values, dtype=float)[sl]
+    age = np.asarray(age_grid.values, dtype=float)
+    ocean = np.isfinite(age) & np.isfinite(pid) & (pid > 0)
+    a = np.where(ocean, np.minimum(age, cutoff_myr), 0.0)
+    key = np.where(ocean, pid, -1.0)
+    plates = np.unique(key[ocean])
+    if smooth_deg and smooth_deg > 0 and len(plates):
+        K = _spherical_kernel(tuple(np.round(lats, 6)), tuple(np.round(lons, 6)), float(smooth_deg))
+        masks = np.stack([(key == p).ravel() for p in plates], axis=1).astype(float)
+        num = K @ (masks * a.ravel()[:, None])
+        den = K @ masks
+        own = np.argmax(masks, axis=1)
+        rows = np.arange(len(own))
+        sm = np.where(den[rows, own] > 0, num[rows, own] / np.maximum(den[rows, own], 1e-12), 0.0)
+        a = np.where(ocean, sm.reshape(a.shape), 0.0)
+
+    # neighbours: columns wrap in longitude; rows do not wrap (edge rows use one side)
+    edge = np.full((1, a.shape[1]), np.nan)
+    col_p, col_m = np.roll(a, -1, axis=1), np.roll(a, 1, axis=1)
+    row_p, row_m = np.vstack([a[1:], edge]), np.vstack([edge, a[:-1]])
+    kc_p, kc_m = np.roll(key, -1, axis=1), np.roll(key, 1, axis=1)
+    kr_p, kr_m = np.vstack([key[1:], edge]), np.vstack([edge, key[:-1]])
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    coslat = np.cos(np.radians(lat2d))
+    d_lon = np.radians(lons[1] - lons[0])
+    d_lat = np.radians(lats[1] - lats[0])          # signed: rows may run either way
+    g_e = _one_plate_derivative(a, col_p, col_m, ocean & (kc_p == key), ocean & (kc_m == key), d_lon)
+    g_e = g_e / np.maximum(coslat, 1e-6)
+    g_n = _one_plate_derivative(a, np.nan_to_num(row_p), np.nan_to_num(row_m),
+                                ocean & (kr_p == key), ocean & (kr_m == key), d_lat)
+
+    scale = weight / cutoff_myr
+    f_e, f_n = scale * g_e, scale * g_n
+    lon_r, lat_r = np.radians(lon2d), np.radians(lat2d)
+    east = np.stack([-np.sin(lon_r), np.cos(lon_r), np.zeros_like(lon_r)], axis=-1)
+    north = np.stack([-np.sin(lat_r) * np.cos(lon_r), -np.sin(lat_r) * np.sin(lon_r), np.cos(lat_r)], axis=-1)
+    f = f_e[..., None] * east + f_n[..., None] * north
+    dA = coslat * abs(d_lon * d_lat)
+    tau = np.cross(lonlat_to_xyz(lon2d, lat2d), f) * (dA * np.radians(0.1))[..., None]
+    torques = {int(p): tau[(key == p)].sum(axis=0) for p in plates}
+    if return_field:
+        return torques, f_e, f_n
+    return torques
+
+
 # polarity: age — a plate counts as continental at a contact if its own continent lies
 # within the search radius along at least this share of the contact length.
 CONTACT_CONTINENT_SHARE = 0.5
@@ -813,7 +893,12 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                                  on both plates, toward the trench (slab in the lower mantle)
       polarity      id           a new ocean–ocean pair: the lower plate ID subducts
                     age          the plate with the older ocean along the contact subducts
-      In every mode a plate with continent (cratons) overrides one without, as before.
+      The continent rule comes first: with id a plate with continent anywhere overrides one
+      without; with age, a plate with its own continent at the contact overrides.
+      ridge_push    boundary     forces['ridge_push'] on every divergent segment
+                    body         a body force ∝ ∇age over seafloor younger than
+                                 ridge_push_age_cutoff_myr (ridge_push_body_torques; needs
+                                 age_grid), in place of the boundary force
     diagnostics, if a dict, receives 'segments': a DataFrame of the subduction segments
     and their forces (only when a mode other than the simple ones is used).
     """
@@ -823,7 +908,8 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
         collision_pairs = set()
     if stage_pole_dict is None:
         stage_pole_dict = {}
-    modes = {'slab_pull': 'hard', 'slab_suction': 'ratio', 'polarity': 'id', **(modes or {})}
+    modes = {'slab_pull': 'hard', 'slab_suction': 'ratio', 'polarity': 'id', 'ridge_push': 'boundary',
+             **(modes or {})}
     force_params = force_params or {}
     identity = pygplates.FiniteRotation()
 
@@ -976,8 +1062,27 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                         torque_dict[pid_current] = torque_dict[pid_current] - seg_torque[k] * forces['continental_collision']
                 elif slab_w[k]:
                     torque_dict[pid_current] = torque_dict[pid_current] + seg_torque[k] * float(slab_w[k])
-            elif 'ridge_push' in forces:
+            elif 'ridge_push' in forces and modes['ridge_push'] == 'boundary':
                 torque_dict[pid_current] = torque_dict[pid_current] - seg_torque[k] * forces['ridge_push']
+
+    if modes['ridge_push'] == 'body' and age_grid is not None and 'ridge_push' in forces:
+        body = ridge_push_body_torques(age_grid, plate_id_raster, forces['ridge_push'],
+                                       force_params.get('ridge_push_age_cutoff_myr', 80.0),
+                                       force_params.get('ridge_push_smooth_deg', 0.0))
+        for pid, t in body.items():
+            if pid in torque_dict:
+                torque_dict[pid] = torque_dict[pid] + pygplates.Vector3D(*t)
+        if diagnostics is not None:
+            # the boundary-mode ridge push this configuration would have had, for comparison
+            equiv = {}
+            if len(seg_pid):
+                for k in np.where(divergent)[0]:
+                    pk = int(seg_pid[k])
+                    equiv[pk] = equiv.get(pk, np.zeros(3)) - np.array(seg_torque[k].to_xyz()) * forces['ridge_push']
+            diagnostics['ridge_push'] = pd.DataFrame(
+                [(pid, *body.get(pid, np.zeros(3)), *equiv.get(pid, np.zeros(3)))
+                 for pid in sorted(set(body) | set(equiv))],
+                columns=['plate_id', 'body_x', 'body_y', 'body_z', 'boundary_x', 'boundary_y', 'boundary_z'])
 
     new_stage_pole_dict = {pid: pdriver.torque_to_stage_rotation(torque, delta_time)
                            for pid, torque in torque_dict.items()}
@@ -1497,7 +1602,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
         speed_state = {}
     force_modes_used = {'slab_pull':    params.get('slab_pull_mode', 'hard'),
                         'slab_suction': params.get('slab_suction_mode', 'ratio'),
-                        'polarity':     params.get('polarity_mode', 'id')}
+                        'polarity':     params.get('polarity_mode', 'id'),
+                        'ridge_push':   params.get('ridge_push_mode', 'boundary')}
     needs = force_fields_needed(params)
     force_fields = force_fields or {}
     absorbed_into = {}      # {absorbed pid: host pid} this step, to keep tracers on their plate
@@ -1647,7 +1753,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
         slab_tracers = slab_tracers[slab_tracers['active'].astype(bool)]
     force_params = {k: params[k] for k in ('slab_ref_depth_km', 'slab_age_saturation_myr',
                                            'pull_ramp_km_per_myr', 'slab_search_radius_deg',
-                                           'slab_line_tol_deg') if k in params}
+                                           'slab_line_tol_deg', 'ridge_push_age_cutoff_myr',
+                                           'ridge_push_smooth_deg') if k in params}
 
     _stage_out = polygons_to_stage_poles(
                                               new_plate_polygons, plate_id_raster, forces,

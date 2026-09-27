@@ -498,6 +498,8 @@ def _enqueue_outputs(i, force_save=False):
         _output_queue.put(('save', _save_payload))
         if force_diag.get('segments') is not None:
             force_diag['segments'].to_csv(_out('trench_forces_{:04d}.csv'.format(i)), index=False)
+        if force_diag.get('ridge_push') is not None:
+            force_diag['ridge_push'].to_csv(_out('ridge_push_torques_{:04d}.csv'.format(i)), index=False)
         return True
     return False
 

@@ -40,7 +40,7 @@ PRESETS = {
 # Modes that exist in the code so far; the rest arrive stage by stage (see the plan).
 IMPLEMENTED = {
     'drag':                {'none', 'area', 'area_edge'},
-    'ridge_push':          {'boundary'},
+    'ridge_push':          {'boundary', 'body'},
     'slab_pull':           {'hard', 'ramp', 'slab_length'},
     'slab_suction':        {'ratio', 'depth_split'},
     'polarity':            {'id', 'age'},

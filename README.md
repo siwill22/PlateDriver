@@ -148,6 +148,15 @@ Implemented so far:
     kept, except that it flips if continent reaches the trench on the downgoing side
     against an oceanic overriding side.
 
+- **`ridge_push`:**
+  - `boundary`: `forces.ridge_push` on every divergent segment, as in the original model.
+  - `body` (`physical`): a body force over young seafloor, (weight / cutoff) ×
+    ∇min(age, `ridge_push_age_cutoff_myr`), pointing toward older seafloor. The gradient
+    is taken within each plate. One full flank from the ridge out to the cutoff gives the
+    same force per unit ridge length as `boundary`. A plate whose seafloor never reaches the
+    cutoff gets less push. Each saved step writes `ridge_push_torques_NNNN.csv` with the
+    body and boundary-mode torque of every plate.
+
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
 tracer on its own plate, moved one step ahead. With `slab_length` or `depth_split`,
