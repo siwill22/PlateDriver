@@ -13,3 +13,6 @@ gmt.history
 /output
 .vscode/settings.json
 /output_sav
+
+# Gate figures for review (kept locally, not versioned)
+show-me/
