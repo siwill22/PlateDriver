@@ -67,12 +67,48 @@ class SphereTree:
         lat, lon = latlon_rad[:, 0], latlon_rad[:, 1]
         return np.column_stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
 
-    def query(self, latlon_rad, k=1):
-        """Return (great-circle distances in radians (n, k), indices (n, k))."""
+    def query(self, latlon_rad, k=1, seed=0):
+        """Return (great-circle distances in radians (n, k), indices (n, k)).
+
+        With k = 1, exact ties (several points equally near, common on a regular grid)
+        are resolved by a seeded hash of the query position and the candidate's index,
+        so the answer is unbiased and does not depend on the search implementation or
+        on the order of the queries.  The hash does not change between time steps, so
+        a tied cell resolves the same way every step.
+        """
         latlon_rad = np.asarray(latlon_rad, dtype=float).reshape(-1, 2)
+        if k != 1:
+            chord, idx = self._tree.query(self._xyz(latlon_rad), k=k)
+            chord, idx = np.asarray(chord).reshape(len(latlon_rad), k), np.asarray(idx).reshape(len(latlon_rad), k)
+            return 2.0 * np.arcsin(np.clip(chord / 2.0, 0.0, 1.0)), idx
+        dist, idx, tied = self.query_candidates(latlon_rad)
+        choice = np.argmin(np.where(tied, tie_hash(latlon_rad, idx, seed), np.iinfo(np.uint64).max), axis=1)
+        rows = np.arange(len(idx))
+        return dist[:, None], idx[rows, choice][:, None]
+
+    def query_candidates(self, latlon_rad, k=4, tol_rad=1e-12):
+        """Nearest distance (n,), the k nearest indices (n, k) and a mask (n, k) of
+        those whose distance equals the nearest (within tol_rad)."""
+        latlon_rad = np.asarray(latlon_rad, dtype=float).reshape(-1, 2)
+        k = min(k, self._tree.n)
         chord, idx = self._tree.query(self._xyz(latlon_rad), k=k)
         chord, idx = np.asarray(chord).reshape(len(latlon_rad), k), np.asarray(idx).reshape(len(latlon_rad), k)
-        return 2.0 * np.arcsin(np.clip(chord / 2.0, 0.0, 1.0)), idx
+        dist = 2.0 * np.arcsin(np.clip(chord / 2.0, 0.0, 1.0))
+        return dist[:, 0], idx, dist <= dist[:, :1] + tol_rad
+
+
+def tie_hash(latlon_rad, idx, seed=0):
+    """Deterministic pseudo-random uint64 per (query position, candidate index) pair
+    (splitmix64 mixing), used to choose between equally near candidates."""
+    q = np.round(np.degrees(np.asarray(latlon_rad)) * 1e5).astype(np.int64)
+    key = (q[:, 0].astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15)
+           ^ q[:, 1].astype(np.uint64) * np.uint64(0xC2B2AE3D27D4EB4F)
+           ^ np.uint64(seed) * np.uint64(0x165667B19E3779F9))
+    z = key[:, None] ^ (np.asarray(idx).astype(np.uint64) * np.uint64(0xD6E8FEB86659FD93))
+    with np.errstate(over='ignore'):
+        z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+        z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return z ^ (z >> np.uint64(31))
 
 
 def rotation_axis_angle(rotation):
@@ -432,13 +468,15 @@ def resolve_overlaps(gdf, priority_col):
     return result
 
 
-def update_plate_id_raster(clipped_polygons, raster_spacing=1):
+def update_plate_id_raster(clipped_polygons, raster_spacing=1, tie_break='hash',
+                           previous_plate_id=None, tie_break_seed=0):
     valid = clipped_polygons.dropna(subset=['geometry'])
     valid = valid[~valid.geometry.is_empty]
     plate_id_raster = rasterize_polygons(valid, zval_field='PLATEID1', sampling=raster_spacing)
     plate_id_raster = plate_id_raster.where(plate_id_raster>0, np.nan)
 
-    plate_id_raster = fill_nan_spherical(plate_id_raster)
+    plate_id_raster = fill_nan_spherical(plate_id_raster, tie_break=tie_break,
+                                         previous=previous_plate_id, seed=tie_break_seed)
 
     return plate_id_raster
 
@@ -1256,7 +1294,7 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
 def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None,
                      polarity_dict=None, merge_pairs=None, fragmentation_cooldown_pids=None,
                      collision_state=None, craton_id_remap=None, next_plate_id=None,
-                     speed_state=None):
+                     speed_state=None, previous_plate_id=None):
     """Rebuild the plate configuration from moved plate polygons and compute the next
     stage rotations.
 
@@ -1305,7 +1343,10 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     clipped_polygons = clipped_polygons.explode(index_parts=False).reset_index(drop=True)
     _ct['resolve_overlaps'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    plate_id_raster = update_plate_id_raster(clipped_polygons, raster_spacing=raster_spacing)
+    plate_id_raster = update_plate_id_raster(clipped_polygons, raster_spacing=raster_spacing,
+                                             tie_break=params.get('tie_break', 'hash'),
+                                             previous_plate_id=previous_plate_id,
+                                             tie_break_seed=params.get('tie_break_seed', 0))
     if next_plate_id is None:
         next_plate_id = int(np.nanmax(plate_id_raster.values)) + 1
     _ct['plate_id_raster'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
@@ -2512,11 +2553,17 @@ def topo_polygons_to_boundaries(plate_polygons, raster_spacing=0.25, max_edge_de
     return gpd.GeoDataFrame(boundaries, geometry='geometry').set_crs(epsg=4326)
 
 
-def fill_nan_spherical(da):
+def fill_nan_spherical(da, tie_break='hash', previous=None, seed=0):
     """Fill NaN cells with the value of the nearest valid cell (great-circle distance).
 
     Only valid cells that border a NaN cell can be the nearest valid cell, so the
     search tree is built from those alone (a few thousand instead of ~10^6 cells).
+
+    When several valid cells are equally near (common on a regular grid):
+      tie_break='hash'            seeded coin flip per cell (SphereTree.query)
+      tie_break='previous_owner'  the value the cell had in `previous` (an array or
+                                  DataArray on the same grid) wins if it is one of the
+                                  tied values; otherwise the coin flip decides
     """
     vals = da.values
     invalid = np.isnan(vals)
@@ -2528,10 +2575,19 @@ def fill_nan_spherical(da):
 
     # BallTree with haversine needs (lat, lon) in radians
     tree = SphereTree(np.deg2rad(np.column_stack([lat[candidates], lon[candidates]])))
-    _, idx = tree.query(np.deg2rad(np.column_stack([lat[invalid], lon[invalid]])), k=1)
+    q = np.deg2rad(np.column_stack([lat[invalid], lon[invalid]]))
+    _, idx = tree.query(q, k=1, seed=seed)
+    chosen = vals[candidates][idx[:, 0]]
+
+    if tie_break == 'previous_owner' and previous is not None:
+        prev = np.asarray(getattr(previous, 'values', previous))[invalid]
+        _, cand, tied = tree.query_candidates(q)
+        cand_vals = vals[candidates][cand]
+        keep_prev = np.isfinite(prev) & (tied & (cand_vals == prev[:, None])).any(axis=1)
+        chosen = np.where(keep_prev, prev, chosen)
 
     filled = vals.copy()
-    filled[invalid] = vals[candidates][idx[:, 0]]
+    filled[invalid] = chosen
 
     return da.copy(data=filled)
 

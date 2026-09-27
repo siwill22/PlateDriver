@@ -38,6 +38,8 @@ params:
   boundary_search_radius_deg:  2        # plate ID neighbour search radius at boundaries
   div_threshold_subduction:   -0.0001   # km/Myr (= mm/yr) relative normal velocity below this → subduction
   div_threshold_ridge:         0.2      # km/Myr (= mm/yr) relative normal velocity above this → ridge
+  tie_break:                   hash     # equally near grid cells when filling plate gaps: 'hash' (seeded coin flip per cell, same every step) or 'previous_owner' (the cell keeps last step's plate if it is one of the tied ones)
+  tie_break_seed:              0        # seed for the tie coin flip (independent of random_seed)
 
   # --- Output ---
   csv_save_interval:           5        # save outputs every N timesteps

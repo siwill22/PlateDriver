@@ -307,6 +307,19 @@ python analyse_boundaries.py --output_dir ./output [--delta_time 1.0]
 
 Output: `boundary_stats.csv` with columns `timestep` (plus `time_myr` when `--delta_time` is given), `ridge_length_km`, `subduction_length_km`, `conservative_length_km`, `ridge_flux_km2_per_myr`, `subduction_flux_km2_per_myr`. Arc lengths computed using pygplates spherical geometry; flux = length × |divergence| (km × km/Myr).
 
+### Ties on the grid (`tie_break`)
+
+On a regular grid, a cell is often exactly as near to two cells of different plates, for
+example when a gap between plate polygons is filled. `tie_break: hash` (the default) settles
+each tie with a coin flip seeded by `tie_break_seed` and the cell's position. It is unbiased
+and the same every step, and it does not depend on how the nearest cells are found.
+`tie_break: previous_owner` gives the cell to the plate that held it in the previous step if
+that plate is one of the tied ones. This roughly halves A → B → A jitter of boundary cells
+without slowing boundary migration (see `step_stats.csv`: `owner_change_area_frac`,
+`owner_flicker_area_frac`). The model is sensitive to such details: two runs that differ
+only in how ties are broken diverge visibly after a few tens of Myr, while their statistics
+stay alike.
+
 ### `diagnose_run.py`
 
 Diagnostic figures (PyGMT) for one or more runs, overlaid for comparison:

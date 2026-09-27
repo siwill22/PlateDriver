@@ -457,6 +457,7 @@ def _enqueue_outputs(i, force_save=False):
 
 
 _step_rows = []
+_plate_id_history = []   # plate-ID arrays of the last two steps, for boundary migration / jitter
 
 
 def _record_step_stats(i, step_times=None, previous_poles=None):
@@ -467,6 +468,17 @@ def _record_step_stats(i, step_times=None, previous_poles=None):
     step_row['n_tracers'] = int(tracers.active.astype(bool).sum())
     step_row['n_slab_tracers'] = (int(slab_tracers['active'].astype(bool).sum())
                                   if _slab_enabled else 0)
+    # Boundary migration and jitter on the fixed grid: cells whose plate changed since the
+    # last step, and cells that went A -> B -> A over the last three steps
+    pid_now = rasters['plate_id'].values
+    w = np.cos(np.radians(rasters['plate_id'].lat.values))[:, None] * np.ones_like(pid_now)
+    if _plate_id_history:
+        step_row['owner_change_area_frac'] = float(w[pid_now != _plate_id_history[-1]].sum() / w.sum())
+    if len(_plate_id_history) == 2:
+        flick = (pid_now == _plate_id_history[0]) & (pid_now != _plate_id_history[1])
+        step_row['owner_flicker_area_frac'] = float(w[flick].sum() / w.sum())
+    _plate_id_history.append(pid_now.copy())
+    del _plate_id_history[:-2]
     last = speed_state.get('last', {})
     step_row['speed_scale_k'] = last.get('k_used', np.nan)
     step_row['rms_speed_unscaled_km_per_myr'] = last.get('rms_unscaled', np.nan)
@@ -540,7 +552,8 @@ try:
                                                collision_state=collision_state,
                                                craton_id_remap=_craton_plate_remap,
                                                next_plate_id=next_plate_id,
-                                               speed_state=speed_state)
+                                               speed_state=speed_state,
+                                               previous_plate_id=previous_plate_id)
         _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         # New plates (fragments) inherit their parent's rotation history, so the
