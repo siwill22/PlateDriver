@@ -173,6 +173,16 @@ Each stage ends at a review gate, and nothing moves to the next stage without ap
 - `force-model-v1` branches from it, and this work goes there.
 - Nothing is merged to `master` without approval.
 
+## Known limitations (accepted for v1)
+
+- **Ridges are not split into spreading segments and transforms.** Boundaries are continuous
+  lines whose obliquity varies continuously: in the S0 run the length-weighted mean is about 40°,
+  and about 40% of ridge and trench length is more oblique than 45°. The discrete
+  ridge / trench / other classification therefore puts almost everything into ridge or trench.
+  This keeps runs fast at low resolution. Splitting ridges into orthogonal spreading segments
+  offset by transforms can be added later as a post-processing, appearance-only step on the
+  saved boundaries.
+
 ## Known input issue
 
 `config.yaml` pairs `atlantis3_rotations.rot`, which defines plates 101–901, with the
