@@ -96,15 +96,16 @@ force_modes: {}          # per-component overrides, e.g. {collision: coupling}
 ```
 
 `force_model` picks a preset for every component of the force model; an entry under
-`force_modes` overrides one component. `simple` is the original boundary-force model
-(and the fastest). `physical` is the v1 force model (basal drag, age-dependent slab
-pull and ridge push, and so on), which is being built in stages; see
-`force_model_v1_plan.md`. Until it is complete, choosing a mode that does not exist
-yet stops the run with a message. The resolved modes are printed at the start of the
-run and written to `run_info.yaml`. The collision mode (`resistance` or `coupling`)
-is `force_modes.collision`; the older `params.collision_mode` is still read.
+`force_modes` overrides one component. `simple` is the original boundary-force model:
+the fastest, and useful for teaching. `physical` is the v1 force model (basal and edge
+drag, slab pull from slab length and seafloor age, suction from the deep slab, ridge
+push as a body force over young seafloor, polarity by age, slab breakoff after
+collision, calibrated speed); see `force_model_v1_plan.md` for the design. The resolved
+modes are printed at the start of the run and written to `run_info.yaml`. The older
+`params.collision_mode` is still read as `force_modes.collision`.
 
-Implemented so far:
+The components and their modes (`physical` marks the preset's choice; the first mode
+listed is `simple`'s):
 
 - **`drag`:**
   - `none`: torque = angular velocity, as in the original model.
@@ -156,6 +157,22 @@ Implemented so far:
     same force per unit ridge length as `boundary`. A plate whose seafloor never reaches the
     cutoff gets less push. Each saved step writes `ridge_push_torques_NNNN.csv` with the
     body and boundary-mode torque of every plate.
+
+- **`collision`** (continent–continent contacts: continent of both plates within
+  `boundary_search_radius_deg` of a converging segment):
+  - `resistance`: `forces.continental_collision` pushes the plates apart, as in the
+    original model. It switches on and off with the classification, so contacts can
+    chatter: a pair flips between converging and separating every step.
+  - `coupling`: no force; the pair's velocities are blended, more as the collision ages
+    (`collision_coupling_max`, `collision_coupling_timescale`).
+  - `viscous`: a drag on convergence across the contact, `collision_drag_factor` × the
+    edge drag. It is solved together with the basal and edge drag, so it can slow a pair
+    to a stop but never reverse it, and sliding along the contact is free. It needs
+    `drag: area` or `area_edge`.
+  - `breakoff` (`physical`): after `breakoff_delay_myr` of collision the slab near the
+    contact detaches. It stops pulling but stays in the mantle outputs. During the
+    collision the contact behaves as `coupling` or, with `breakoff_contact: viscous`,
+    as `viscous`.
 
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor

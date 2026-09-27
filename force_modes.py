@@ -44,7 +44,7 @@ IMPLEMENTED = {
     'slab_pull':           {'hard', 'ramp', 'slab_length'},
     'slab_suction':        {'ratio', 'depth_split'},
     'polarity':            {'id', 'age'},
-    'collision':           {'resistance', 'coupling'},
+    'collision':           {'resistance', 'viscous', 'coupling', 'breakoff'},
     'speed_normalisation': {'none', 'calibrate_once', 'per_step'},
 }
 
@@ -78,6 +78,9 @@ def resolve_force_modes(cfg):
                 component, ', '.join(MODE_CHOICES[component]), mode))
         modes[component] = mode
 
+    if modes['collision'] == 'viscous' and modes['drag'] == 'none':
+        raise SystemExit('collision: viscous is a drag on colliding plates and needs '
+                         'drag: area or area_edge (it has nothing to act against with drag: none).')
     missing = ['{}: {}'.format(c, m) for c, m in modes.items() if m not in IMPLEMENTED[c]]
     if missing:
         raise SystemExit('These force modes are not implemented yet:\n  {}\n'

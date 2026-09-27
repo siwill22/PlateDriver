@@ -864,7 +864,8 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             age_grid=None,
                             slab_tracers=None,
                             force_params=None,
-                            diagnostics=None):
+                            diagnostics=None,
+                            collision_info=None):
     """Sum boundary forces around every plate and convert the net torque to a stage rotation.
 
     With return_torques=True, also returns the net torque of each plate (xyz array) and
@@ -873,7 +874,7 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
 
     For each polygon segment, the neighbouring plate is found in the plate-ID raster and
     the relative normal velocity (km/Myr, from stage_pole_dict) classifies the segment:
-      - convergent, continent-continent: collision resistance (or coupling)
+      - convergent, continent-continent: a collision (collision_mode below)
       - convergent: slab pull on the downgoing plate, slab suction on the overriding plate
       - divergent: ridge push
 
@@ -899,6 +900,18 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                     body         a body force ∝ ∇age over seafloor younger than
                                  ridge_push_age_cutoff_myr (ridge_push_body_torques; needs
                                  age_grid), in place of the boundary force
+    collision_mode (force_modes.collision):
+      resistance  forces['continental_collision'] pushes the plates apart at every
+                  converging continent–continent segment (switches on and off with the
+                  classification, so contacts can chatter)
+      coupling    no force; the pair goes into collision_pairs for velocity blending
+      breakoff    as coupling; compute_timestep also detaches the slab after
+                  breakoff_delay_myr (collision_info['points'] gives where)
+      viscous     no explicit force; every non-divergent continent–continent segment adds
+                  a contact tensor Σ ½ L g gᵀ (g = m × n, n the segment normal) for the pair
+                  to collision_info['contact_tensors'], which solve_plate_motions turns into
+                  a drag on the pair's relative convergence (implicit, so it cannot reverse
+                  the plates)
     diagnostics, if a dict, receives 'segments': a DataFrame of the subduction segments
     and their forces (only when a mode other than the simple ones is used).
     """
@@ -989,12 +1002,14 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
             has_polarity = np.array([(int(a), int(b)) in polarity_dict for a, b in zip(pair_lo, pair_hi)])
             slab_set |= valid & ~divergent & has_polarity
 
-        # Continent-continent contact: two different cratons within the search radius
+        # Continent-continent contact: two different cratons within the search radius.
+        # viscous also resists contacts that have slowed below the subduction threshold.
+        coll_set = slab_set | (valid & ~divergent) if collision_mode == 'viscous' else slab_set
         collision = np.zeros(len(seg_pid), bool)
-        if craton_raster is not None and slab_set.any():
-            c_ids = two_nearest_ids_batch(mid_lat[slab_set], mid_lon[slab_set], craton_raster,
+        if craton_raster is not None and coll_set.any():
+            c_ids = two_nearest_ids_batch(mid_lat[coll_set], mid_lon[coll_set], craton_raster,
                                           boundary_search_radius_deg, ignore_zero=True)
-            collision[slab_set] = (c_ids[:, 0] > 0) & (c_ids[:, 1] > 0)
+            collision[coll_set] = (c_ids[:, 0] > 0) & (c_ids[:, 1] > 0)
 
         # Slab forces per segment: pull on the downgoing plate, suction on the overriding
         # plate (and on the downgoing plate too with depth_split).  Both draw the plate
@@ -1045,15 +1060,30 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                 'slab_depth_km': slab_depth[s], 'seafloor_age_myr': inner_age[s],
                 'pull_weight': pull_w[s], 'suction_weight': np.where(is_down[s], slab_w[s] - pull_w[s], slab_w[s])})
 
+        if collision_info is not None and collision.any():
+            pts = collision_info.setdefault('points', {})
+            for k in np.where(collision & convergent)[0]:
+                pts.setdefault((int(pair_lo[k]), int(pair_hi[k])), []).append((mid_lon[k], mid_lat[k]))
+            if collision_mode == 'viscous':
+                tens = collision_info.setdefault('contact_tensors', {})
+                m_xyz = lonlat_to_xyz(mid_lon, mid_lat)
+                for k in np.where(collision)[0]:
+                    g = np.cross(m_xyz[k], outward[k])
+                    pair = (int(pair_lo[k]), int(pair_hi[k]))
+                    tens[pair] = tens.get(pair, np.zeros((3, 3))) + 0.5 * seg_len[k] * np.outer(g, g)
+
         # Pass 2: add up the torques plate by plate, in segment order
-        for k in np.where(slab_set | divergent)[0]:
+        for k in np.where(slab_set | divergent | collision)[0]:
             pid_current, pid_neighbor = int(seg_pid[k]), int(neighbour[k])
-            if slab_set[k]:
+            if slab_set[k] or collision[k]:
                 if collision[k]:
                     if not convergent[k]:
                         continue
                     pair = (int(pair_lo[k]), int(pair_hi[k]))
-                    if collision_mode == 'coupling':
+                    if collision_mode == 'viscous':
+                        collision_pairs.add(pair)      # for the collision's age (breakoff)
+                        continue
+                    if collision_mode in ('coupling', 'breakoff'):
                         # Contribute zero torque; record pair for post-step velocity
                         # blending.  There is no subducting slab to pull the plates.
                         collision_pairs.add(pair)
@@ -1101,7 +1131,7 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
 
 
 def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, params,
-                        drag_mode, speed_mode, speed_state, delta_time):
+                        drag_mode, speed_mode, speed_state, delta_time, contact_tensors=None):
     """Angular velocities from net torques with basal and boundary resistance, scaled to a
     target RMS plate speed.  Returns {pid: FiniteRotation over delta_time}.
 
@@ -1112,6 +1142,12 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
       area_edge  as area, plus boundary resistance: D += ℓ Σ L (𝟙 − m mᵀ) over the plate
                  boundary, ℓ = edge_drag_width_km (boundary resistance equals basal drag
                  over a strip of that width along every boundary)
+    contact_tensors {(a, b): G} (collision: viscous) add a drag on the relative motion of
+      colliding plates across their contact: dissipation ½ c (ω_b − ω_a)ᵀ G (ω_b − ω_a),
+      c = collision_drag_factor × edge_drag_width.  G = Σ ½ L g gᵀ with g = m × n, so only
+      the convergence (normal) component is resisted; strike-slip along the contact is
+      free.  The plates are then solved together (one 3N × 3N system), so the drag acts on
+      this step's velocities and can slow a pair to a stop but never reverse it.
     speed_mode
       none            ω scaled by speed_scale (default 1)
       calibrate_once  scale k set at the first call so the area-weighted RMS speed equals
@@ -1145,15 +1181,39 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
         _, D, _ = plate_area_tensors(plate_id_raster, weight=weight, grid_deg=grid_deg)
         D_of = dict(zip(pids.tolist(), D))
         width = params.get('edge_drag_width_km', 3000.0) / EARTH_RADIUS_KM
-        omega = {}
-        for pid, t in torques.items():
+        blocks = {}
+        for pid in torques:
             Dp = D_of.get(pid, np.zeros((3, 3)))
             if drag_mode == 'area_edge':
                 Dp = Dp + width * edge_tensors.get(pid, np.zeros((3, 3)))
-            if not np.any(Dp):
-                omega[pid] = np.zeros(3)
-                continue
-            omega[pid] = np.linalg.lstsq(Dp, t, rcond=1e-12)[0]
+            blocks[pid] = Dp
+        contacts = {pair: G for pair, G in (contact_tensors or {}).items()
+                    if pair[0] in blocks and pair[1] in blocks}
+        omega = {}
+        if contacts:
+            # colliding plates are coupled: solve all plates together
+            order = list(torques)
+            where = {pid: 3 * n for n, pid in enumerate(order)}
+            M = np.zeros((3 * len(order), 3 * len(order)))
+            rhs = np.concatenate([torques[pid] for pid in order])
+            for pid in order:
+                M[where[pid]:where[pid] + 3, where[pid]:where[pid] + 3] += blocks[pid]
+            c = params.get('collision_drag_factor', 10.0) * width
+            for (a, b), G in contacts.items():
+                ia, ib = where[a], where[b]
+                M[ia:ia + 3, ia:ia + 3] += c * G
+                M[ib:ib + 3, ib:ib + 3] += c * G
+                M[ia:ia + 3, ib:ib + 3] -= c * G
+                M[ib:ib + 3, ia:ia + 3] -= c * G
+            w_all = np.linalg.lstsq(M, rhs, rcond=1e-12)[0]
+            omega = {pid: w_all[where[pid]:where[pid] + 3] for pid in order}
+        else:
+            for pid, t in torques.items():
+                Dp = blocks[pid]
+                if not np.any(Dp):
+                    omega[pid] = np.zeros(3)
+                    continue
+                omega[pid] = np.linalg.lstsq(Dp, t, rcond=1e-12)[0]
 
     total_area = sum(area_of.get(pid, 0.0) for pid in omega)
     msq = sum(w @ J_of[pid] @ w for pid, w in omega.items() if pid in J_of)
@@ -1182,6 +1242,39 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
 
     return {pid: pdriver.torque_to_stage_rotation(pygplates.Vector3D(*(k_used * w)), delta_time)
             for pid, w in omega.items()}
+
+
+def detach_colliding_slabs(slab_tracers, collision_state, collision_points, delta_time,
+                           delay_myr=10.0, radius_deg=5.0):
+    """collision: breakoff.  For every plate pair that has been colliding for at least
+    delay_myr, mark the slab tracers within radius_deg (great-circle) of its collision
+    segments as detached (column 'attached' = False, in place).  A detached slab no longer
+    pulls (slab_depth_at_segments only sees attached tracers) but stays in the mantle
+    outputs.  Slab seeded later, if subduction starts again, is attached."""
+    if slab_tracers is None or not len(slab_tracers):
+        return
+    if 'attached' not in slab_tracers.columns:
+        slab_tracers['attached'] = True
+    attached = slab_tracers['attached'].fillna(True).astype(bool).values
+    from scipy.spatial import cKDTree
+    s_xyz = None
+    for pair, steps in collision_state.items():
+        if steps * delta_time < delay_myr or pair not in collision_points or not attached.any():
+            continue
+        if s_xyz is None:
+            s_xyz = lonlat_to_xyz(slab_tracers['lon'].values.astype(float), slab_tracers['lat'].values.astype(float))
+            tree = cKDTree(s_xyz)
+        lon, lat = np.array(collision_points[pair]).T
+        hits = tree.query_ball_point(lonlat_to_xyz(lon, lat), 2.0 * np.sin(np.radians(radius_deg) / 2.0))
+        idx = np.unique(np.concatenate([np.asarray(h, dtype=int) for h in hits])) if len(hits) else np.array([], int)
+        idx = idx[attached[idx]]
+        if len(idx):
+            attached[idx] = False
+            if steps * delta_time < delay_myr + delta_time:
+                # the break itself; later steps only detach slab still seeded at the contact
+                print('  [breakoff] pair ({},{}) colliding for {:.0f} Myr: slab detached ({} slab tracers)'.format(
+                    pair[0], pair[1], steps * delta_time, len(idx)))
+    slab_tracers['attached'] = attached
 
 
 def apply_collision_coupling(stage_pole_dict, collision_pairs,
@@ -1568,7 +1661,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     force_fields feeds the force modes that need them (see force_fields_needed):
       'tracers'       (lon, lat, age, plate_id) seafloor tracers at this step's positions
                       (plate_id: the plate each was on before the move, or None)
-      'slab_tracers'  the slab tracer DataFrame
+      'slab_tracers'  the slab tracer DataFrame (collision: breakoff marks the slab of a
+                      long-lived collision detached, in place: column 'attached')
     The seafloor-age grid is built from the tracers only if a mode reads it.
     force_diag, if a dict, receives the per-segment slab-force table ('segments').
 
@@ -1592,6 +1686,11 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     div_thresh_ridge          = params.get('div_threshold_ridge',        1.0)
     boundary_search_radius    = params.get('boundary_search_radius_deg', 2)
     collision_mode            = params.get('collision_mode',             'resistance')
+    # breakoff = slab detachment after breakoff_delay_myr, on top of a contact model:
+    # velocity coupling (breakoff_contact: coupling) or the viscous contact drag
+    breakoff = collision_mode == 'breakoff'
+    if breakoff:
+        collision_mode = 'viscous' if params.get('breakoff_contact', 'coupling') == 'viscous' else 'coupling'
     min_fragment_area         = params.get('min_peninsula_area_deg2',    5.0)
     drag_mode                 = params.get('drag_mode',                  'none')
     speed_mode                = params.get('speed_normalisation',        'none')
@@ -1750,12 +1849,16 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     slab_tracers = None
     if needs['slab'] and force_fields.get('slab_tracers') is not None:
         slab_tracers = force_fields['slab_tracers']
-        slab_tracers = slab_tracers[slab_tracers['active'].astype(bool)]
+        live = slab_tracers['active'].astype(bool)
+        if 'attached' in slab_tracers.columns:
+            live &= slab_tracers['attached'].fillna(True).astype(bool)
+        slab_tracers = slab_tracers[live]      # detached slabs (breakoff) no longer pull
     force_params = {k: params[k] for k in ('slab_ref_depth_km', 'slab_age_saturation_myr',
                                            'pull_ramp_km_per_myr', 'slab_search_radius_deg',
                                            'slab_line_tol_deg', 'ridge_push_age_cutoff_myr',
                                            'ridge_push_smooth_deg') if k in params}
 
+    collision_info = {}
     _stage_out = polygons_to_stage_poles(
                                               new_plate_polygons, plate_id_raster, forces,
                                               craton_raster,
@@ -1771,18 +1874,29 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                               age_grid=age_grid,
                                               slab_tracers=slab_tracers,
                                               force_params=force_params,
-                                              diagnostics=force_diag)
+                                              diagnostics=force_diag,
+                                              collision_info=collision_info)
     if solve_motions:
         _, _collision_pairs, _torques, _edge_tensors = _stage_out
         new_stage_pole_dict = solve_plate_motions(_torques, _edge_tensors, plate_id_raster,
                                                   craton_raster, params, drag_mode, speed_mode,
-                                                  speed_state, delta_time)
+                                                  speed_state, delta_time,
+                                                  contact_tensors=collision_info.get('contact_tensors'))
     else:
         new_stage_pole_dict, _collision_pairs = _stage_out
 
-    if collision_mode == 'coupling' and collision_state is not None:
-        apply_collision_coupling(new_stage_pole_dict, _collision_pairs,
-                                 collision_state, plate_areas(plate_id_raster), params)
+    if collision_state is not None and (collision_mode == 'coupling' or breakoff):
+        # coupling blends the pair's velocities; with breakoff on the viscous contact drag
+        # only the collision ages are kept (they time the breakoff)
+        apply_collision_coupling(new_stage_pole_dict, _collision_pairs, collision_state,
+                                 plate_areas(plate_id_raster),
+                                 params if collision_mode == 'coupling' else {**params, 'collision_coupling_max': 0.0})
+    if (breakoff and collision_state
+            and force_fields.get('slab_tracers') is not None):
+        detach_colliding_slabs(force_fields['slab_tracers'], collision_state,
+                               collision_info.get('points', {}), delta_time,
+                               params.get('breakoff_delay_myr', 10.0),
+                               params.get('slab_search_radius_deg', 5.0))
 
     _ct['stage_poles'] = time.perf_counter() - _t0
 
@@ -2125,7 +2239,8 @@ def update_slab_tracers(slab_tracers, boundaries_gdf, delta_time,
         new = pd.DataFrame({
             'lon': s_lon, 'lat': s_lat, 'depth_km': 0.0, 'age': 0.0, 'active': True,
             'sink_rate_km_per_myr': np.minimum(convergence * sink_rate_factor, max_sink_rate_km_per_myr),
-            'weight': delta_time * np.minimum(1.0, convergence / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR)})
+            'weight': delta_time * np.minimum(1.0, convergence / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR),
+            'attached': True})
         slab_tracers = new if len(slab_tracers) == 0 else pd.concat([slab_tracers, new], ignore_index=True)
     return slab_tracers
 
@@ -2147,7 +2262,7 @@ def seed_initial_slabs(boundaries_gdf, depth_km, delta_time,
     thousands of Myr of history.  Columns are vertical (lon/lat fixed, mantle frame).
     Returns a DataFrame with the update_slab_tracers columns (empty if no trenches).
     """
-    columns = ['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight']
+    columns = ['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight', 'attached']
     if (depth_km <= 0 or boundaries_gdf is None or len(boundaries_gdf) == 0
             or 'divergence' not in boundaries_gdf.columns):
         return pd.DataFrame(columns=columns)
@@ -2171,7 +2286,8 @@ def seed_initial_slabs(boundaries_gdf, depth_km, delta_time,
         'lon': s_lon[point], 'lat': s_lat[point],
         'depth_km': np.minimum(depth, depth_km), 'age': age, 'active': True,
         'sink_rate_km_per_myr': r,
-        'weight': delta_time * np.minimum(1.0, convergence[point] / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR)})
+        'weight': delta_time * np.minimum(1.0, convergence[point] / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR),
+        'attached': True})
 
 
 def slab_depth_at_segments(mid_lon, mid_lat, side_xyz, slab_lon, slab_lat, slab_depth,

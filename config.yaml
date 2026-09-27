@@ -19,11 +19,11 @@ run:
 # (the v1 force model, being built stage by stage; see force_model_v1_plan.md).
 # Any component listed under force_modes overrides the preset, e.g.
 #   force_modes:
-#     collision: coupling      # resistance | coupling
 #     slab_pull: slab_length   # hard | ramp | slab_length
 #     slab_suction: depth_split   # ratio | depth_split
 #     polarity: age            # id | age
 #     ridge_push: body         # boundary | body
+#     collision: breakoff      # resistance | viscous | coupling | breakoff
 force_model: simple
 force_modes: {}
 
@@ -124,8 +124,11 @@ params:
 
   # --- Continental collision ---
   # (collision_mode now lives under force_modes.collision; params.collision_mode is still read)
-  collision_coupling_max:        0.5         # [coupling mode] max per-step blend fraction (0–1)
-  collision_coupling_timescale:  30          # [coupling mode] timesteps to ramp from zero to max
+  collision_coupling_max:        0.5         # [coupling, breakoff] max per-step blend fraction (0–1)
+  collision_coupling_timescale:  30          # [coupling, breakoff] timesteps to ramp from zero to max
+  collision_drag_factor:         10          # [viscous] drag on convergence across a continent-continent contact, × the edge drag
+  breakoff_delay_myr:            10          # [breakoff] the slab of a collision detaches (stops pulling) after this long
+  breakoff_contact:              coupling    # [breakoff] contact model during the collision: coupling (velocity blending) | viscous (contact drag, scales with contact length)
 
   # --- Plate lifecycle (fragmentation & merging) ---
   fragmentation_enabled:       true    # split geometrically implausible plates at their neck

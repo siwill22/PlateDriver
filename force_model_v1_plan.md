@@ -186,6 +186,23 @@ Each stage ends at a review gate, and nothing moves to the next stage without ap
 - `force-model-v1` branches from it, and this work goes there.
 - Nothing is merged to `master` without approval.
 
+## Found in S5
+
+- **`viscous` is implicit** (user decision): the contact drag enters the same solve as basal
+  and edge drag, as a coupling between the two plates on their relative convergence. It
+  cannot overshoot, and sliding along the contact stays free. The strength is
+  `collision_drag_factor: 10` × the edge drag. The plan's explicit push-back was dropped,
+  because it would chatter like `resistance`.
+- **`breakoff` on coupling slows the world down.** Velocity coupling ignores contact
+  length, so a microcontinent on the largest ocean plate welded it to the supercontinent:
+  RMS fell from 50 to 24 km/Myr over 200 Myr. `breakoff_contact: viscous` (drag ∝ contact
+  length) holds RMS at about 39. Default pending the user's decision.
+- **The supercontinent never breaks up** in 200 Myr of `physical`: nothing in v1 rifts a
+  continent.
+- **Cost grows late in physical runs** (2.75 s per step over the last 50 of 200, against
+  1.56 s for simple). Seafloor tracers (151k) and slab tracers (127k) accumulate. S6 targets:
+  thin the tracers, and reduce the slab-depth query to one point per slab column.
+
 ## Found in S4
 
 - **Collision resistance chatters.** `collision: resistance` switches a push-back of
