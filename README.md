@@ -187,15 +187,17 @@ trench segment.
 
 ### Forces
 
-Dimensionless scale factors applied to the torque from each boundary type.
+Dimensionless weights of the driving forces, per unit boundary length. With
+`speed_normalisation: calibrate_once` (physical) only their ratios matter; the scale is
+set at step 0 to `target_rms_speed`.
 
 ```yaml
 forces:
-  slab_pull:            6     # attractive force on downgoing plate at convergent boundaries
-  slab_suction:         6     # attractive force on overriding plate at convergent boundaries (slab_suction: ratio)
+  slab_pull:            6     # pull on the downgoing plate (× age and slab-length factors with slab_pull: slab_length)
+  slab_suction:         6     # suction on the overriding plate (slab_suction: ratio)
   slab_suction_deep:    3     # suction from the lower-mantle slab, on both plates (slab_suction: depth_split)
-  ridge_push:           3     # repulsive force at divergent boundaries
-  continental_collision: 18   # resistance at continent-continent boundaries
+  ridge_push:           3     # push per unit ridge length (boundary), or per full ridge flank (body)
+  continental_collision: 18   # push-back at continent-continent contacts (collision: resistance only)
 ```
 
 ### Core numerical parameters
@@ -442,17 +444,23 @@ Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_re
 [step 0]
     pdriver.get_torques_for_plate_snapshot(...)   → seed stage poles from GPlates boundary types
                                                     (only used to classify the initial boundaries)
-    compute_timestep(initial polygons, seed poles, ...) → configuration at t = 0, stage poles S0
-    generate_seafloor_age_tracers, generate_hotspot_locations; outputs for step 0
+    [if a force mode reads seafloor age or slab depth]
+        compute_timestep(..., simple modes)       → the step-0 boundaries only
+        generate_seafloor_age_tracers; seed_initial_slabs (columns to initial_slab_depth_km)
+    compute_timestep(initial polygons, seed poles, ..., force_fields) → configuration at t = 0, stage poles S0
+    [else] generate_seafloor_age_tracers
+    generate_hotspot_locations; outputs for step 0
 
 [step i ≥ 1, t = i × delta_time]
     moving_poles = stage poles from step i-1
+    [if a force mode needs them] force_fields: seafloor tracers moved one step ahead
+        (predict_tracers), slab tracers as they are
     nudge_polygons(plates, moving_poles); nudge_polygons(cratons, moving_poles + craton remap)
     cumulative_rotation_dict[pid] = moving_pole * cumulative_rotation_dict[pid]   → rotation_records(t)
 
     compute_timestep(rpolygons, forces, moving_poles, delta_time, cratons, params, polarity_dict,
                      merge_pairs, fragmentation_cooldown_pids, collision_state, craton_id_remap,
-                     next_plate_id)
+                     next_plate_id, speed_state, previous_plate_id, force_fields, force_diag)
         → new_plate_polygons (GeoDataFrame, PLATEID1 col)
         → stage_pole_dict    (Dict[int, FiniteRotation] — for the next move)
         → rasters            (xr.Dataset: plate_id, velocity_east, velocity_north, divergence, craton)
@@ -466,7 +474,8 @@ Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_re
     deactivate_subducted_tracers(tracers, boundaries_gdf, ...)        → only on the downgoing plate
     seed_ridge_tracers(boundaries_gdf, ...)                           → new crust, age 0
     [same for seamounts; then seed_hotspot_seamounts]
-    [if slab_tracers_enabled] update_slab_tracers, update_cmb_heat
+    [if slab_tracers_enabled or a slab mode] update_slab_tracers
+    [if slab_tracers_enabled] update_cmb_heat
 
     [at plot_interval / csv_save_interval steps, and always at the last step]
         plot_NNNN.png, tracers, seafloor age, boundaries, earthquakes, topography,
@@ -479,7 +488,8 @@ Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_re
 tessellate_polygons           densify polygon edges to tessellation_deg (great circles)
 plate_polygons_to_wrapped_gdf wrap at dateline, keeping interior rings (holes)
 resolve_overlaps              clip overlapping polygons by PLATEID1 priority
-update_plate_id_raster        rasterize to plate_id grid; fill NaN via BallTree haversine
+update_plate_id_raster        rasterize to plate_id grid; fill gaps with the nearest plate (SphereTree),
+                              ties by tie_break
 [apply_plate_merges]          merge_pairs from the caller (merging_enabled only)
 [craton raster]               rasterize cratons (with remap of absorbed plates), overwrite plate_id
 split_disconnected_plates     disconnected pieces of one ID → new plates (or absorbed if tiny)
@@ -492,8 +502,13 @@ compute_boundary_divergence   per-arc-segment relative normal velocity; sign fro
                               plate-ID raster on both sides of each segment
 velocity_grid                 east/north velocity at each raster cell (ω × r)
 spherical_divergence          divergence raster (1/Myr)
-polygons_to_stage_poles       integrate boundary torques → stage rotation per plate
-[apply_collision_coupling]    force_modes.collision: coupling only
+[physics_grid_age]            seafloor age on the physics grid (modes that read age)
+polygons_to_stage_poles       boundary and body forces → torque per plate; polarity decisions;
+                              collision contacts
+[solve_plate_motions]         ω from torque with basal, edge and contact drag, speed scale
+                              (any drag or speed mode; simple: ω = torque)
+[apply_collision_coupling]    collision: coupling (and breakoff on coupling)
+[detach_colliding_slabs]      collision: breakoff
 ```
 
 ### Key data structures
@@ -502,14 +517,14 @@ polygons_to_stage_poles       integrate boundary torques → stage rotation per 
 Maps plate ID → stage rotation for one `delta_time` step. The rotation angle is the net torque magnitude × `delta_time`, so the torque acts as an angular rate and plate speeds do not depend on the step size.
 
 **`polarity_dict`**: `Dict[Tuple[int,int], int]`  
-Maps `(min_pid, max_pid)` → downgoing plate ID at each convergent boundary pair. Uses craton-area heuristic: plate with larger craton pixel count is overriding.
+Maps `(min_pid, max_pid)` → downgoing plate ID, set when the pair first converges (see *Subduction polarity determination*).
 
 **`craton_counts`**: `Dict[int, int]`  
 Maps plate ID → craton raster pixel count. Used by `resolve_downgoing_plate`.
 
 **`tracers`** / **`seamounts`**: `GeoDataFrame` with columns `geometry` (Point), `active` (bool), `age` (float, Myr). Always use `.active.astype(bool)` when masking.
 
-**`slab_tracers`**: `DataFrame` with columns `lon`, `lat`, `depth_km`, `age` (Myr since subduction), `active` (bool), `sink_rate_km_per_myr`, `weight`.
+**`slab_tracers`**: `DataFrame` with columns `lon`, `lat`, `depth_km`, `age` (Myr since subduction), `active` (bool), `sink_rate_km_per_myr`, `weight`, and `attached` (bool; `collision: breakoff` sets it False for a detached slab, which stops pulling).
 
 **`cmb_heat`**: `ndarray` (nlat × nlon) of heat accumulation units. Built up over time by `update_cmb_heat`; injected into the deep mantle by `generate_mantle_temp_field`.
 
@@ -527,8 +542,8 @@ Each boundary segment is classified independently. `compute_boundary_divergence`
 4. The relative velocity is projected onto the arc normal to give the divergence value
 
 In `polygons_to_stage_poles` the same relative velocity classifies each polygon segment:
-- **Convergent:** slab pull is applied if the plate is the downgoing plate and slab suction if it is the overriding plate (polarity from `resolve_downgoing_plate`). Continent–continent segments get collision resistance instead.
-- **Divergent:** ridge push.
+- **Convergent** (and, with `slab_pull: slab_length`, any non-divergent segment of a pair that has subducted): slab pull on the downgoing plate and slab suction on the overriding plate, weighted by the `slab_pull` and `slab_suction` modes. Continent–continent segments are collisions instead (`collision` mode).
+- **Divergent:** ridge push (`ridge_push: boundary`); with `ridge_push: body` the push is a body force over young seafloor instead.
 
 Outward normals are derived per ring from its orientation, so clockwise and anticlockwise polygons and interior rings all get the correct sign.
 
@@ -596,3 +611,8 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
 - **Overlap priority**: where moved plates overlap, the lower PLATEID wins (`resolve_overlaps`). A physically based rule, for example letting the overriding plate win at trenches, is not implemented.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.
 - **Terrain noise is fixed to the grid**: continents move over a stationary noise pattern rather than carrying their texture with them.
+- **No continental rifting** (physical): nothing in the v1 force model breaks a continent, so a supercontinent stays together; in 200-Myr atlantis66 runs the continents barely rearrange and RMS speed drifts down from 50 to about 35 km/Myr.
+- **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is a v2 item.
+- **Ridges sit close to trenches** in places (a thin strip of young plate made and consumed side by side), in both presets.
+- **Ridges are not split into spreading segments and transforms**; boundaries are continuous lines of varying obliquity. A post-processing step could add this for appearance.
+- **Seafloor tracers accumulate** where plates are slow (150k after 200 Myr in physical, against 53k in simple).

@@ -7,8 +7,8 @@ question number is given in brackets.
 
 Plausible synthetic worlds first; speed matters more than strict realism (Q1). Forces
 remain dimensionless, tunable weights, but take the physically correct *form*.
-Every change is a mode flag. A `simple` preset reproduces today's model exactly: it
-is the fastest option and useful for teaching.
+Every change is a mode flag. A `simple` preset reproduces the original model exactly: it
+is the fastest option and useful for teaching. `physical` is the default (since S6).
 
 ## Decisions
 
@@ -34,7 +34,7 @@ selected mode reads it. The `simple` preset must cost exactly what a step costs 
 ## Config schema (Q14)
 
 ```yaml
-force_model: physical            # preset: simple | physical
+force_model: physical            # preset: physical (default) | simple
 force_modes:                     # optional; any key here overrides the preset
   drag: area_edge                # none | area | area_edge
   ridge_push: body               # boundary | body
@@ -55,6 +55,15 @@ params:
   pull_ramp_km_per_myr: 10       # ramp mode only
   breakoff_delay_myr: 10
   physics_grid_deg: 1.0
+  # added during implementation (S3-S5):
+  slab_search_radius_deg: 5      # slab depth = deepest slab tracer this near, on the overriding side
+  slab_line_tol_deg: 1
+  initial_slab_depth_km: 1320    # step-0 trenches start with slabs this deep
+  ridge_push_smooth_deg: 0       # optional per-plate age smoothing before the gradient
+  collision_drag_factor: 10      # viscous contact drag, x edge drag
+  breakoff_contact: viscous      # contact model during a breakoff collision: viscous | coupling
+forces:
+  slab_suction_deep: 3           # depth_split suction weight (half of pull; on both plates)
 ```
 
 When the run starts, the log prints the resolved modes and the k it used.
@@ -169,16 +178,16 @@ Each gate shows the new mode side by side with `simple`.
 
 Each stage ends at a review gate, and nothing moves to the next stage without approval.
 
-| Stage | Contents | Gate |
-|---|---|---|
-| S0 | `diagnose_run.py`; preset and mode plumbing; mode log; save regression baseline; clean up warnings (`SettingWithCopyWarning`, the concat `FutureWarning` at run_SDP.py:603) | Figures for the current model; regression passes |
-| S1 | Drag tensor with continent factor; speed calibration, cap and `speed_scale`; `net_rotation.csv` | F&U plot and time series compared with S0 |
-| S2 | Numpy tracers; shared lookups; lazy physics grid and age raster | Step time; age grid unchanged; regression passes |
-| S3 | Slab-length pull, depth-split suction, age polarity | F&U plot; slab-length maps |
-| S4 | Ridge-push body force | Maps and time series |
-| S5 | `breakoff` and `viscous` collisions | Collision sequence maps |
-| S6 | Profiling pass | Step-time table |
-| S7 | Update README and config documentation, with the sources below | Read-through |
+| Stage | Contents | Gate | Status |
+|---|---|---|---|
+| S0 | `diagnose_run.py`; preset and mode plumbing; mode log; regression baseline; warning clean-up | Figures for the current model; regression passes | done |
+| S1 | Drag tensor with continent factor; edge drag (Q19); speed calibration, cap and `speed_scale`; net rotation in `step_stats.csv` | F&U plot and time series compared with S0 | done |
+| S2 | Faster spherical search; tie rule; lazy physics-grid age from tracers (numpy tracers dropped: pandas cost was small) | Step time; age grid check; regression passes | done |
+| S3 | Slab-length pull, depth-split suction, age polarity (continent rule at the contact) | F&U plot; slab-length maps; polarity check | done |
+| S4 | Ridge-push body force | Maps, body vs boundary torque, time series | done |
+| S5 | `viscous` (implicit contact drag) and `breakoff` collisions | Collision-mode maps and pole swings; physical vs simple, 200 Myr | done |
+| S6 | Profiling pass; default preset → `physical` | Step-time table, 200 Myr | done |
+| S7 | README and config documentation | Read-through | done |
 
 ## Branches (Q18)
 
