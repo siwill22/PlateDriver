@@ -48,7 +48,7 @@ IMPLEMENTED = {
     'speed_normalisation': {'none', 'calibrate_once', 'per_step'},
 }
 
-DEFAULT_PRESET = 'simple'
+DEFAULT_PRESET = 'physical'
 
 
 def resolve_force_modes(cfg):

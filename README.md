@@ -91,13 +91,14 @@ run:
 ### Force model
 
 ```yaml
-force_model: simple      # simple | physical
+force_model: physical    # physical (default) | simple
 force_modes: {}          # per-component overrides, e.g. {collision: coupling}
 ```
 
 `force_model` picks a preset for every component of the force model; an entry under
-`force_modes` overrides one component. `simple` is the original boundary-force model:
-the fastest, and useful for teaching. `physical` is the v1 force model (basal and edge
+`force_modes` overrides one component. `physical` is the default; a config without
+`force_model` runs it. `simple` is the original boundary-force model: the fastest,
+and useful for teaching. `physical` is the v1 force model (basal and edge
 drag, slab pull from slab length and seafloor age, suction from the deep slab, ridge
 push as a body force over young seafloor, polarity by age, slab breakoff after
 collision, calibrated speed); see `force_model_v1_plan.md` for the design. The resolved

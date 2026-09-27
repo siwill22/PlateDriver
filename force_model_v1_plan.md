@@ -186,6 +186,20 @@ Each stage ends at a review gate, and nothing moves to the next stage without ap
 - `force-model-v1` branches from it, and this work goes there.
 - Nothing is merged to `master` without approval.
 
+## Found in S6
+
+- **Speed:**
+  - The tracer-to-trench search is bounded at the removal distance: 0.28 → 0.08 s at 155k
+    tracers, with identical results.
+  - The slab-depth query caps depth at 2 z_ref and keeps the deepest tracer per 0.25° cell:
+    0.16 → 0.03 s at 127k slab tracers.
+  - Over 200 steps, run together: simple 1.26 s per step (was 1.41), physical 1.49 s (was
+    1.93), and physical's last 50 steps 1.59 s (was 2.75).
+- **Default preset is now `physical`** (user decision: after the S6 speed work). The
+  regression reference is still `simple`, bit-identical throughout.
+- Seafloor tracers still accumulate faster in physical (150k against 53k at 200 Myr), because
+  plates are slower. Thinning is not needed at current cost; revisit for longer runs.
+
 ## Found in S5
 
 - **`viscous` is implicit** (user decision): the contact drag enters the same solve as basal

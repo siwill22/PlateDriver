@@ -67,7 +67,7 @@ class SphereTree:
         lat, lon = latlon_rad[:, 0], latlon_rad[:, 1]
         return np.column_stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
 
-    def query(self, latlon_rad, k=1, seed=0):
+    def query(self, latlon_rad, k=1, seed=0, max_dist_rad=None):
         """Return (great-circle distances in radians (n, k), indices (n, k)).
 
         With k = 1, exact ties (several points equally near, common on a regular grid)
@@ -75,25 +75,30 @@ class SphereTree:
         so the answer is unbiased and does not depend on the search implementation or
         on the order of the queries.  The hash does not change between time steps, so
         a tied cell resolves the same way every step.
+
+        With max_dist_rad, points with no neighbour that near get distance inf (and index
+        n); the search can stop early, which is much faster when most points are far.
         """
         latlon_rad = np.asarray(latlon_rad, dtype=float).reshape(-1, 2)
         if k != 1:
             chord, idx = self._tree.query(self._xyz(latlon_rad), k=k)
             chord, idx = np.asarray(chord).reshape(len(latlon_rad), k), np.asarray(idx).reshape(len(latlon_rad), k)
             return 2.0 * np.arcsin(np.clip(chord / 2.0, 0.0, 1.0)), idx
-        dist, idx, tied = self.query_candidates(latlon_rad)
+        dist, idx, tied = self.query_candidates(latlon_rad, max_dist_rad=max_dist_rad)
         choice = np.argmin(np.where(tied, tie_hash(latlon_rad, idx, seed), np.iinfo(np.uint64).max), axis=1)
         rows = np.arange(len(idx))
         return dist[:, None], idx[rows, choice][:, None]
 
-    def query_candidates(self, latlon_rad, k=4, tol_rad=1e-12):
+    def query_candidates(self, latlon_rad, k=4, tol_rad=1e-12, max_dist_rad=None):
         """Nearest distance (n,), the k nearest indices (n, k) and a mask (n, k) of
-        those whose distance equals the nearest (within tol_rad)."""
+        those whose distance equals the nearest (within tol_rad).  With max_dist_rad,
+        candidates farther than that are missing (distance inf, index n, not tied)."""
         latlon_rad = np.asarray(latlon_rad, dtype=float).reshape(-1, 2)
         k = min(k, self._tree.n)
-        chord, idx = self._tree.query(self._xyz(latlon_rad), k=k)
+        bound = np.inf if max_dist_rad is None else 2.0 * np.sin(min(max_dist_rad, np.pi) / 2.0) * (1 + 1e-9) + 1e-12
+        chord, idx = self._tree.query(self._xyz(latlon_rad), k=k, distance_upper_bound=bound)
         chord, idx = np.asarray(chord).reshape(len(latlon_rad), k), np.asarray(idx).reshape(len(latlon_rad), k)
-        dist = 2.0 * np.arcsin(np.clip(chord / 2.0, 0.0, 1.0))
+        dist = np.where(np.isinf(chord), np.inf, 2.0 * np.arcsin(np.clip(chord / 2.0, 0.0, 1.0)))
         return dist[:, 0], idx, dist <= dist[:, :1] + tol_rad
 
 
@@ -1037,7 +1042,8 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                 slab_tracers['lon'].values, slab_tracers['lat'].values,
                 slab_tracers['depth_km'].values,
                 radius_deg=force_params.get('slab_search_radius_deg', 5.0),
-                line_tol_deg=force_params.get('slab_line_tol_deg', 1.0))
+                line_tol_deg=force_params.get('slab_line_tol_deg', 1.0),
+                depth_cap_km=2.0 * z_ref)     # neither pull nor suction grows beyond 2 z_ref
         if modes['slab_pull'] == 'slab_length':
             a_sat = force_params.get('slab_age_saturation_myr', 80.0)
             f_age = np.sqrt(np.clip(np.nan_to_num(inner_age, nan=a_sat), 0.0, a_sat) / a_sat)
@@ -2175,17 +2181,20 @@ def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_di
     active_tracers = tracers[active_mask]
     t_lon = active_tracers.geometry.x.values
     t_lat = active_tracers.geometry.y.values
-    dists_rad, nn = tree.query(np.deg2rad(np.column_stack([t_lat, t_lon])), k=1)
+    dists_rad, nn = tree.query(np.deg2rad(np.column_stack([t_lat, t_lon])), k=1,
+                               max_dist_rad=np.radians(max_dist_deg))
     deactivate_mask = np.degrees(dists_rad[:, 0]) < max_dist_deg
 
     if plate_id_raster is not None and deactivate_mask.any():
         on_pid = raster_lookup(plate_id_raster, t_lon, t_lat)
         p1 = boundaries_gdf['plateid1_poly1'].values
         p2 = boundaries_gdf['plateid1_poly2'].values
-        for k in np.where(deactivate_mask)[0]:
-            row = c_row[nn[k, 0]]
-            dg = resolve_downgoing_plate(int(p1[row]), int(p2[row]), polarity_dict or {}, craton_counts)
-            deactivate_mask[k] = on_pid[k] == dg
+        near = np.where(deactivate_mask)[0]
+        rows = np.asarray(c_row)[nn[near, 0]]
+        # the downgoing plate of each boundary row involved, resolved once per row
+        dg_of = {r: resolve_downgoing_plate(int(p1[r]), int(p2[r]), polarity_dict or {}, craton_counts)
+                 for r in np.unique(rows)}
+        deactivate_mask[near] = on_pid[near] == np.array([dg_of[r] for r in rows])
 
     tracers.loc[active_tracers.index[deactivate_mask], 'active'] = False
     return tracers
@@ -2291,7 +2300,7 @@ def seed_initial_slabs(boundaries_gdf, depth_km, delta_time,
 
 
 def slab_depth_at_segments(mid_lon, mid_lat, side_xyz, slab_lon, slab_lat, slab_depth,
-                           radius_deg=5.0, line_tol_deg=1.0):
+                           radius_deg=5.0, line_tol_deg=1.0, depth_cap_km=None, cell_deg=0.25):
     """Depth (km) of the deepest slab tracer near each boundary segment, on one side of it.
 
     side_xyz (n, 3) is the segment's great-circle normal, signed to point to the side
@@ -2301,10 +2310,26 @@ def slab_depth_at_segments(mid_lon, mid_lat, side_xyz, slab_lon, slab_lat, slab_
     line, and the line moves).  Slablets sink vertically where they were seeded, so the
     deep part of a retreating trench's slab lies under the overriding plate, as a
     dipping slab does.  0 where there is no slab.
+
+    For speed, depths are capped at depth_cap_km (the depth beyond which no force grows)
+    and the slab is reduced to its deepest tracer in each cell_deg lon/lat cell, keeping
+    that tracer's own position.  Only a cell whose deepest tracer is on the wrong side of
+    a segment while a shallower one is on the right side can differ, which cell_deg well
+    below line_tol_deg makes rare.
     """
     z = np.zeros(len(mid_lon))
     if len(slab_depth) == 0 or len(mid_lon) == 0:
         return z
+    slab_lon, slab_lat = np.asarray(slab_lon, float), np.asarray(slab_lat, float)
+    slab_depth = np.asarray(slab_depth, float)
+    if depth_cap_km is not None:
+        slab_depth = np.minimum(slab_depth, depth_cap_km)
+    if cell_deg:
+        cell = (np.floor((slab_lat + 90.0) / cell_deg).astype(np.int64) * 100000
+                + np.floor(((slab_lon + 180.0) % 360.0) / cell_deg).astype(np.int64))
+        order = np.lexsort((-slab_depth, cell))                # by cell, deepest first
+        first = order[np.r_[True, cell[order][1:] != cell[order][:-1]]]
+        slab_lon, slab_lat, slab_depth = slab_lon[first], slab_lat[first], slab_depth[first]
     from scipy.spatial import cKDTree
     s_xyz = lonlat_to_xyz(np.asarray(slab_lon, float), np.asarray(slab_lat, float))
     m_xyz = lonlat_to_xyz(np.asarray(mid_lon, float), np.asarray(mid_lat, float))
