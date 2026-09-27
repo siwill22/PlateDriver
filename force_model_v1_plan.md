@@ -14,8 +14,8 @@ is the fastest option and useful for teaching.
 
 | # | Topic | `physical` (default) | Also available | `simple` = today |
 |---|---|---|---|---|
-| Q2 | Plate mobility | Drag tensor: ω = k · I⁻¹ τ | — | ω = τ (no drag) |
-| Q3 | Continental keels | w = `continent_drag_factor` (3) on craton cells, 1 on ocean | optional `craton_drag_factor` | — |
+| Q2, Q19 | Plate mobility | `area_edge`: ω = k · D⁻¹ τ, D = basal area tensor + boundary (edge) tensor | `area` (basal only) | `none`: ω = τ |
+| Q3 | Continental keels | w = `continent_drag_factor` (3) on continental (craton) cells, 1 on ocean | — | — |
 | Q4 | Seafloor age | Existing age tracers, queried every step | — | age used for output only |
 | Q5 | Slab pull magnitude | √min(age, 80)/√80 × min(1, L_slab/660 km) | age only | uniform |
 | Q6 | Ridge push | Body force over ocean < 80 Myr | `boundary` | `boundary` |
@@ -36,7 +36,7 @@ selected mode reads it. The `simple` preset must cost exactly what a step costs 
 ```yaml
 force_model: physical            # preset: simple | physical
 force_modes:                     # optional; any key here overrides the preset
-  drag: tensor                   # none | tensor
+  drag: area_edge                # none | area | area_edge
   ridge_push: body               # boundary | body
   slab_pull: slab_length         # hard | ramp | slab_length
   slab_suction: depth_split      # ratio | depth_split
@@ -45,7 +45,7 @@ force_modes:                     # optional; any key here overrides the preset
   speed_normalisation: calibrate_once   # none | calibrate_once | per_step
 params:
   continent_drag_factor: 3.0
-  craton_drag_factor: null
+  edge_drag_width_km: 1000       # boundary resistance = basal drag over a strip this wide
   target_rms_speed: 50           # km/Myr (= mm/yr)
   max_rms_speed_factor: 3.0      # cap = factor × target; each capped step is logged
   speed_scale: null              # a number fixes k and skips calibration (compare runs)
@@ -69,10 +69,16 @@ approximation:
   cos(lat) weights on the physics grid.
 - **Drag:** a rigid plate rotating at ω against a viscous mantle feels torque −c I ω,
   so the balance is ω = k I⁻¹ τ.
+- **Boundary resistance (Q19):** with basal drag alone, resistance scales with area while
+  driving forces scale with boundary length, so speed would go as 1/size. Forsyth & Uyeda
+  (1975) found no clear relation between speed and plate area, and put the main
+  resistance at plate edges. `area_edge` therefore adds an edge tensor
+  ℓ Σ L (𝟙 − m mᵀ) over the plate's boundary segments, where ℓ = `edge_drag_width_km`.
+  Setting `drag: area` drops it.
 - **RMS speed:** found exactly from the tensors, with no velocity grid:
   RMS² = R² Σ_p ω_pᵀ J_p ω_p / A_total.
-- **Net rotation:** ω_nr = (Σ_p J_p)⁻¹ Σ_p J_p ω_p. Log it to `net_rotation.csv`, with
-  one row per step giving the pole, the rate and the RMS speed.
+- **Net rotation:** ω_nr = (Σ_p J_p)⁻¹ Σ_p J_p ω_p. It is logged in `step_stats.csv`
+  every step, as the rate and the pole, alongside the RMS speed.
 - **Frame:** drag acts relative to the mantle, so the frame is fixed to the mantle. That
   is the same frame as the hotspots, and net rotation is a real output (Q10).
 

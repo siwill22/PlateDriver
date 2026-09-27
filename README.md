@@ -103,6 +103,26 @@ yet stops the run with a message. The resolved modes are printed at the start of
 run and written to `run_info.yaml`. The collision mode (`resistance` or `coupling`)
 is `force_modes.collision`; the older `params.collision_mode` is still read.
 
+Implemented so far:
+
+- **`drag`:**
+  - `none`: torque = angular velocity, as in the original model.
+  - `area`: basal drag over the plate area, ω = D⁻¹τ, where D is the area tensor
+    Σ w(𝟙 − r rᵀ)dA; w = `continent_drag_factor` under continents and 1 under ocean.
+  - `area_edge` (`physical`): the same, plus boundary resistance equal to basal drag over
+    a strip `edge_drag_width_km` wide along every boundary.
+- **`speed_normalisation`:**
+  - `none`: velocities are multiplied by `speed_scale` (default 1).
+  - `calibrate_once` (`physical`): the scale factor k is set at step 0 so that the
+    area-weighted RMS plate speed equals `target_rms_speed`, then kept for the whole run,
+    so RMS speed still varies with the boundary configuration.
+  - `per_step`: k is recomputed every step, which fixes the RMS speed.
+
+  In every mode, a step whose RMS speed would exceed `max_rms_speed_factor` ×
+  `target_rms_speed` is scaled down to that limit and logged. The k used is recorded in
+  `run_info.yaml` and in each row of `step_stats.csv`. Setting `speed_scale` fixes k,
+  which is useful for comparing two configs at the same scale.
+
 ### Forces
 
 Dimensionless scale factors applied to the torque from each boundary type.

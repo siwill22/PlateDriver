@@ -54,6 +54,8 @@ def _out(filename):
 force_preset, modes = force_modes.resolve_force_modes(cfg)
 print(force_modes.describe(force_preset, modes))
 params['collision_mode'] = modes['collision']
+params['drag_mode'] = modes['drag']
+params['speed_normalisation'] = modes['speed_normalisation']
 
 
 def _git_commit():
@@ -69,14 +71,21 @@ def _git_commit():
         return 'unknown'
 
 
-# Record exactly what this run used
-with open(_out('run_info.yaml'), 'w') as fh:
-    yaml.safe_dump({'config_file': os.path.abspath(args.config),
-                    'git_commit': _git_commit(),
-                    'started': time.strftime('%Y-%m-%d %H:%M:%S'),
-                    'force_model': force_preset,
-                    'force_modes_resolved': modes,
-                    'config': cfg}, fh, sort_keys=False)
+# Record exactly what this run used (rewritten after step 0 with the speed scale)
+run_info = {'config_file': os.path.abspath(args.config),
+            'git_commit': _git_commit(),
+            'started': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'force_model': force_preset,
+            'force_modes_resolved': modes,
+            'config': cfg}
+
+
+def _write_run_info():
+    with open(_out('run_info.yaml'), 'w') as fh:
+        yaml.safe_dump(run_info, fh, sort_keys=False)
+
+
+_write_run_info()
 
 # Per-step statistics are appended every step; start them afresh
 _step_stats_csv  = _out('step_stats.csv')
@@ -142,6 +151,7 @@ polarity_dict            = {}
 cumulative_rotation_dict = {}   # {pid: FiniteRotation from t=0 to the current step}
 rotation_records         = []   # [(t, pid, FiniteRotation)] written to rotations_NNNN.rot
 collision_state          = {}   # tracks collision age per plate pair; persists across timesteps
+speed_state              = {}   # speed scale k (calibrate_once) and last step's scaling
 
 # Trust the user's initial plate configuration — skip fragmentation check on step 0.
 _params_step0 = {**params, 'fragmentation_enabled': False}
@@ -154,7 +164,12 @@ _params_step0 = {**params, 'fragmentation_enabled': False}
  next_plate_id) = sdp.compute_timestep(rpolygons, forces, seed_stage_poles, delta_time,
                                        cratons=cratons, params=_params_step0,
                                        polarity_dict=polarity_dict,
-                                       collision_state=collision_state)
+                                       collision_state=collision_state,
+                                       speed_state=speed_state)
+if 'last' in speed_state:
+    run_info['speed_scale_k'] = float(speed_state['last']['k_used'])
+    run_info['rms_speed_unscaled_step0_km_per_myr'] = float(speed_state['last']['rms_unscaled'])
+    _write_run_info()
 
 tracers = sdp.generate_seafloor_age_tracers(
     new_plate_polygons, boundaries_gdf,
@@ -452,6 +467,10 @@ def _record_step_stats(i, step_times=None, previous_poles=None):
     step_row['n_tracers'] = int(tracers.active.astype(bool).sum())
     step_row['n_slab_tracers'] = (int(slab_tracers['active'].astype(bool).sum())
                                   if _slab_enabled else 0)
+    last = speed_state.get('last', {})
+    step_row['speed_scale_k'] = last.get('k_used', np.nan)
+    step_row['rms_speed_unscaled_km_per_myr'] = last.get('rms_unscaled', np.nan)
+    step_row['speed_capped'] = bool(last.get('capped', False))
     for name, dt in (step_times or {}).items():
         step_row['seconds_' + name] = dt
     step_row['seconds_step'] = sum((step_times or {}).values()) if step_times else np.nan
@@ -520,7 +539,8 @@ try:
                                                fragmentation_cooldown_pids=_fragmentation_cooldown_pids,
                                                collision_state=collision_state,
                                                craton_id_remap=_craton_plate_remap,
-                                               next_plate_id=next_plate_id)
+                                               next_plate_id=next_plate_id,
+                                               speed_state=speed_state)
         _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         # New plates (fragments) inherit their parent's rotation history, so the

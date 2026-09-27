@@ -7,7 +7,7 @@ v1 force model described in force_model_v1_plan.md.
 """
 
 MODE_CHOICES = {
-    'drag':                ('none', 'tensor'),
+    'drag':                ('none', 'area', 'area_edge'),
     'ridge_push':          ('boundary', 'body'),
     'slab_pull':           ('hard', 'ramp', 'slab_length'),
     'slab_suction':        ('ratio', 'depth_split'),
@@ -27,7 +27,7 @@ PRESETS = {
         'speed_normalisation': 'none',
     },
     'physical': {
-        'drag':                'tensor',
+        'drag':                'area_edge',
         'ridge_push':          'body',
         'slab_pull':           'slab_length',
         'slab_suction':        'depth_split',
@@ -39,13 +39,13 @@ PRESETS = {
 
 # Modes that exist in the code so far; the rest arrive stage by stage (see the plan).
 IMPLEMENTED = {
-    'drag':                {'none'},
+    'drag':                {'none', 'area', 'area_edge'},
     'ridge_push':          {'boundary'},
     'slab_pull':           {'hard'},
     'slab_suction':        {'ratio'},
     'polarity':            {'id'},
     'collision':           {'resistance', 'coupling'},
-    'speed_normalisation': {'none'},
+    'speed_normalisation': {'none', 'calibrate_once', 'per_step'},
 }
 
 DEFAULT_PRESET = 'simple'

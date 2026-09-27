@@ -646,8 +646,13 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             boundary_search_radius_deg=2,
                             polarity_dict=None,
                             collision_pairs=None,
-                            collision_mode='resistance'):
+                            collision_mode='resistance',
+                            return_torques=False):
     """Sum boundary forces around every plate and convert the net torque to a stage rotation.
+
+    With return_torques=True, also returns the net torque of each plate (xyz array) and
+    its boundary (edge) tensor Σ L (𝟙 − m mᵀ) over its polygon segments (L = arc length in
+    radians, m = segment midpoint), for solve_plate_motions.
 
     For each polygon segment, the neighbouring plate is found in the plate-ID raster and
     the relative normal velocity (km/Myr, from stage_pole_dict) classifies the segment:
@@ -671,7 +676,7 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
     # Pass 1: walk every polygon ring and collect the segments (midpoint, outward
     # normal and the torque of a unit force pulling the plate toward the boundary).
     torque_dict = {}
-    seg_pid, seg_mid, seg_outward, seg_torque = [], [], [], []
+    seg_pid, seg_mid, seg_outward, seg_torque, seg_len = [], [], [], [], []
     for plate in gpml_plates:
         pid_current = plate.get_reconstruction_plate_id()
         torque_dict.setdefault(pid_current, pygplates.Vector3D(0, 0, 0))
@@ -687,6 +692,7 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                     # s * great-circle normal, so s = outward_sign pulls the plate toward
                     # the boundary; the torque is linear in s (a push is its negative).
                     seg_torque.append(pdriver.get_torque_for_segment(segment, outward_sign))
+                    seg_len.append(segment.get_arc_length())
 
     if seg_pid:
         seg_pid = np.array(seg_pid)
@@ -747,7 +753,102 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
 
     new_stage_pole_dict = {pid: pdriver.torque_to_stage_rotation(torque, delta_time)
                            for pid, torque in torque_dict.items()}
-    return new_stage_pole_dict, collision_pairs
+    if not return_torques:
+        return new_stage_pole_dict, collision_pairs
+
+    torques = {pid: np.array(t.to_xyz()) for pid, t in torque_dict.items()}
+    edge_tensors = {}
+    if len(seg_pid):
+        m = lonlat_to_xyz(mid_lon, mid_lat)
+        L = np.array(seg_len)
+        outer = L[:, None, None] * (np.eye(3)[None] - m[:, :, None] * m[:, None, :])
+        for pid in np.unique(seg_pid):
+            edge_tensors[int(pid)] = outer[seg_pid == pid].sum(axis=0)
+    return new_stage_pole_dict, collision_pairs, torques, edge_tensors
+
+
+def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, params,
+                        drag_mode, speed_mode, speed_state, delta_time):
+    """Angular velocities from net torques with basal and boundary resistance, scaled to a
+    target RMS plate speed.  Returns {pid: FiniteRotation over delta_time}.
+
+    drag_mode
+      none       ω = τ (the simple model)
+      area       ω = D⁻¹ τ with D = Σ w (𝟙 − r rᵀ) dA over the plate (basal drag;
+                 w = continent_drag_factor on continental cells, 1 on ocean)
+      area_edge  as area, plus boundary resistance: D += ℓ Σ L (𝟙 − m mᵀ) over the plate
+                 boundary, ℓ = edge_drag_width_km (boundary resistance equals basal drag
+                 over a strip of that width along every boundary)
+    speed_mode
+      none            ω scaled by speed_scale (default 1)
+      calibrate_once  scale k set at the first call so the area-weighted RMS speed equals
+                      target_rms_speed, then kept (speed_scale, if set, is used instead)
+      per_step        k recomputed every step
+    If the RMS speed would exceed max_rms_speed_factor × target_rms_speed, that step is
+    scaled down to the cap.  speed_state (a dict kept by the caller) holds k and a record
+    of the last step: {'k', 'last': {'k_used', 'rms_unscaled', 'rms', 'capped'}}.
+    Everything is on the unit sphere; RMS speeds are exact (from area tensors, no grid).
+    """
+    grid_deg = params.get('physics_grid_deg', 1.0)
+    target = params.get('target_rms_speed', 50.0)
+    cap = params.get('max_rms_speed_factor', 3.0) * target
+    fixed_k = params.get('speed_scale')
+
+    pids, J, areas = plate_area_tensors(plate_id_raster, grid_deg=grid_deg)
+    if set(torques) - set(pids.tolist()):
+        # a plate too small for the coarse grid: use the full-resolution raster
+        grid_deg = None
+        pids, J, areas = plate_area_tensors(plate_id_raster, grid_deg=None)
+    J_of = dict(zip(pids.tolist(), J))
+    area_of = dict(zip(pids.tolist(), areas))
+
+    if drag_mode == 'none':
+        omega = {pid: t for pid, t in torques.items()}
+    else:
+        weight = None
+        if craton_raster is not None:
+            cont = np.nan_to_num(craton_raster.values) > 0
+            weight = np.where(cont, params.get('continent_drag_factor', 3.0), 1.0)
+        _, D, _ = plate_area_tensors(plate_id_raster, weight=weight, grid_deg=grid_deg)
+        D_of = dict(zip(pids.tolist(), D))
+        width = params.get('edge_drag_width_km', 1000.0) / EARTH_RADIUS_KM
+        omega = {}
+        for pid, t in torques.items():
+            Dp = D_of.get(pid, np.zeros((3, 3)))
+            if drag_mode == 'area_edge':
+                Dp = Dp + width * edge_tensors.get(pid, np.zeros((3, 3)))
+            if not np.any(Dp):
+                omega[pid] = np.zeros(3)
+                continue
+            omega[pid] = np.linalg.lstsq(Dp, t, rcond=1e-12)[0]
+
+    total_area = sum(area_of.get(pid, 0.0) for pid in omega)
+    msq = sum(w @ J_of[pid] @ w for pid, w in omega.items() if pid in J_of)
+    rms_unscaled = EARTH_RADIUS_KM * np.sqrt(msq / total_area) if total_area > 0 else 0.0
+
+    if fixed_k is not None and speed_mode != 'per_step':
+        k = float(fixed_k)
+    elif speed_mode == 'none':
+        k = 1.0
+    elif speed_mode == 'per_step' or speed_state.get('k') is None:
+        k = target / rms_unscaled if rms_unscaled > 0 else 1.0
+    else:
+        k = speed_state['k']
+    if speed_mode == 'calibrate_once' and speed_state.get('k') is None:
+        speed_state['k'] = k
+        print('  [speed] calibrated scale k = {:.4g} (RMS {:.1f} -> {:.1f} km/Myr)'.format(
+            k, rms_unscaled, k * rms_unscaled))
+    k_used, capped = k, False
+    if k * rms_unscaled > cap > 0:
+        k_used, capped = cap / rms_unscaled, True
+        speed_state['capped_steps'] = speed_state.get('capped_steps', 0) + 1
+        print('  [speed cap] RMS {:.1f} km/Myr > cap {:.1f}; scaled down this step'.format(
+            k * rms_unscaled, cap))
+    speed_state['last'] = dict(k_used=k_used, rms_unscaled=rms_unscaled,
+                               rms=k_used * rms_unscaled, capped=capped)
+
+    return {pid: pdriver.torque_to_stage_rotation(pygplates.Vector3D(*(k_used * w)), delta_time)
+            for pid, w in omega.items()}
 
 
 def apply_collision_coupling(stage_pole_dict, collision_pairs,
@@ -1125,7 +1226,8 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
 
 def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None,
                      polarity_dict=None, merge_pairs=None, fragmentation_cooldown_pids=None,
-                     collision_state=None, craton_id_remap=None, next_plate_id=None):
+                     collision_state=None, craton_id_remap=None, next_plate_id=None,
+                     speed_state=None):
     """Rebuild the plate configuration from moved plate polygons and compute the next
     stage rotations.
 
@@ -1150,6 +1252,13 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     boundary_search_radius    = params.get('boundary_search_radius_deg', 2)
     collision_mode            = params.get('collision_mode',             'resistance')
     min_fragment_area         = params.get('min_peninsula_area_deg2',    5.0)
+    drag_mode                 = params.get('drag_mode',                  'none')
+    speed_mode                = params.get('speed_normalisation',        'none')
+    # The simple model (ω = τ, no scaling) keeps the original code path exactly
+    solve_motions = not (drag_mode == 'none' and speed_mode == 'none'
+                         and params.get('speed_scale') is None)
+    if speed_state is None:
+        speed_state = {}
 
     # Local copy: children of split plates are added below
     stage_pole_dict = dict(stage_pole_dict)
@@ -1271,7 +1380,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     div = spherical_divergence(velocity_grid_east, velocity_grid_north)
     _ct['velocity_grid'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    new_stage_pole_dict, _collision_pairs = polygons_to_stage_poles(
+    _stage_out = polygons_to_stage_poles(
                                               new_plate_polygons, plate_id_raster, forces,
                                               craton_raster,
                                               stage_pole_dict=stage_pole_dict,
@@ -1280,7 +1389,15 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                               divergence_threshold_for_ridge_push=div_thresh_ridge,
                                               boundary_search_radius_deg=boundary_search_radius,
                                               polarity_dict=polarity_dict,
-                                              collision_mode=collision_mode)
+                                              collision_mode=collision_mode,
+                                              return_torques=solve_motions)
+    if solve_motions:
+        _, _collision_pairs, _torques, _edge_tensors = _stage_out
+        new_stage_pole_dict = solve_plate_motions(_torques, _edge_tensors, plate_id_raster,
+                                                  craton_raster, params, drag_mode, speed_mode,
+                                                  speed_state, delta_time)
+    else:
+        new_stage_pole_dict, _collision_pairs = _stage_out
 
     if collision_mode == 'coupling' and collision_state is not None:
         apply_collision_coupling(new_stage_pole_dict, _collision_pairs,
