@@ -16,6 +16,7 @@ MODE_CHOICES = {
     'speed_normalisation': ('none', 'calibrate_once', 'per_step'),
     'tracer_thinning':     ('none', 'cell'),
     'plate_rebuild':       ('lonlat', 'midpoint', 'rotated'),
+    'rifting':             ('none', 'trial'),
 }
 
 PRESETS = {
@@ -29,6 +30,7 @@ PRESETS = {
         'speed_normalisation': 'none',
         'tracer_thinning':     'none',
         'plate_rebuild':       'lonlat',
+        'rifting':             'none',
     },
     'physical': {
         'drag':                'area_edge',
@@ -40,6 +42,7 @@ PRESETS = {
         'speed_normalisation': 'calibrate_once',
         'tracer_thinning':     'cell',
         'plate_rebuild':       'midpoint',
+        'rifting':             'trial',
     },
 }
 
@@ -54,6 +57,7 @@ IMPLEMENTED = {
     'speed_normalisation': {'none', 'calibrate_once', 'per_step'},
     'tracer_thinning':     {'none', 'cell'},
     'plate_rebuild':       {'lonlat', 'midpoint', 'rotated'},
+    'rifting':             {'none', 'trial'},
 }
 
 DEFAULT_PRESET = 'physical'

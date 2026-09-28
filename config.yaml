@@ -141,6 +141,14 @@ params:
   min_peninsula_area_deg2:     5.0     # minimum fragment area when neck_ratio < 0.2; also the size below which a
                                        # disconnected piece of a plate is absorbed by its neighbour
   fragmentation_cooldown_myr:  5.0     # Myr before a plate can fragment again
+  # --- Rifting (force_modes.rifting: trial) ---
+  rift_strength_continent:     0.5      # continental strength, in full slab pull per unit length
+  oceanic_strength_ratio:      3        # oceanic strength at >= 80 Myr, x continental
+  oceanic_strength_floor:      0.2      # oceanic strength ~ sqrt(min(age, 80)/80), not below this
+  rift_persist_myr:            3        # the cut must pass for this long before the plate splits
+  rift_cooldown_myr:           10       # both halves are not tested again for this long
+  rift_sweep_azimuths:         12       # candidate great circles through the plate centroid
+  rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
   merging_enabled:             false    # absorb plates with persistently near-zero relative motion
   merge_conservative_threshold: 0.05   # km/Myr (= mm/yr); boundary |divergence| below this = near-zero
   merge_min_steps:             5        # consecutive near-zero steps before merge fires

@@ -769,7 +769,7 @@ def _one_plate_derivative(field, plus, minus, plus_ok, minus_ok, step):
 
 
 def ridge_push_body_torques(age_grid, plate_id_raster, weight, cutoff_myr=80.0, smooth_deg=0.0,
-                            return_field=False):
+                            return_field=False, return_tau=False):
     """Torque on every plate from ridge push as a body force (ridge_push: body).
 
     The force per unit area is f = (weight / cutoff) ∇min(age, cutoff) on ocean cells,
@@ -834,6 +834,8 @@ def ridge_push_body_torques(age_grid, plate_id_raster, weight, cutoff_myr=80.0, 
     torques = {int(p): tau[(key == p)].sum(axis=0) for p in plates}
     if return_field:
         return torques, f_e, f_n
+    if return_tau:
+        return torques, np.where(ocean[..., None], tau, 0.0)
     return torques
 
 
@@ -918,7 +920,8 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             slab_tracers=None,
                             force_params=None,
                             diagnostics=None,
-                            collision_info=None):
+                            collision_info=None,
+                            torque_parts=None):
     """Sum boundary forces around every plate and convert the net torque to a stage rotation.
 
     With return_torques=True, also returns the net torque of each plate (xyz array) and
@@ -967,6 +970,11 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                   the plates)
     diagnostics, if a dict, receives 'segments': a DataFrame of the subduction segments
     and their forces (only when a mode other than the simple ones is used).
+    torque_parts, if a dict, receives where each plate's torque comes from, for the trial
+    split (rift_trial_splits): 'seg_pid', 'seg_xyz' (midpoints), 'seg_torque' (the torque
+    each segment added), 'seg_edge' (its L (𝟙 − m mᵀ)), the collision contact segments
+    ('contact_pid', 'contact_nbr', 'contact_G'), and the body ridge-push torque per
+    physics-grid cell ('body_tau', lat x lon x 3).
     """
     if polarity_dict is None:
         polarity_dict = {}
@@ -1126,6 +1134,13 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                     pair = (int(pair_lo[k]), int(pair_hi[k]))
                     tens[pair] = tens.get(pair, np.zeros((3, 3))) + 0.5 * seg_len[k] * np.outer(g, g)
 
+        seg_applied = np.zeros((len(seg_pid), 3)) if torque_parts is not None else None
+
+        def _add(k, t):
+            torque_dict[int(seg_pid[k])] = torque_dict[int(seg_pid[k])] + t
+            if seg_applied is not None:
+                seg_applied[k] += np.array(t.to_xyz())
+
         # Pass 2: add up the torques plate by plate, in segment order
         for k in np.where(slab_set | divergent | collision)[0]:
             pid_current, pid_neighbor = int(seg_pid[k]), int(neighbour[k])
@@ -1143,16 +1158,31 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                         collision_pairs.add(pair)
                     elif 'continental_collision' in forces:
                         # Resistance torque pushing the plate away from the collision.
-                        torque_dict[pid_current] = torque_dict[pid_current] - seg_torque[k] * forces['continental_collision']
+                        _add(k, seg_torque[k] * (-forces['continental_collision']))
                 elif slab_w[k]:
-                    torque_dict[pid_current] = torque_dict[pid_current] + seg_torque[k] * float(slab_w[k])
+                    _add(k, seg_torque[k] * float(slab_w[k]))
             elif 'ridge_push' in forces and modes['ridge_push'] == 'boundary':
-                torque_dict[pid_current] = torque_dict[pid_current] - seg_torque[k] * forces['ridge_push']
+                _add(k, seg_torque[k] * (-forces['ridge_push']))
+
+        if torque_parts is not None:
+            m_xyz = lonlat_to_xyz(mid_lon, mid_lat)
+            L = np.array(seg_len)
+            coll = np.where(collision)[0] if collision_mode == 'viscous' else np.array([], int)
+            g = np.cross(m_xyz[coll], outward[coll]) if len(coll) else np.zeros((0, 3))
+            torque_parts.update(
+                seg_pid=seg_pid.astype(int), seg_xyz=m_xyz, seg_torque=seg_applied,
+                seg_edge=L[:, None, None] * (np.eye(3)[None] - m_xyz[:, :, None] * m_xyz[:, None, :]),
+                contact_pid=seg_pid[coll].astype(int), contact_nbr=neighbour[coll].astype(int),
+                contact_xyz=m_xyz[coll],
+                contact_G=0.5 * L[coll][:, None, None] * g[:, :, None] * g[:, None, :])
 
     if modes['ridge_push'] == 'body' and age_grid is not None and 'ridge_push' in forces:
         body = ridge_push_body_torques(age_grid, plate_id_raster, forces['ridge_push'],
                                        force_params.get('ridge_push_age_cutoff_myr', 80.0),
-                                       force_params.get('ridge_push_smooth_deg', 0.0))
+                                       force_params.get('ridge_push_smooth_deg', 0.0),
+                                       return_tau=torque_parts is not None)
+        if torque_parts is not None:
+            body, torque_parts['body_tau'] = body
         for pid, t in body.items():
             if pid in torque_dict:
                 torque_dict[pid] = torque_dict[pid] + pygplates.Vector3D(*t)
@@ -1292,7 +1322,8 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
         print('  [speed cap] RMS {:.1f} km/Myr > cap {:.1f}; scaled down this step'.format(
             k * rms_unscaled, cap))
     speed_state['last'] = dict(k_used=k_used, rms_unscaled=rms_unscaled,
-                               rms=k_used * rms_unscaled, capped=capped)
+                               rms=k_used * rms_unscaled, capped=capped,
+                               omega={pid: np.asarray(w, float) for pid, w in omega.items()})   # unscaled
 
     return {pid: pdriver.torque_to_stage_rotation(pygplates.Vector3D(*(k_used * w)), delta_time)
             for pid, w in omega.items()}
@@ -1704,13 +1735,215 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
     return raster, split_info, next_pid
 
 
+def _cut_candidates(centre, n_azimuth=12, offsets_deg=(-15.0, 0.0, 15.0)):
+    """Unit normals of candidate cut planes (great circles) for a plate with centroid
+    `centre`: n_azimuth directions through the centroid, each also shifted by the offsets
+    (a plane at angular distance δ from the centroid has normal n cos δ + c sin δ)."""
+    east = np.cross([0.0, 0.0, 1.0], centre)
+    if np.linalg.norm(east) < 1e-9:
+        east = np.array([1.0, 0.0, 0.0])
+    east /= np.linalg.norm(east)
+    north = np.cross(centre, east)
+    out = []
+    for az in np.arange(n_azimuth) * np.pi / n_azimuth:
+        n0 = np.cos(az) * east + np.sin(az) * north
+        for d in np.radians(offsets_deg):
+            n = n0 * np.cos(d) + centre * np.sin(d)
+            out.append(n / np.linalg.norm(n))
+    return np.array(out)
+
+
+def _circle_points(normal, step_deg=0.5):
+    """Points every step_deg around the great circle with the given plane normal."""
+    u = np.cross(normal, [0.0, 0.0, 1.0])
+    if np.linalg.norm(u) < 1e-9:
+        u = np.cross(normal, [1.0, 0.0, 0.0])
+    u /= np.linalg.norm(u)
+    v = np.cross(normal, u)
+    t = np.radians(np.arange(0.0, 360.0, step_deg))
+    return np.cos(t)[:, None] * u + np.sin(t)[:, None] * v
+
+
+def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, params,
+                      contact_scale=0.0, skip_pids=(), slab_pull_weight=6.0):
+    """Trial split of every plate (rifting: trial).  For each candidate cut (_cut_candidates),
+    the plate's basal drag, edge drag, contact drag and torques are split between the two
+    sides, and the tension across the cut is compared with the strength along it.
+
+    With ω the plate's solved (unscaled) rotation, half 1 needs the torque
+    τh = D1 ω − τ1 from half 2 to move with the plate.  A uniform normal traction t along
+    the cut (normal n̂ from half 1 to half 2) gives torque t M on half 1, M = ∫ r × n̂ ds,
+    so t = τh · M / |M|²; t > 0 pulls the halves apart.  The cut passes if
+      - t > σ̄, the mean strength along the cut (units: full slab pull per unit length,
+        i.e. t is divided by slab_pull_weight × 0.1° in radians, the torque scale of
+        plate_driver.get_torque_for_segment); σ = rift_strength_continent on continent,
+        oceanic_strength_ratio × σc × max(oceanic_strength_floor, √(min(age, 80)/80)) on
+        ocean;
+      - the free halves (ω ∓ D⁻¹ τh) open along at least half the cut;
+      - both halves are at least min_child_area_deg2, and the cut crosses the plate once.
+    Returns {pid: dict(normal, ratio = t/σ̄, tension, strength, length_deg)} for the plates
+    whose best cut (largest t/σ̄) passes.
+    """
+    grid_deg = params.get('physics_grid_deg', 1.0)
+    sigma_c = params.get('rift_strength_continent', 0.5)
+    ratio_o = params.get('oceanic_strength_ratio', 3.0)
+    floor_o = params.get('oceanic_strength_floor', 0.2)
+    min_area = params.get('min_child_area_deg2', 25.0)
+    width = params.get('edge_drag_width_km', 3000.0) / EARTH_RADIUS_KM
+    unit = slab_pull_weight * np.radians(0.1)
+
+    sl, _ = grid_stride(plate_id_raster, grid_deg)
+    lons, lats = raster_coords(plate_id_raster)
+    pid_g = np.asarray(plate_id_raster.values, float)[sl]
+    lon2d, lat2d = np.meshgrid(lons[sl[1]], lats[sl[0]])
+    dA = np.cos(np.radians(lat2d)) * np.radians(abs(lons[sl[1]][1] - lons[sl[1]][0])) \
+        * np.radians(abs(lats[sl[0]][1] - lats[sl[0]][0]))
+    cont_g = np.zeros(pid_g.shape, bool) if craton_raster is None \
+        else np.nan_to_num(np.asarray(craton_raster.values, float)[sl]) > 0
+    w_g = np.where(cont_g, params.get('continent_drag_factor', 3.0), 1.0) * dA
+    xyz_g = lonlat_to_xyz(lon2d, lat2d)
+    body = parts.get('body_tau')
+    cand_out = {}
+    for pid, om in omega.items():
+        if pid in skip_pids:
+            continue
+        cell = pid_g == pid
+        area_deg2 = dA[cell].sum() * np.degrees(1.0) ** 2
+        if area_deg2 < 2 * min_area or not np.any(om):
+            continue
+        X = xyz_g[cell]
+        Dc = w_g[cell][:, None, None] * (np.eye(3)[None] - X[:, :, None] * X[:, None, :])
+        tb = body[cell] if body is not None else np.zeros_like(X)
+        sp = parts['seg_pid'] == pid
+        Xs, ts, es = parts['seg_xyz'][sp], parts['seg_torque'][sp], width * parts['seg_edge'][sp]
+        # the pair's contact tensor holds the segments of both plates' rings (½ L g gᵀ each)
+        cp = (parts['contact_pid'] == pid) | (parts['contact_nbr'] == pid)
+        Xc, Gc = parts['contact_xyz'][cp], contact_scale * parts['contact_G'][cp]
+        other = np.where(parts['contact_pid'][cp] == pid, parts['contact_nbr'][cp], parts['contact_pid'][cp])
+        om_n = np.array([omega.get(int(q), np.zeros(3)) for q in other]).reshape(-1, 3)
+        tc = -np.einsum('kij,kj->ki', Gc, om - om_n) if len(Gc) else np.zeros((0, 3))   # contact drag at ω
+        centre = (X * dA[cell][:, None]).sum(0)
+        centre /= np.linalg.norm(centre)
+        best = None
+        for nrm in _cut_candidates(centre, params.get('rift_sweep_azimuths', 12),
+                                   tuple(params.get('rift_sweep_offsets_deg', (-15.0, 0.0, 15.0)))):
+            h1 = X @ nrm > 0
+            a1 = dA[cell][h1].sum() * np.degrees(1.0) ** 2
+            if min(a1, area_deg2 - a1) < min_area:
+                continue
+            # the part of the great circle inside the plate: one piece only
+            P = _circle_points(nrm, 0.5)
+            plo, pla = xyz_to_lonlat(P)
+            on = raster_lookup(plate_id_raster, plo, pla) == pid
+            if on.sum() < 2 or np.count_nonzero(on != np.roll(on, 1)) != 2:
+                continue
+            s1, m1s, m1c = X @ nrm > 0, Xs @ nrm > 0, Xc @ nrm > 0
+            D1 = Dc[s1].sum(0) + es[m1s].sum(0)
+            D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
+            # contact drag: an external torque at the solved ω for the tension; an extra
+            # stiffness for the free halves
+            t1 = tb[s1].sum(0) + ts[m1s].sum(0) + tc[m1c].sum(0)
+            K1, K2 = D1 + Gc[m1c].sum(0), D2 + Gc[~m1c].sum(0)
+            tau_h = D1 @ om - t1
+            ds = np.radians(0.5)
+            R = P[on]
+            M = np.cross(R, -nrm).sum(0) * ds                     # n̂ = −nrm: from half 1 to half 2
+            if M @ M <= 0:
+                continue
+            t = float(tau_h @ M / (M @ M)) / unit
+            # strength along the cut
+            cont_c = np.zeros(len(R), bool) if craton_raster is None \
+                else np.nan_to_num(raster_lookup(craton_raster, plo[on], pla[on])) > 0
+            f_age = np.ones(len(R))
+            if age_grid is not None:
+                age_c = raster_lookup(age_grid, plo[on], pla[on]).astype(float)
+                f_age = np.where(np.isfinite(age_c), np.sqrt(np.clip(np.nan_to_num(age_c), 0, 80) / 80.0), 1.0)
+            sig = np.where(cont_c, sigma_c, ratio_o * sigma_c * np.maximum(floor_o, f_age)).mean()
+            if t <= sig:
+                continue
+            # the free halves must open along at least half the cut
+            try:
+                w1 = om - np.linalg.solve(K1, tau_h)
+                w2 = om + np.linalg.solve(K2, tau_h)
+            except np.linalg.LinAlgError:
+                continue
+            opening = (np.cross(w2 - w1, R) @ (-nrm)) > 0
+            if opening.mean() < 0.5:
+                continue
+            if best is None or t / sig > best['ratio']:
+                best = dict(normal=nrm, ratio=t / sig, tension=t, strength=sig,
+                            length_deg=on.sum() * 0.5)
+        if best is not None:
+            cand_out[int(pid)] = best
+    return cand_out
+
+
+def apply_rift_split(plate_id_raster, craton_raster, pid, normal, next_pid):
+    """Cut plate pid along the great circle with the given plane normal.  The smaller side
+    becomes plate next_pid, on the plate-ID raster and on the craton raster (so a rifted
+    continent stays split when the cratons overwrite the plates next step).
+    Returns (plate_id_raster, craton_raster, child_pid or None)."""
+    lons, lats = raster_coords(plate_id_raster)
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    side = lonlat_to_xyz(lon2d, lat2d) @ np.asarray(normal) > 0
+    vals = plate_id_raster.values.copy()
+    mine = vals == pid
+    a, b = mine & side, mine & ~side
+    w = np.cos(np.radians(lat2d))
+    child = a if w[a].sum() < w[b].sum() else b
+    if not child.any():
+        return plate_id_raster, craton_raster, None
+    vals[child] = next_pid
+    plate_id_raster = plate_id_raster.copy(data=vals)
+    if craton_raster is not None:
+        cv = craton_raster.values.copy()
+        cv[child & (cv == pid)] = next_pid
+        craton_raster = craton_raster.copy(data=cv)
+    return plate_id_raster, craton_raster, next_pid
+
+
+def rotate_vector(rotation, v):
+    """A unit vector turned by a pygplates FiniteRotation (unchanged if rotation is None)."""
+    if rotation is None:
+        return np.asarray(v, float)
+    return np.array((rotation * pygplates.PointOnSphere(*np.asarray(v, float))).to_xyz())
+
+
+def rebuild_split_cratons(cratons, craton_raster, parent, child, craton_id_remap=None,
+                          raster_spacing=0.25, topo_simplify=0.4):
+    """After a rift split, replace the craton features of the parent plate (including cratons
+    absorbed into it) by polygons of its craton cells on each side of the cut, taken from the
+    craton raster (plate_rebuild: midpoint outlines; no vector clipping).  Returns the new
+    feature list; other cratons are kept as they are."""
+    remap = craton_id_remap or {}
+    host = lambda p: remap.get(p, p)
+    keep = [f for f in cratons if host(f.get_reconstruction_plate_id()) != parent]
+    vals = np.nan_to_num(np.asarray(craton_raster.values, float))
+    sel = np.where(np.isin(vals, [parent, child]), vals, 0.0)
+    polys = update_plate_polygons(craton_raster.copy(data=sel), raster_spacing=raster_spacing,
+                                  topo_simplify=topo_simplify, frame='midpoint')
+    polys = polys.explode(index_parts=False).reset_index(drop=True)
+    polys = polys[polys.geometry.geom_type.isin(['Polygon']) & polys.PLATEID1.isin([parent, child])]
+    new = list(gdf2gpml(densify_plate_polygons(polys[['PLATEID1', 'geometry']])))
+    for k in [k for k, v in remap.items() if v == parent]:
+        del remap[k]                       # those cratons are now part of the rebuilt features
+    return keep + new
+
+
 def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None,
                      polarity_dict=None, merge_pairs=None, fragmentation_cooldown_pids=None,
                      collision_state=None, craton_id_remap=None, next_plate_id=None,
                      speed_state=None, previous_plate_id=None, force_fields=None,
-                     force_diag=None):
+                     force_diag=None, rift_splits=None, rift_skip=()):
     """Rebuild the plate configuration from moved plate polygons and compute the next
     stage rotations.
+
+    rift_splits [(pid, plane normal xyz)]: plates to cut along great circles this step
+    (decided by the rifting trial split of an earlier step, the normal already moved with
+    the plate); the smaller side becomes a new plate (apply_rift_split).  With
+    rifting: trial, force_diag['rift'] receives this step's passing cuts
+    (rift_trial_splits; plates in rift_skip are not tested) and force_diag['rift_applied']
+    the splits made, as (child, parent).
 
     force_fields feeds the force modes that need them (see force_fields_needed):
       'tracers'       (lon, lat, age, plate_id) seafloor tracers at this step's positions
@@ -1827,6 +2060,19 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     _ct['craton_raster'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     new_plates = []
+    rift_applied = []
+    for pid, normal in (rift_splits or []):
+        plate_id_raster, craton_raster, child = apply_rift_split(plate_id_raster, craton_raster,
+                                                                 int(pid), normal, next_plate_id)
+        if child is not None:
+            if pid in stage_pole_dict:
+                stage_pole_dict[child] = stage_pole_dict[pid]
+            new_plates.append((child, int(pid)))
+            rift_applied.append((child, int(pid)))
+            print('  [rift] plate {} split: new plate {}'.format(int(pid), child))
+            next_plate_id += 1
+    if force_diag is not None:
+        force_diag['rift_applied'] = rift_applied
 
     def _inherit(pairs):
         for new_pid, parent_pid in pairs:
@@ -1916,6 +2162,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                            'ridge_push_smooth_deg') if k in params}
 
     collision_info = {}
+    rifting = params.get('rifting_mode', 'none') == 'trial' and solve_motions
+    torque_parts = {} if rifting else None
     _stage_out = polygons_to_stage_poles(
                                               new_plate_polygons, plate_id_raster, forces,
                                               craton_raster,
@@ -1932,7 +2180,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                               slab_tracers=slab_tracers,
                                               force_params=force_params,
                                               diagnostics=force_diag,
-                                              collision_info=collision_info)
+                                              collision_info=collision_info,
+                                              torque_parts=torque_parts)
     if solve_motions:
         _, _collision_pairs, _torques, _edge_tensors = _stage_out
         new_stage_pole_dict = solve_plate_motions(_torques, _edge_tensors, plate_id_raster,
@@ -1941,6 +2190,17 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                                   contact_tensors=collision_info.get('contact_tensors'))
     else:
         new_stage_pole_dict, _collision_pairs = _stage_out
+
+    if rifting and torque_parts.get('seg_pid') is not None:
+        _t_rift = time.perf_counter()
+        width = params.get('edge_drag_width_km', 3000.0) / EARTH_RADIUS_KM
+        contact_scale = params.get('collision_drag_factor', 10.0) * width if collision_mode == 'viscous' else 0.0
+        rift = rift_trial_splits(plate_id_raster, craton_raster, age_grid, torque_parts,
+                                 speed_state['last']['omega'], params, contact_scale=contact_scale,
+                                 skip_pids=set(rift_skip), slab_pull_weight=forces.get('slab_pull', 6.0))
+        if force_diag is not None:
+            force_diag['rift'] = rift
+        _ct['rift_test'] = time.perf_counter() - _t_rift
 
     if collision_state is not None and (collision_mode == 'coupling' or breakoff):
         # coupling blends the pair's velocities; with breakoff on the viscous contact drag
@@ -1955,7 +2215,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                params.get('breakoff_delay_myr', 10.0),
                                params.get('slab_search_radius_deg', 5.0))
 
-    _ct['stage_poles'] = time.perf_counter() - _t0
+    _ct['stage_poles'] = time.perf_counter() - _t0 - _ct.get('rift_test', 0.0)
 
     _ct_total = sum(_ct.values())
     print('  [compute_timestep {:.1f}s]'.format(_ct_total),

@@ -62,6 +62,7 @@ params['polarity_mode'] = modes['polarity']
 params['ridge_push_mode'] = modes['ridge_push']
 params['tracer_thinning_mode'] = modes['tracer_thinning']
 params['plate_rebuild_mode'] = modes['plate_rebuild']
+params['rifting_mode'] = modes['rifting']
 _needs = sdp.force_fields_needed(params)     # per-step fields the force modes read
 
 
@@ -235,6 +236,10 @@ _conservative_contact   = {}   # {(min_pid, max_pid): int consecutive near-zero 
 _plate_cooldown         = {}   # {pid: float remaining_myr before eligible again}
 _merge_pairs            = []   # [(pid_large, pid_small)] passed to next compute_timestep
 _fragmentation_cooldown_pids = set()
+_rift_state    = {}   # {pid: {'count', 'normal'}} plates whose best cut has passed the trial split
+_rift_planned  = []   # [(pid, plane normal)] splits to make next step
+_rift_cooldown = {}   # {pid: remaining_myr} plates just split, not tested again yet
+_rift_events   = []
 _craton_plate_remap     = {}   # {craton_plateid: host_plateid} for absorbed cratons
 if _slab_enabled:
     _mantle_spacing = params.get('mantle_grid_spacing_deg', 5.0)
@@ -609,6 +614,10 @@ try:
         # ------------------------------------------------------------------
         # Rebuild the plate configuration and compute the next stage rotations
         # ------------------------------------------------------------------
+        # Rift splits decided last step, their cuts moved with the plate
+        _rift_now = [(pid, sdp.rotate_vector(moving_poles.get(pid), n)) for pid, n in _rift_planned]
+        _rift_planned = []
+
         (new_plate_polygons,
          stage_pole_dict,
          rasters,
@@ -626,8 +635,36 @@ try:
                                                speed_state=speed_state,
                                                previous_plate_id=previous_plate_id,
                                                force_fields=_fields,
-                                               force_diag=force_diag)
+                                               force_diag=force_diag,
+                                               rift_splits=_rift_now,
+                                               rift_skip=set(_rift_cooldown))
         _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+        # Rifting (rifting: trial): a plate splits once its best cut has passed the trial
+        # split on a similar great circle for rift_persist_myr in a row
+        if params['rifting_mode'] == 'trial':
+            for _child, _parent in force_diag.get('rift_applied', []):
+                cratons = sdp.rebuild_split_cratons(cratons, rasters['craton'], _parent, _child,
+                                                    _craton_plate_remap, params['raster_spacing'],
+                                                    params.get('topo_simplify_tolerance', 0.4))
+                _rift_cooldown[_child] = _rift_cooldown[_parent] = params.get('rift_cooldown_myr', 10.0)
+                _rift_events.append(dict(time_myr=t, parent=_parent, child=_child))
+                pd.DataFrame(_rift_events).to_csv(os.path.join(output_dir, 'rift_events.csv'), index=False)
+            _persist = max(1, int(round(params.get('rift_persist_myr', 3.0) / delta_time)))
+            _state = {}
+            for _pid, _c in force_diag.get('rift', {}).items():
+                _prev = _rift_state.get(_pid)
+                _same = _prev is not None and abs(
+                    sdp.rotate_vector(moving_poles.get(_pid), _prev['normal']) @ _c['normal']) > np.cos(np.radians(15.0))
+                _count = _prev['count'] + 1 if _same else 1
+                if _count >= _persist:
+                    _rift_planned.append((_pid, _c['normal']))
+                    print('  [rift] plate {} passes the trial split for {} steps (tension / strength {:.2f}, '
+                          'cut {:.0f} deg): splits next step'.format(_pid, _count, _c['ratio'], _c['length_deg']))
+                else:
+                    _state[_pid] = dict(count=_count, normal=_c['normal'])
+            _rift_state = _state
+            _rift_cooldown = {p: r - delta_time for p, r in _rift_cooldown.items() if r > delta_time}
 
         # New plates (fragments) inherit their parent's rotation history, so the
         # rotation file reconstructs them from t = 0 like any other plate.
