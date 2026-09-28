@@ -41,6 +41,9 @@ Every change is a mode flag, and `simple` keeps today's behaviour (Q14).
 
 ## Strength field (Q4, Q5, Q13, Q15)
 
+This is the full field agreed in the interview. R2 starts with constant σc on continents and
+the age-dependent ocean only; the other factors come later, one at a time (see Stages).
+
 Strength σ is defined per cell on the 1° physics grid, in units of **full slab pull per unit
 length** (the slab-pull weight, 6, per unit trench length). All distances are great-circle
 distances on the sphere.
@@ -142,23 +145,35 @@ params:
 The `rifting: none` path keeps today's geometric neck fragmentation, rewritten without shapely
 (Q14).
 
-## Stages
+## Stages: start plain, add one thing at a time
+
+The interview allowed a lot of options. **Build the plainest version that can rift first,
+see what it does, then add the rest one at a time**, each with its own gate showing what it
+changes. Every added feature stays optional.
 
 Each stage ends with a gate: figures in `show-me/`, led by the map sequence, and a `simple`
 regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr on atlantis66.
 
+**Core (in order):**
+
 | Stage | Content | Gate |
 |---|---|---|
-| R0 | Tracer thinning, so 500-Myr runs stay affordable (see Open) | physical 500 Myr: step time, tracer count, age grid unchanged in the physics |
+| R0 | Tracer thinning, so 500-Myr runs stay affordable | physical 500 Myr: step time, tracer count, forces unchanged |
 | R1 | Neck search and `resolve_overlaps(plate_id)` on the sphere, without shapely; re-baseline `simple` | 3-seed 200-Myr `simple` ensemble against the existing one (RMS, plates, pole swings, maps); then a new reference |
-| R2 | `overlap: overriding` | new-plate survival; trench maps |
-| R3 | Strength field (σc, σo(age)) and trial split with `sweep` candidates; least-cost path; split bookkeeping; `rift` label | first rifts; cost per step; split lines on maps |
-| R4 | `necks` as candidates; ribbons | oceanic splits; sliver count against v1 |
-| R5 | Suture tracers, craton-ID lines, `weak_zones` candidates, `collision_weld` | sutures on maps; re-use of sutures by later rifts |
-| R6 | Strength patterns: interiors, craton cores, belts, `cmb_heat` weakening | the strength field on maps; rift paths |
-| R7 | σc sweep (0.25, 0.5, 1.0); defaults for weld, weakening, overlap; 3-seed gate | break-up and re-assembly; RMS drift gone? |
-| R8 | Prototype of the `stress` trigger (internal stress field), a side experiment | looks and cost against the trial split |
-| R9 | README, plan and config brought up to date | — |
+| R2 | **Plain trial split.** `sweep` candidates only, split along the **straight** great circle. Strength is one constant σc on continents; ocean is 3 σc × max(0.2, √(min(age,80)/80)), the one contrast asked for (easy to set to a constant). Persistence 3 Myr. No weakening, patterns, sutures, welding, rift label or path search. Overlaps stay `plate_id` | first rifts; do new plates survive; cost per step; a quick σc sweep (0.25, 0.5, 1.0) |
+
+**Then, one at a time, in an order decided by what R2 shows** (each is its own stage and gate):
+
+- `overlap: overriding`, if R2's new plates are eaten at overlaps
+- least-cost split path, instead of the straight cut
+- `necks` as candidates, and ribbons
+- `rift` label on young rifts (appearance only)
+- suture tracers, craton-ID lines and `weak_zones` candidates
+- `collision_weld`
+- continental strength patterns, one at a time: sutures, interiors, craton cores, belts
+- `rift_weakening: cmb_heat`
+- the `stress` trigger prototype, a side experiment
+- README, plan and config brought up to date
 
 **Gate measures (Q12):**
 - rifts per 100 Myr, and new plates surviving more than 50 Myr;
