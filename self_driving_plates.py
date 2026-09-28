@@ -476,21 +476,43 @@ def _rebuild_frame_rotation(plate_id_raster, seed=0):
     return pygplates.FiniteRotation(pygplates.PointOnSphere(*v), rng.uniform(0.0, 2.0 * np.pi))
 
 
+def _midpoint_arc(arc, frame_lon=180.0):
+    """Replace the corners of a staircase arc by the midpoints of its edges.  The arc's end
+    points (plate junctions) and vertices on the raster's outer frame are kept.  For a line at
+    any angle, the midpoints of successive steps lie along its true direction, whereas the
+    corners of a long run lie exactly on a meridian or parallel."""
+    a = np.asarray(arc, float)
+    if len(a) < 3:
+        return arc
+    on_frame = (np.abs(a[:, 0]) >= frame_lon) | (np.abs(a[:, 1]) >= 90.0)
+    mids = 0.5 * (a[:-1] + a[1:])
+    keep_end = on_frame[:-1] & on_frame[1:]           # an edge along the frame stays as it is
+    pts = np.where(keep_end[:, None], a[1:], mids)
+    if np.allclose(a[0], a[-1]):                        # a closed ring with no junction on it
+        return np.vstack([pts, pts[:1]]).tolist()
+    return np.vstack([a[:1], pts, a[-1:]]).tolist()
+
+
 def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1, frame='lonlat',
                           frame_seed=0, rotated_resimplify_deg=0.05):
     """Plate polygons from the plate-ID raster: polygonise (edges along the cell edges, a
     staircase of meridians and parallels) and simplify the shared arcs (Douglas-Peucker,
-    tolerance topo_simplify in degrees).
+    tolerance topo_simplify in degrees).  frame is the plate_rebuild mode:
 
-    frame='lonlat' does this on the raster's own grid.  Repeated every step, it snaps
-    boundaries that run close to a meridian or parallel onto it exactly (about 7x more
-    boundary length within 1 deg of N-S or E-W than isotropic in physical runs; see
-    show-me/2026-09-28-boundary-orientation).  frame='rotated' resamples the raster (nearest
-    cell) onto the same lon/lat grid turned by a rotation Q that changes every step
-    (_rebuild_frame_rotation), polygonises and simplifies there, and turns the polygons back
-    by Q^-1, so the staircase and the simplification point a different way each step.  A plate
-    cut at Q's dateline comes back as two polygons with the same PLATEID1; their common edge is
-    not a boundary (topo_polygons_to_boundaries skips same-plate arcs).
+    'lonlat'    simplify the staircase as it is.  Repeated every step, this snaps boundaries
+                that run close to a meridian or parallel onto it exactly (about 7x more
+                boundary length within 1 deg of N-S or E-W than isotropic in physical runs;
+                show-me/2026-09-28-boundary-orientation).
+    'midpoint'  first move every staircase vertex to the midpoint of its edge (_midpoint_arc),
+                then simplify.  The midpoints of successive steps lie along the boundary's
+                true direction, so nothing snaps; same cost as 'lonlat'.
+    'rotated'   resample the raster (nearest cell) onto the lon/lat grid turned by a rotation
+                Q that changes every step (_rebuild_frame_rotation), polygonise and simplify
+                there, and turn the polygons back.  It removes the snapping too, but moves
+                every boundary by up to about the tolerance each step, which makes the plate
+                motions jitter (R1 gate), and costs about 0.2 s more.  A plate cut at Q's
+                dateline comes back as two polygons with the same PLATEID1; their common
+                edge is not a boundary (topo_polygons_to_boundaries skips same-plate arcs).
     """
     if frame == 'rotated':
         q = _rebuild_frame_rotation(plate_id_raster, frame_seed)
@@ -518,6 +540,8 @@ def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1, fr
                                     return_type='geopandas', transform=transform)
 
     topo = tp.Topology(new_plate_polygons, prequantize=False)
+    if frame == 'midpoint':
+        topo.output['arcs'] = [_midpoint_arc(a) for a in topo.output['arcs']]
     new_plate_polygons_smooth = topo.toposimplify(topo_simplify).to_gdf()
 
     # Fix any invalid geometries produced by toposimplify before clipping

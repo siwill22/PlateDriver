@@ -15,7 +15,7 @@ MODE_CHOICES = {
     'collision':           ('resistance', 'viscous', 'coupling', 'breakoff'),
     'speed_normalisation': ('none', 'calibrate_once', 'per_step'),
     'tracer_thinning':     ('none', 'cell'),
-    'plate_rebuild':       ('lonlat', 'rotated'),
+    'plate_rebuild':       ('lonlat', 'midpoint', 'rotated'),
 }
 
 PRESETS = {
@@ -39,7 +39,7 @@ PRESETS = {
         'collision':           'breakoff',
         'speed_normalisation': 'calibrate_once',
         'tracer_thinning':     'cell',
-        'plate_rebuild':       'rotated',
+        'plate_rebuild':       'midpoint',
     },
 }
 
@@ -53,7 +53,7 @@ IMPLEMENTED = {
     'collision':           {'resistance', 'viscous', 'coupling', 'breakoff'},
     'speed_normalisation': {'none', 'calibrate_once', 'per_step'},
     'tracer_thinning':     {'none', 'cell'},
-    'plate_rebuild':       {'lonlat', 'rotated'},
+    'plate_rebuild':       {'lonlat', 'midpoint', 'rotated'},
 }
 
 DEFAULT_PRESET = 'physical'
