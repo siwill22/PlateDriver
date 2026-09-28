@@ -238,6 +238,23 @@ Each stage ends at a review gate, and nothing moves to the next stage without ap
   S5's `viscous` mode (a push-back that can stop plates but never reverse them) targets
   this. Until then, compare force modes with `collision: coupling`.
 
+## Found in the ensembles
+
+Three members per preset, 200 Myr on atlantis66, differing only in `tie_break_seed`
+(`random_seed` does not touch the plate motions). Figures in `show-me/2026-09-28-ensembles/`.
+
+- **Every S6 preset difference holds in all members,** with no overlap between the ranges:
+  RMS 43–44 against 138–147 km/Myr; pole swings 1.7–1.9% against 19–26%; speed against trench
+  fraction +0.71 to +0.89 against −0.61 to −0.37; against continental fraction −0.79 to −0.55
+  against +0.58 to +0.69. The continental-fraction correlation is the weakest; the single-run
+  −0.79 was the best member.
+- **Physical is not less chaotic.** Its members agree more at a given model time (81–87% same
+  plate ID at 200 Myr, against 39–43%), but per distance travelled they drift apart at least as
+  fast as simple members. A tie-seed ensemble of physical therefore samples little variety; for
+  different worlds, vary the initial configuration.
+- **No rifting and the slow RMS decline (to 33–35 km/Myr) are systematic:** every member
+  shows them.
+
 ## Decisions made during S3
 
 - **Slabs at step 0:** each step-0 trench gets the slab column the model would have built,

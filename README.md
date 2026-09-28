@@ -382,8 +382,12 @@ and the same every step, and it does not depend on how the nearest cells are fou
 previous step if that plate is one of the tied ones, and otherwise uses the coin flip. This roughly halves A → B → A jitter of boundary cells
 without slowing boundary migration (see `step_stats.csv`: `owner_change_area_frac`,
 `owner_flicker_area_frac`). The model is sensitive to such details: two runs that differ
-only in how ties are broken diverge visibly after a few tens of Myr, while their statistics
-stay alike.
+only in `tie_break_seed` diverge visibly, while their statistics stay alike. In 200-Myr
+atlantis66 runs, `simple` runs are different worlds by about 150 Myr. `physical` runs still
+share about 80% of their plate IDs at 200 Myr, but only because their plates move about 3×
+slower: per 1000 km travelled they drift apart at least as fast. `random_seed` changes only
+hotspots, seamounts, earthquakes and terrain noise, not the plate motions, so ensembles vary
+`tie_break_seed`.
 
 ### `diagnose_run.py`
 
@@ -611,8 +615,8 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
 - **Overlap priority**: where moved plates overlap, the lower PLATEID wins (`resolve_overlaps`). A physically based rule, for example letting the overriding plate win at trenches, is not implemented.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.
 - **Terrain noise is fixed to the grid**: continents move over a stationary noise pattern rather than carrying their texture with them.
-- **No continental rifting** (physical): nothing in the v1 force model breaks a continent, so a supercontinent stays together; in 200-Myr atlantis66 runs the continents barely rearrange and RMS speed drifts down from 50 to about 35 km/Myr.
+- **No continental rifting** (physical): nothing in the v1 force model breaks a continent, so a supercontinent stays together; in 200-Myr atlantis66 runs (all three members of a tie-seed ensemble) the continents barely rearrange and RMS speed drifts down from 50 to 33–35 km/Myr.
 - **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is a v2 item.
 - **Ridges sit close to trenches** in places (a thin strip of young plate made and consumed side by side), in both presets.
 - **Ridges are not split into spreading segments and transforms**; boundaries are continuous lines of varying obliquity. A post-processing step could add this for appearance.
-- **Seafloor tracers accumulate** where plates are slow (150k after 200 Myr in physical, against 53k in simple).
+- **Seafloor tracers accumulate** where plates are slow (146k–150k after 200 Myr in physical, against 45k–58k in simple, over three members each).
