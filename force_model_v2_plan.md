@@ -1,0 +1,178 @@
+# Force model v2 — plan: rifting and plate splitting
+
+Draft prepared with Claude Code. Decisions come from a design interview (Q1–Q15); the
+question number is given in brackets.
+
+## Goal
+
+v1 never breaks a continent. In every 200-Myr `physical` run on atlantis66 (three tie
+seeds), the supercontinent plate 222 stays whole and RMS speed drifts from 50 to 33–35 km/Myr.
+The existing plate splitting only ever makes short-lived slivers: 5–8 new plates per 200 Myr
+in physical, a median size of 0.04–0.10% of the sphere and a median life of 6–11 Myr. None
+reaches 1% of the sphere and none is continental. Two things cause this:
+
+- The cut is purely geometric (a thin neck), so the two halves need not move apart.
+- Where plates overlap, the lower plate ID wins. A new plate always has the highest ID, so it
+  loses area at every convergent contact.
+
+v2 adds one splitting mechanism for **any** plate, continental or oceanic: a plate splits
+where the forces would pull its two halves apart harder than the lithosphere can resist.
+Every change is a mode flag, and `simple` keeps today's behaviour (Q14).
+
+## Decisions
+
+| # | Topic | Decision | Options kept |
+|---|---|---|---|
+| Q1 | Trigger | **Trial split:** solve each candidate cut's two halves against the plate as a whole (see Formulation) | `stress` prototype, a side experiment (stage R8) |
+| Q2 | Candidate cuts | All three sources, each switchable: `sweep` (great circles), `weak_zones` (sutures etc., Q9), `necks` (rewritten on the sphere, without shapely) | any subset |
+| Q3 | Split line | Least-cost path on the 1° physics grid within ±5° of the chosen cut. Cost is the strength field plus a little noise. The trial-split test is re-checked on the final line | — |
+| Q4 | Resistance | The tension per km of cut is compared with the mean strength along the cut. Continental and oceanic strength differ | — |
+| Q5 | Weakening | `rift_weakening: none \| cmb_heat` | default chosen from test runs |
+| Q6 | Opening | Immediate: the cut is classified from motion, so a diverging cut is a ridge at once. For the first `rift_phase_myr` (20) it is labelled `rift` in the outputs (topography, earthquakes) | — |
+| Q7 | Overlaps | `overlap: overriding`. At a trench the overriding plate keeps the overlap (stored polarity); at a collision the continent keeps it; otherwise the plate that held the cell last step. Done on the plate-ID raster, without shapely | `plate_id` (simple, lower ID wins) |
+| Q8 | Screening | All plates above `min_child_area_deg2` × 2 are tested every step. A split needs the test passed on a similar cut for `rift_persist_myr` (3) consecutive steps. Both halves then get a cooldown | — |
+| Q9 | Weak zones | **Suture tracers:** dropped on both plates along a continent–continent contact that has collided longer than `breakoff_delay_myr`. They are advected and never deleted, and written to `sutures_NNNN.geojson`. **Craton-ID lines:** where cratons of different original plates touch inside one plate. **Optional input file** of sutures for the starting world | — |
+| Q10 | Welding | `collision_weld: off \| on`. After `weld_after_myr` (30) of continuous continental collision the smaller plate is absorbed; the suture tracers mark the join | default chosen from test runs |
+| Q11 | Unstable shapes | Neck and ribbon cuts are only candidates and must pass the same force test. A short cut has a high pull per km, so necks split easily, but only where the halves separate | — |
+| Q12 | Validation | atlantis66, 500 Myr; one run per development step, three tie seeds at each gate. The map sequence stays the main figure | — |
+| Q13 | Strength | See Strength field | — |
+| Q14 | `simple` | Rewrite the neck search and `resolve_overlaps(plate_id)` without shapely. Re-baseline once, after a statistical check against the existing three-seed `simple` ensemble | — |
+| Q15 | Pattern defaults | See Strength field | — |
+
+## Strength field (Q4, Q5, Q13, Q15)
+
+Strength σ is defined per cell on the 1° physics grid, in units of **full slab pull per unit
+length** (the slab-pull weight, 6, per unit trench length). All distances are great-circle
+distances on the sphere.
+
+- **Continent:**
+  σ = σc × max(interior, core) × suture × belts × weakening.
+  - `interior`: rises linearly from 1 at the continent edge to 2 at 1000 km inland
+    (`interior_strength_factor: 2`, `interior_strength_km: 1000`).
+  - `core`: `craton_core_factor` (3) inside craton-core polygons from an optional input file
+    (atlantis66 has none), carried with the plate. The larger of interior and core applies.
+  - `suture`: 0.5 within 2° of a suture tracer or a craton-ID line
+    (`suture_strength_factor: 0.5`, `suture_width_deg: 2`).
+  - `belts`: 1 + 0.4·n, clipped to 0.3–1.7, where n is a unit-variance band-limited
+    random pattern with features about 1500 km across (spherical harmonics, as for the
+    terrain noise), fixed to the continent (`belt_amplitude: 0.4`, `belt_scale_km: 1500`).
+    **This makes plate motions depend on `random_seed`,** which they don't today.
+  - `weakening` (`cmb_heat` mode): 1 − 0.5 · heat / `cmb_max_heat`, i.e. strength is at most
+    halved over the hottest mantle (`cmb_weakening: 0.5`).
+- **Ocean:** σ = 3 σc × max(0.2, √(min(age, 80) / 80)) × weakening.
+  - `oceanic_strength_ratio: 3`, `oceanic_strength_floor: 0.2`.
+  - The √age saturation at 80 Myr matches slab pull (plate thickness grows as √age).
+  - Old ocean is therefore 3× continent, 20-Myr ocean 1.5×, and ocean younger than about
+    3 Myr 0.6×. Cuts along young ridge flanks are easier than through continents, which allows
+    occasional ridge jumps.
+- **σc:** a sweep of 0.25, 0.5 and 1.0 in 500-Myr runs (R7). The default is chosen from those
+  runs.
+
+Every factor has its own switch and can be set to 1 (off).
+
+## Formulation
+
+**Trial split (Q1, Q4).** Take a plate P with drag tensor D, torque τ and solved rotation ω
+(from the global solve, including contact tensors). A candidate cut divides P's physics-grid
+cells and boundary segments into halves 1 and 2. Then:
+
+- D = D1 + D2 and τ = τ1 + τ2. Basal cells, body forces and boundary segments are assigned by
+  side; the cut itself carries no edge force.
+- The torque that half 2 must pass to half 1 to keep it moving with ω is τh = D1 ω − τ1.
+- The cut has unit normal n̂(s), pointing from half 1 to half 2. A uniform normal traction t
+  along the cut gives a torque on half 1 of t · M, where M = ∫ r × n̂ ds. The tension is then
+  t = τh · M / |M|². Positive t means the halves are pulling apart.
+- The cut **passes** if t > σ̄, the length-weighted mean strength along the cut.
+- As a second check, the free halves, ωi = Di⁻¹ τi (with the same k), must open along at least
+  half the cut length.
+
+**Cost.** For the `sweep`, each plate's centroid c has 12 azimuths × 3 offsets (cut planes
+through the origin with normal n cos δ + c sin δ, δ ∈ {−15°, 0, 15°} of arc). Cuts that
+leave a half smaller than `min_child_area_deg2` are dropped. The per-candidate sums over cells
+are one matrix product (candidates × cells) @ (cells × 9), so a whole step's test should cost
+0.01–0.05 s. This is to be measured in R3.
+
+**Split (Q3).**
+
+- The least-cost path runs between the chosen cut's two end points on the plate edge. It is a
+  Dijkstra search on the 1° grid (scipy `csgraph`), with great-circle edge lengths × mean cell
+  strength, inside a ±5° corridor.
+- Cells are assigned to a side by flood fill from the path.
+- The test is re-run on the final line and the split is abandoned if it fails.
+- The child gets a new plate ID and inherits the parent's rotation history, polarity decisions
+  (parent, X) → (child, X), collision states along its part of the boundary, and its cratons.
+- Tracers, seamounts and slab tracers take the plate ID of their cell.
+- The cut's segments are labelled `rift` for `rift_phase_myr`.
+
+**Craton-cut rule.** Today a cut that would separate cratons of the same plate is skipped. With
+`rifting: trial` this rule is dropped; that is the point. A split craton keeps its original ID
+on both sides, which later makes a craton-ID line if the halves are welded back together.
+
+## Config schema
+
+```yaml
+force_modes:
+  rifting: trial                 # none (simple: today's geometric neck splits) | trial
+  rift_candidates: [sweep, necks, weak_zones]
+  rift_weakening: cmb_heat       # none | cmb_heat
+  overlap: overriding            # plate_id (simple) | overriding
+  collision_weld: on             # off | on   (defaults of these three decided in R7)
+params:
+  rift_strength_continent: 0.5   # σc, units of full slab pull per unit length (R7 sweep 0.25/0.5/1.0)
+  oceanic_strength_ratio: 3
+  oceanic_strength_floor: 0.2
+  interior_strength_factor: 2
+  interior_strength_km: 1000
+  craton_core_factor: 3
+  craton_cores: null             # optional polygons file
+  suture_strength_factor: 0.5
+  suture_width_deg: 2
+  sutures: null                  # optional initial sutures file
+  belt_amplitude: 0.4            # 0 = off
+  belt_scale_km: 1500
+  cmb_weakening: 0.5
+  rift_persist_myr: 3
+  rift_phase_myr: 20
+  rift_sweep_azimuths: 12
+  rift_sweep_offsets_deg: [-15, 0, 15]
+  rift_path_corridor_deg: 5
+  weld_after_myr: 30
+```
+
+The `rifting: none` path keeps today's geometric neck fragmentation, rewritten without shapely
+(Q14).
+
+## Stages
+
+Each stage ends with a gate: figures in `show-me/`, led by the map sequence, and a `simple`
+regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr on atlantis66.
+
+| Stage | Content | Gate |
+|---|---|---|
+| R0 | Tracer thinning, so 500-Myr runs stay affordable (see Open) | physical 500 Myr: step time, tracer count, age grid unchanged in the physics |
+| R1 | Neck search and `resolve_overlaps(plate_id)` on the sphere, without shapely; re-baseline `simple` | 3-seed 200-Myr `simple` ensemble against the existing one (RMS, plates, pole swings, maps); then a new reference |
+| R2 | `overlap: overriding` | new-plate survival; trench maps |
+| R3 | Strength field (σc, σo(age)) and trial split with `sweep` candidates; least-cost path; split bookkeeping; `rift` label | first rifts; cost per step; split lines on maps |
+| R4 | `necks` as candidates; ribbons | oceanic splits; sliver count against v1 |
+| R5 | Suture tracers, craton-ID lines, `weak_zones` candidates, `collision_weld` | sutures on maps; re-use of sutures by later rifts |
+| R6 | Strength patterns: interiors, craton cores, belts, `cmb_heat` weakening | the strength field on maps; rift paths |
+| R7 | σc sweep (0.25, 0.5, 1.0); defaults for weld, weakening, overlap; 3-seed gate | break-up and re-assembly; RMS drift gone? |
+| R8 | Prototype of the `stress` trigger (internal stress field), a side experiment | looks and cost against the trial split |
+| R9 | README, plan and config brought up to date | — |
+
+**Gate measures (Q12):**
+- rifts per 100 Myr, and new plates surviving more than 50 Myr;
+- the largest connected continent over time: continental cells joined across plate
+  boundaries, as a share of all continent, which tracks break-up and re-assembly;
+- RMS speed (it should stop drifting down), plate count and pole swings;
+- tracer count and step time.
+
+## Open
+
+- **Tracer thinning (R0):** proposal to confirm at R0. Every 10 steps, keep at most one
+  seafloor tracer per 0.5° cell per plate (the one nearest the cell centre). The physics age
+  grid is 1°, so the forces should be unchanged. The 0.25° output age grid may lose a little
+  detail.
+- **Other shapely uses** (`update_plate_polygons` smoothing with topojson, `make_valid`, and
+  `contains_xy`) are out of scope for v2 unless they block the rifting work.
+- **Per-segment polarity** and **ridge/transform splitting** remain later items.
