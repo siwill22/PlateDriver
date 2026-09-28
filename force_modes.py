@@ -14,6 +14,7 @@ MODE_CHOICES = {
     'polarity':            ('id', 'age'),
     'collision':           ('resistance', 'viscous', 'coupling', 'breakoff'),
     'speed_normalisation': ('none', 'calibrate_once', 'per_step'),
+    'tracer_thinning':     ('none', 'cell'),
 }
 
 PRESETS = {
@@ -25,6 +26,7 @@ PRESETS = {
         'polarity':            'id',
         'collision':           'resistance',
         'speed_normalisation': 'none',
+        'tracer_thinning':     'none',
     },
     'physical': {
         'drag':                'area_edge',
@@ -34,6 +36,7 @@ PRESETS = {
         'polarity':            'age',
         'collision':           'breakoff',
         'speed_normalisation': 'calibrate_once',
+        'tracer_thinning':     'cell',
     },
 }
 
@@ -46,6 +49,7 @@ IMPLEMENTED = {
     'polarity':            {'id', 'age'},
     'collision':           {'resistance', 'viscous', 'coupling', 'breakoff'},
     'speed_normalisation': {'none', 'calibrate_once', 'per_step'},
+    'tracer_thinning':     {'none', 'cell'},
 }
 
 DEFAULT_PRESET = 'physical'

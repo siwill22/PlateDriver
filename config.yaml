@@ -54,6 +54,8 @@ params:
   # --- Seafloor & ridge tracers ---
   tracer_spacing_deg:          1.0      # seed point spacing along ridge boundaries
   tracer_offset_deg:           0.6      # perpendicular offset from ridge axis at seeding
+  tracer_thin_cell_deg:        0.5      # [tracer_thinning: cell] keep one seafloor tracer per cell this size per plate
+  tracer_thin_interval:        10       # [tracer_thinning: cell] thin every this many steps
   seafloor_spacing_deg:        1.0      # grid spacing for initial seafloor age tracers
   spreading_rate_km_per_myr:   50.0     # assumed spreading rate for age estimation
 

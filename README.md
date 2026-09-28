@@ -176,6 +176,16 @@ listed is `simple`'s):
     default) or as `coupling` (`breakoff_contact: coupling`). Coupling ignores contact
     length, so a small continent on a large plate can weld it to a supercontinent.
 
+- **`tracer_thinning`** (not a force; it keeps long runs affordable):
+  - `none`: tracers are never thinned. Ridges seed a pair every `tracer_spacing_deg` of ridge
+    every step whatever the spreading rate, so slow plates pile tracers up (200k after
+    500 Myr of `physical`).
+  - `cell` (`physical`): every `tracer_thin_interval` steps, each plate keeps at most one
+    seafloor tracer per `tracer_thin_cell_deg` lon/lat cell, the one nearest the cell centre
+    (about 70k after 500 Myr). On the 1° physics grid this changes the mean age by under
+    1 Myr, but where young and old seafloor meet on one plate the step moves by up to one
+    cell.
+
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
 tracer on its own plate, moved one step ahead. With `slab_length` or `depth_split`,
@@ -214,6 +224,8 @@ params:
 
   tracer_spacing_deg:          1.0     # along-ridge spacing for newly seeded tracer pairs
   tracer_offset_deg:           0.6     # perpendicular offset from ridge axis when seeding
+  tracer_thin_cell_deg:        0.5     # [tracer_thinning: cell] one tracer per cell this size per plate
+  tracer_thin_interval:        10      # [tracer_thinning: cell] thin every this many steps
   seafloor_spacing_deg:        1.0     # grid spacing for initial seafloor age tracers
   spreading_rate_km_per_myr:   50.0    # assumed spreading rate for initial age estimation
 
@@ -619,4 +631,5 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
 - **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is a v2 item.
 - **Ridges sit close to trenches** in places (a thin strip of young plate made and consumed side by side), in both presets.
 - **Ridges are not split into spreading segments and transforms**; boundaries are continuous lines of varying obliquity. A post-processing step could add this for appearance.
-- **Seafloor tracers accumulate** where plates are slow (146k–150k after 200 Myr in physical, against 45k–58k in simple, over three members each).
+- **Seafloor tracers accumulate** where plates are slow with `tracer_thinning: none` (146k–150k after 200 Myr in physical, against 45k–58k in simple, over three members each). `physical` thins them (`cell`).
+- **Mixed seafloor ages on one plate:** in places (e.g. near the south pole in long physical runs) tracers of 20–190 Myr lie within 1° of each other on the same plate, so the age there is poorly defined.

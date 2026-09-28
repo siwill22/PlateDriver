@@ -60,6 +60,7 @@ params['slab_pull_mode'] = modes['slab_pull']
 params['slab_suction_mode'] = modes['slab_suction']
 params['polarity_mode'] = modes['polarity']
 params['ridge_push_mode'] = modes['ridge_push']
+params['tracer_thinning_mode'] = modes['tracer_thinning']
 _needs = sdp.force_fields_needed(params)     # per-step fields the force modes read
 
 
@@ -722,6 +723,9 @@ try:
                                              offset_deg=params['tracer_offset_deg'])
         tracers = gpd.GeoDataFrame(pd.concat([tracers, new_tracers], ignore_index=True),
                                    geometry='geometry').set_crs(epsg=4326, allow_override=True)
+        if params['tracer_thinning_mode'] == 'cell' and i % int(params.get('tracer_thin_interval', 10)) == 0:
+            tracers = sdp.thin_tracers(tracers, rasters['plate_id'],
+                                       cell_deg=params.get('tracer_thin_cell_deg', 0.5))
         _step_times['tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         if _slab_track:

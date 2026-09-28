@@ -158,7 +158,7 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
 
 | Stage | Content | Gate |
 |---|---|---|
-| R0 | Tracer thinning, so 500-Myr runs stay affordable | physical 500 Myr: step time, tracer count, forces unchanged |
+| R0 | Tracer thinning, so 500-Myr runs stay affordable. **Done:** `tracer_thinning: cell` (physical); tracers level off at ~70k instead of 200k at 500 Myr; tracer step 0.57 → 0.30 s late in a run; 1° age grid changes by < 1 Myr on average, but steps between young and old seafloor on one plate move by up to 0.5°. `show-me/2026-09-28-r0-tracer-thinning/` | physical 500 Myr: step time, tracer count, forces unchanged |
 | R1 | Neck search and `resolve_overlaps(plate_id)` on the sphere, without shapely; re-baseline `simple` | 3-seed 200-Myr `simple` ensemble against the existing one (RMS, plates, pole swings, maps); then a new reference |
 | R2 | **Plain trial split.** `sweep` candidates only, split along the **straight** great circle. Strength is one constant σc on continents; ocean is 3 σc × max(0.2, √(min(age,80)/80)), the one contrast asked for (easy to set to a constant). Persistence 3 Myr. No weakening, patterns, sutures, welding, rift label or path search. Overlaps stay `plate_id` | first rifts; do new plates survive; cost per step; a quick σc sweep (0.25, 0.5, 1.0) |
 
@@ -182,12 +182,16 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
 - RMS speed (it should stop drifting down), plate count and pole swings;
 - tracer count and step time.
 
+## Found in R0
+
+- **RMS speed does not keep falling in 500-Myr physical runs.** It bottoms out at 27–32 km/Myr
+  around 220–245 Myr and recovers to 42–43 km/Myr by 480 Myr, as continents 111, 333 and 444
+  rearrange. Plate 222 is still whole at 500 Myr: that remains the rifting target.
+- **Mixed seafloor ages on one plate** near the south pole on plate 114 (tracers of 20–190 Myr
+  within 1°). This is pre-existing and not caused by thinning; left for later.
+
 ## Open
 
-- **Tracer thinning (R0):** proposal to confirm at R0. Every 10 steps, keep at most one
-  seafloor tracer per 0.5° cell per plate (the one nearest the cell centre). The physics age
-  grid is 1°, so the forces should be unchanged. The 0.25° output age grid may lose a little
-  detail.
 - **Other shapely uses** (`update_plate_polygons` smoothing with topojson, `make_valid`, and
   `contains_xy`) are out of scope for v2 unless they block the rifting work.
 - **Per-segment polarity** and **ridge/transform splitting** remain later items.

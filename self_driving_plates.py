@@ -2002,6 +2002,34 @@ def _points_every(boundaries_gdf, mask, spacing_deg):
             np.array(normals).reshape(-1, 3))
 
 
+def thin_tracers(tracers, plate_id_raster, cell_deg=0.5):
+    """Keep at most one active seafloor tracer per cell_deg lon/lat cell per plate: the
+    one nearest the cell centre.  Ridges seed a tracer pair every step whatever the
+    spreading rate, so slow plates pile tracers up; the physics age grid (1 deg) cannot use
+    that density.  Cells are lon/lat, so near the poles they are smaller and keep more
+    tracers than needed, which only makes the thinning more conservative."""
+    if tracers is None or len(tracers) == 0:
+        return tracers
+    active = tracers[tracers.active.astype(bool)]
+    lon, lat = active.geometry.x.values, active.geometry.y.values
+    pid = raster_lookup(plate_id_raster, lon, lat)
+    pid = np.where(np.isfinite(pid), pid, -1).astype(np.int64)
+    ci = np.floor((np.mod(lon + 180.0, 360.0)) / cell_deg).astype(np.int64)
+    ri = np.floor((np.clip(lat, -90.0, 90.0 - 1e-9) + 90.0) / cell_deg).astype(np.int64)
+    # distance to the cell centre on the sphere (chord length is monotonic in angle)
+    clon = np.radians(-180.0 + (ci + 0.5) * cell_deg); clat = np.radians(-90.0 + (ri + 0.5) * cell_deg)
+    lo, la = np.radians(lon), np.radians(lat)
+    d = (np.cos(la) * np.cos(lo) - np.cos(clat) * np.cos(clon)) ** 2 + \
+        (np.cos(la) * np.sin(lo) - np.cos(clat) * np.sin(clon)) ** 2 + (np.sin(la) - np.sin(clat)) ** 2
+    ncols = int(round(360.0 / cell_deg)) + 1
+    key = (pid * (ncols * ncols) + ri * ncols + ci)
+    order = np.lexsort((d, key))                      # by cell, nearest first
+    first = np.ones(len(order), bool)
+    first[1:] = key[order][1:] != key[order][:-1]
+    keep = np.sort(order[first])
+    return active.iloc[keep].reset_index(drop=True)
+
+
 def seed_ridge_tracers(boundaries_gdf, spacing_deg=2.0,
                        threshold=1.0, offset_deg=0.6):
     """Seed tracer point pairs offset perpendicular to divergent boundary segments.
