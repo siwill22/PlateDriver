@@ -10,18 +10,28 @@ The model solves a 2-D linear PDE for the barotropic streamfunction ψ:
     R · ∇²ψ  +  β(φ) · ∂ψ/∂x  =  curl(τ) / (ρ · H₀)
 
 where
-    R     – linear bottom-drag coefficient [s⁻¹]  (default 5 × 10⁻⁸)
+    R     – linear bottom-drag coefficient [s⁻¹]  (default 1 × 10⁻⁶)
+    ∇²    – Laplacian on the sphere:  ∂²/∂x² + ∂²/∂y² − (tan φ / R_Earth) ∂/∂y
     β(φ)  – meridional gradient of Coriolis parameter, 2Ω cos(φ)/R_Earth [m⁻¹ s⁻¹]
-    τ     – idealised zonal wind stress:  τ_x(φ) = τ₀ cos(π φ / φ_max)
+    τ     – idealised zonal wind stress:  τ_x(φ) = −τ₀ cos(π φ / φ_max)
     ρ     – seawater density [kg m⁻³]
     H₀    – reference ocean depth [m]
 
-Boundary condition:  ψ = 0 on all land pixels and domain edges.
+Boundary condition:  ψ = 0 on all land pixels, poleward of --pole-mask, and
+at the edges of a non-global grid.  Longitude is periodic for global grids.
 Surface velocities:  u = −∂ψ/∂y,  v = ∂ψ/∂x  [m s⁻¹].
 
-The wind profile gives easterly trades (|φ| < 30°), westerly belt (30°–60°),
-and polar easterlies (>60°).  The β-term produces asymmetric gyres with
+With the default φ_max = 60° the wind profile gives easterly trades from the
+equator to 30° (strongest at the equator), westerlies from 30° to the pole
+(strongest at 60°, fading to zero at 90°); there are no polar easterlies.
+The β-term produces clockwise (NH) / anticlockwise (SH) subtropical gyres with
 western-boundary-current intensification (Gulf Stream-like).
+
+Numerics: the β·∂ψ/∂x term is discretised with a first-order upwind
+(eastward one-sided) difference, because the solution is built up from the
+east and the boundary layer sits on the western side.  This keeps ψ free of
+grid-scale oscillations even when the Stommel boundary-layer width R/β is
+smaller than the grid spacing (the layer is then about one cell wide).
 
 Usage
 -----
@@ -35,6 +45,7 @@ All functions can also be imported directly.
 """
 
 import argparse
+import os
 import sys
 
 import numpy as np
@@ -55,14 +66,14 @@ RHO     = 1025.0    # kg m⁻³
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_TOPO_FILE   = './output/topo_bathy_0060.nc'
-DEFAULT_OUTPUT_FILE = './output/ocean_currents_0060.nc'
-
 DEFAULT_TAU0      = 0.1      # Pa   – peak wind-stress magnitude
-DEFAULT_R_DRAG    = 5e-8     # s⁻¹  – linear bottom drag (Stommel 1948)
-DEFAULT_PHI_MAX   = 60.0     # deg  – latitude of wind-stress zero-crossing
+DEFAULT_R_DRAG    = 1e-6     # s⁻¹  – linear bottom drag (Stommel 1948); boundary
+                             #        layer width R/β ≈ 50 km at 35°
+DEFAULT_PHI_MAX   = 60.0     # deg  – latitude of peak westerlies; trades turn to
+                             #        westerlies at φ_max/2 (30°)
 DEFAULT_H0        = 3500.0   # m    – reference ocean depth
 DEFAULT_POLE_MASK = 85.0     # deg  – mask ocean poleward of this latitude
+MAX_POLE_MASK     = 89.0     # deg  – upper limit for pole mask (cos φ → 0 guard)
 
 # Abyssal (Stommel-Arons) model
 DEFAULT_POLE_LAT  = 55.0     # deg  – deep-water formation latitude threshold
@@ -83,6 +94,82 @@ def _norm_coords(da):
     return da.rename(renames) if renames else da
 
 
+def _load_ocean_grid(topo_file, pole_mask_deg):
+    """Load a topo grid and build the ocean mask used by the Stommel solver.
+
+    - Both axes are sorted ascending, so β and ∂/∂x have the right sign even
+      for grids stored north-to-south or east-to-west.
+    - A duplicated seam column (gridline registration: both -180 and +180) is
+      dropped, so the periodic stencil does not treat one meridian as two
+      separate nodes.  Use _restore_seam() to put it back on the outputs.
+    - Ocean poleward of pole_mask_deg (capped at MAX_POLE_MASK) and the first
+      and last latitude rows are treated as land (ψ = 0).
+    - For a non-global longitude range the first and last columns are also
+      treated as land, instead of wrapping one edge onto the other.
+
+    Returns
+    -------
+    lats, lons : 1-D arrays (ascending; lons without the seam duplicate)
+    ocean_mask : 2-D bool array (nlat, nlon)
+    out_lons   : longitudes of the output grid (with the seam column, if any)
+    has_seam   : True if the seam column was dropped
+    """
+    print(f'Loading {topo_file} ...', file=sys.stderr)
+    topo = _norm_coords(xr.open_dataarray(topo_file)).sortby('lat').sortby('lon')
+    lats = topo.lat.values.astype(float)
+    out_lons = topo.lon.values.astype(float)
+    dlat = float(lats[1] - lats[0])
+    dlon = float(out_lons[1] - out_lons[0])
+    print(f'  Grid  {len(lats)} × {len(out_lons)}  '
+          f'(Δlat = {dlat:.3f}°, Δlon = {dlon:.3f}°)', file=sys.stderr)
+
+    span = float(out_lons[-1] - out_lons[0])
+    has_seam  = abs(span - 360.0) < 1e-3 * dlon
+    is_global = has_seam or abs(span + dlon - 360.0) < 1e-3 * dlon
+    values = topo.values
+    lons   = out_lons
+    if has_seam:
+        values = values[:, :-1]
+        lons   = out_lons[:-1]
+
+    if pole_mask_deg > MAX_POLE_MASK:
+        print(f'  Warning: --pole-mask {pole_mask_deg}° is too close to the pole '
+              f'(cos φ → 0 makes the system ill-conditioned); using '
+              f'{MAX_POLE_MASK}°.', file=sys.stderr)
+        pole_mask_deg = MAX_POLE_MASK
+
+    # Ocean mask — exclude high-latitude cells to avoid cos φ → 0 singularity
+    ocean_mask = values < 0
+    ocean_mask[np.abs(lats) > pole_mask_deg, :] = False
+    ocean_mask[[0, -1], :] = False                 # domain edges: ψ = 0
+    if not is_global:
+        print('  Longitude range is not global: edge columns set to ψ = 0.',
+              file=sys.stderr)
+        ocean_mask[:, [0, -1]] = False
+
+    n_ocean = int(ocean_mask.sum())
+    print(f'  Ocean pixels: {n_ocean:,} / {ocean_mask.size:,}  '
+          f'({100*n_ocean/ocean_mask.size:.1f}%)', file=sys.stderr)
+    return lats, lons, ocean_mask, out_lons, has_seam
+
+
+def _restore_seam(arr, has_seam):
+    """Re-append the duplicated ±180 column (a copy of the first column)."""
+    return np.concatenate([arr, arr[:, :1]], axis=1) if has_seam else arr
+
+
+def _check_output_path(output_file, topo_file):
+    """Refuse to overwrite the input topo grid."""
+    if os.path.realpath(output_file) == os.path.realpath(topo_file):
+        raise ValueError(f'Output file {output_file!r} is the same as the input '
+                         'topo file; refusing to overwrite it.')
+
+
+def _default_output(topo_file, suffix):
+    """topo_bathy_0060.nc → topo_bathy_0060<suffix> (same directory)."""
+    return os.path.splitext(topo_file)[0] + suffix
+
+
 # ---------------------------------------------------------------------------
 # Core physics
 # ---------------------------------------------------------------------------
@@ -91,7 +178,11 @@ def _compute_wind_stress_curl(lats, tau0=DEFAULT_TAU0,
                                phi_max_deg=DEFAULT_PHI_MAX):
     """Compute the vertical component of curl(τ) [Pa m⁻¹] for a zonal-only wind.
 
-    Wind stress:  τ_x(φ) = τ₀ · cos(π · φ / φ_max),  τ_y = 0
+    Wind stress:  τ_x(φ) = −τ₀ · cos(π · φ / φ_max),  τ_y = 0
+
+    i.e. easterly (τ_x < 0) trades between the equator and φ_max/2, and
+    westerlies (τ_x > 0) peaking at φ_max.  With φ_max = 60° the zero
+    crossings are at ±30° and ±90°.
 
     Spherical curl:
         curl(τ) = −(1 / (R·cos φ)) · d(cos φ · τ_x) / dφ
@@ -109,7 +200,7 @@ def _compute_wind_stress_curl(lats, tau0=DEFAULT_TAU0,
     lats_rad    = np.radians(lats)
     phi_max_rad = np.radians(phi_max_deg)
 
-    tau_x  = tau0 * np.cos(np.pi * lats_rad / phi_max_rad)
+    tau_x  = -tau0 * np.cos(np.pi * lats_rad / phi_max_rad)  # < 0 = easterly
     f_phi  = np.cos(lats_rad) * tau_x                       # cos(φ)·τ_x
     df_dphi = np.gradient(f_phi, lats_rad)                  # numerical d/dφ
     cos_phi = np.clip(np.cos(lats_rad), 1e-6, None)
@@ -126,13 +217,23 @@ def _build_stommel_matrix(ocean_mask, lats, lons,
 
     where forcing_2d already incorporates all physical constants (ρ, H₀, etc.)
     and has units [s⁻²].  Land pixels receive identity rows (ψ = 0 Dirichlet BC).
-    Longitude is treated as periodic; latitude uses one-sided differences at
-    the poles (those rows are masked as land before this function is called).
+
+    Discretisation (x = eastward, y = northward distance in metres):
+      ∇²ψ     = ψ_xx + ψ_yy − (tan φ / R_Earth) ψ_y   (spherical Laplacian;
+                centred differences, including the tan φ metric term)
+      β ψ_x   ≈ β (ψ[i, j+1] − ψ[i, j]) / dx         (first-order upwind: the
+                interior solution is set from the east, the boundary layer is
+                on the west, so a one-sided eastward difference gives a
+                non-oscillating ψ at any grid spacing)
+
+    Longitude is treated as periodic, so lons must NOT contain a duplicated
+    seam column (see _load_ocean_grid).  The first and last latitude rows
+    must be masked as land (done in _load_ocean_grid).
 
     Parameters
     ----------
     ocean_mask : 2-D bool array  (nlat, nlon)
-    lats, lons : 1-D arrays  [degrees]
+    lats, lons : 1-D arrays  [degrees], ascending
     R_drag : float  [s⁻¹]
     forcing_2d : 2-D array  (nlat, nlon)  [s⁻²]  or None (→ zero RHS)
 
@@ -150,6 +251,7 @@ def _build_stommel_matrix(ocean_mask, lats, lons,
 
     dy      = R_EARTH * dlat_rad                             # m, constant
     cos_phi = np.clip(np.cos(lats_rad), 1e-6, None)         # (nlat,)
+    tan_phi = np.sin(lats_rad) / cos_phi                    # (nlat,)
     dx_row  = R_EARTH * cos_phi * dlon_rad                  # (nlat,) – m
     beta    = 2.0 * OMEGA * cos_phi / R_EARTH               # (nlat,) – m⁻¹s⁻¹
 
@@ -163,37 +265,41 @@ def _build_stommel_matrix(ocean_mask, lats, lons,
 
     dx_oi  = dx_row[oi]         # per-pixel dx (m)
     beta_oi = beta[oi]          # per-pixel β
+    tan_oi = tan_phi[oi]        # per-pixel tan φ
     dy2    = dy ** 2
     dx2_oi = dx_oi ** 2
+
+    # Metric term −(tan φ / R_Earth)·∂ψ/∂y, centred, multiplied by R
+    metric_oi = R_drag * tan_oi / (2.0 * R_EARTH * dy)
 
     # -----------------------------------------------------------------------
     # Stencil contributions (vectorised COO format)
     # -----------------------------------------------------------------------
 
-    # Diagonal: R · (−2/dy² − 2/dx²)
+    # Diagonal: R · (−2/dy² − 2/dx²)  −  β/dx   (upwind β term)
     r_c = ocean_flat
     c_c = ocean_flat
-    d_c = R_drag * (-2.0 / dy2 - 2.0 / dx2_oi)
+    d_c = R_drag * (-2.0 / dy2 - 2.0 / dx2_oi) - beta_oi / dx_oi
 
-    # North neighbor (i+1, j) — clamp at domain edge
+    # North neighbor (i+1, j) — clamp at domain edge (edge rows are land)
     i_n = np.minimum(oi + 1, nlat - 1)
     r_n = ocean_flat;  c_n = i_n * nlon + oj
-    d_n = np.full(len(ocean_flat), R_drag / dy2)
+    d_n = R_drag / dy2 - metric_oi
 
     # South neighbor (i−1, j)
     i_s = np.maximum(oi - 1, 0)
     r_s = ocean_flat;  c_s = i_s * nlon + oj
-    d_s = np.full(len(ocean_flat), R_drag / dy2)
+    d_s = R_drag / dy2 + metric_oi
 
-    # East neighbor (i, j+1) — periodic longitude
+    # East neighbor (i, j+1) — periodic longitude; carries the upwind β term
     j_e = (oj + 1) % nlon
     r_e = ocean_flat;  c_e = oi * nlon + j_e
-    d_e = R_drag / dx2_oi + beta_oi / (2.0 * dx_oi)
+    d_e = R_drag / dx2_oi + beta_oi / dx_oi
 
     # West neighbor (i, j−1) — periodic longitude
     j_w = (oj - 1) % nlon
     r_w = ocean_flat;  c_w = oi * nlon + j_w
-    d_w = R_drag / dx2_oi - beta_oi / (2.0 * dx_oi)
+    d_w = R_drag / dx2_oi
 
     # Land identity rows
     r_land = land_flat;  c_land = land_flat
@@ -271,7 +377,7 @@ def _make_diagnostic_plot(psi_2d, u, v, ocean_mask, lats, lons, out_nc_path):
     ax.contour(lons, lats, psi_ocean, levels=20,
                colors='k', linewidths=0.35, alpha=0.45)
     ax.imshow(land_rgba, origin='lower', aspect='auto',
-              extent=[-180, 180, -90, 90])
+              extent=[lons[0], lons[-1], lats[0], lats[-1]])
     ax.set_title('Barotropic streamfunction  ψ  (Stommel 1948 model)',
                  fontsize=12)
     ax.set_xlabel('Longitude');  ax.set_ylabel('Latitude')
@@ -285,12 +391,12 @@ def _make_diagnostic_plot(psi_2d, u, v, ocean_mask, lats, lons, out_nc_path):
                u[::stride, ::stride], v[::stride, ::stride],
                scale=3.0, scale_units='width', width=0.0018, alpha=0.75)
     ax2.imshow(land_rgba, origin='lower', aspect='auto',
-               extent=[-180, 180, -90, 90])
+               extent=[lons[0], lons[-1], lats[0], lats[-1]])
     ax2.set_title('Surface current speed  +  velocity vectors')
     ax2.set_xlabel('Longitude');  ax2.set_ylabel('Latitude')
 
     plt.tight_layout()
-    out_png = out_nc_path.replace('.nc', '_preview.png')
+    out_png = os.path.splitext(out_nc_path)[0] + '_preview.png'
     plt.savefig(out_png, dpi=150, bbox_inches='tight')
     plt.close()
     print(f'  Diagnostic plot → {out_png}', file=sys.stderr)
@@ -301,7 +407,7 @@ def _make_diagnostic_plot(psi_2d, u, v, ocean_mask, lats, lons, out_nc_path):
 # ---------------------------------------------------------------------------
 
 def generate_ocean_currents(topo_file,
-                             output_file=DEFAULT_OUTPUT_FILE,
+                             output_file=None,
                              tau0=DEFAULT_TAU0,
                              R_drag=DEFAULT_R_DRAG,
                              phi_max_deg=DEFAULT_PHI_MAX,
@@ -318,42 +424,35 @@ def generate_ocean_currents(topo_file,
     topo_file : str
         Path to a topo_bathy_NNNN.nc from run_SDP.py.
         Convention: values > 0 = land (m elevation), < 0 = ocean (m depth).
-    output_file : str
-        Output NetCDF path.
+    output_file : str or None
+        Output NetCDF path.  Defaults to topo_file with suffix
+        _surface_currents.nc.
     tau0 : float
         Peak wind-stress magnitude [Pa] (default 0.1).
     R_drag : float
-        Linear bottom-drag coefficient [s⁻¹] (default 5 × 10⁻⁸).
+        Linear bottom-drag coefficient [s⁻¹] (default 1 × 10⁻⁶).
     phi_max_deg : float
-        Latitude of wind-stress zero-crossing [°] (default 60).
+        Latitude of peak westerly wind stress [°] (default 60); the trades
+        change to westerlies at φ_max/2.
     H0 : float
         Reference ocean depth used in RHS normalisation [m] (default 3500).
     pole_mask_deg : float
-        Ocean pixels poleward of this latitude are masked (cos φ → 0 guard).
+        Ocean pixels poleward of this latitude are masked (cos φ → 0 guard;
+        capped at 89°).
     plot : bool
         Save a diagnostic PNG alongside the NetCDF.
 
     Returns
     -------
-    xr.Dataset  with variables psi, u, v.
+    xr.Dataset  with variables psi, u, v (ascending lat/lon).
     """
-    print(f'Loading {topo_file} ...', file=sys.stderr)
-    topo = _norm_coords(xr.open_dataarray(topo_file))
-    lats = topo.lat.values
-    lons = topo.lon.values
-    nlat, nlon = len(lats), len(lons)
-    dlat = abs(float(lats[1] - lats[0]))
-    dlon = abs(float(lons[1] - lons[0]))
-    print(f'  Grid  {nlat} × {nlon}  '
-          f'(Δlat = {dlat:.3f}°, Δlon = {dlon:.3f}°)', file=sys.stderr)
+    if output_file is None:
+        output_file = _default_output(topo_file, '_surface_currents.nc')
+    _check_output_path(output_file, topo_file)
 
-    # Ocean mask — exclude high-latitude cells to avoid cos φ → 0 singularity
-    ocean_raw  = topo.values < 0
-    pole_strip = (np.abs(lats) > pole_mask_deg)[:, None] * np.ones(nlon, dtype=bool)
-    ocean_mask = ocean_raw & ~pole_strip
-    n_ocean = int(ocean_mask.sum())
-    print(f'  Ocean pixels: {n_ocean:,} / {nlat*nlon:,}  '
-          f'({100*n_ocean/(nlat*nlon):.1f}%)', file=sys.stderr)
+    lats, lons, ocean_mask, out_lons, has_seam = _load_ocean_grid(
+        topo_file, pole_mask_deg)
+    nlat, nlon = ocean_mask.shape
 
     # Wind-stress curl → 2-D forcing array  [s⁻²]
     print('Computing wind stress curl ...', file=sys.stderr)
@@ -377,6 +476,11 @@ def generate_ocean_currents(topo_file,
     print(f'  ψ range (ocean): {psi_ocean.min():.2f} – {psi_ocean.max():.2f} m² s⁻¹',
           file=sys.stderr)
     print(f'  Max surface speed: {speed_max:.4f} m s⁻¹', file=sys.stderr)
+
+    # Put back the duplicated ±180 column (if the input had one)
+    psi_2d, u, v, ocean_mask = (_restore_seam(a, has_seam)
+                                for a in (psi_2d, u, v, ocean_mask))
+    lons = out_lons
 
     # Output Dataset
     coords = {'lat': lats, 'lon': lons}
@@ -490,7 +594,7 @@ def generate_deep_currents(topo_file,
     output_file : str or None
         Output NetCDF path.  Defaults to topo_file with suffix _deep_currents.nc.
     R_drag : float  [s⁻¹]
-        Linear bottom-drag coefficient (default 5 × 10⁻⁸).
+        Linear bottom-drag coefficient (default 1 × 10⁻⁶).
     pole_lat : float  [degrees]
         Latitude poleward of which deep water forms (default 55).
     w_deep : float  [m s⁻¹]
@@ -498,36 +602,23 @@ def generate_deep_currents(topo_file,
     H0 : float  [m]
         Reference abyssal depth (default 3500).
     pole_mask_deg : float  [degrees]
-        Ocean pixels beyond this latitude are masked (cos φ guard, default 85).
+        Ocean pixels beyond this latitude are masked (cos φ guard, default 85,
+        capped at 89).
     plot : bool
         Save a diagnostic PNG alongside the NetCDF.
 
     Returns
     -------
-    xr.Dataset  with variables psi, u, v.
+    xr.Dataset  with variables psi, u, v (ascending lat/lon).
     """
     if output_file is None:
-        output_file = topo_file.replace('.nc', '_deep_currents.nc')
-        if output_file == topo_file:
-            output_file = topo_file + '_deep_currents.nc'
+        output_file = _default_output(topo_file, '_deep_currents.nc')
+    _check_output_path(output_file, topo_file)
 
-    print(f'[Stommel-Arons abyssal model]', file=sys.stderr)
-    print(f'Loading {topo_file} ...', file=sys.stderr)
-    topo = _norm_coords(xr.open_dataarray(topo_file))
-    lats = topo.lat.values
-    lons = topo.lon.values
-    nlat, nlon = len(lats), len(lons)
-    print(f'  Grid  {nlat} × {nlon}  '
-          f'(Δlat = {abs(float(lats[1]-lats[0])):.3f}°, '
-          f'Δlon = {abs(float(lons[1]-lons[0])):.3f}°)', file=sys.stderr)
-
-    # Ocean mask
-    ocean_raw  = topo.values < 0
-    pole_strip = (np.abs(lats) > pole_mask_deg)[:, None] * np.ones(nlon, dtype=bool)
-    ocean_mask = ocean_raw & ~pole_strip
-    n_ocean = int(ocean_mask.sum())
-    print(f'  Ocean pixels: {n_ocean:,} / {nlat*nlon:,}  '
-          f'({100*n_ocean/(nlat*nlon):.1f}%)', file=sys.stderr)
+    print('[Stommel-Arons abyssal model]', file=sys.stderr)
+    lats, lons, ocean_mask, out_lons, has_seam = _load_ocean_grid(
+        topo_file, pole_mask_deg)
+    nlat, nlon = ocean_mask.shape
 
     # Abyssal forcing:  f(φ) · w_E(x,y) / H₀  [s⁻²]
     print('Computing abyssal forcing ...', file=sys.stderr)
@@ -549,6 +640,11 @@ def generate_deep_currents(topo_file,
     print(f'  ψ range (ocean): {psi_ocean.min():.2f} – {psi_ocean.max():.2f} m² s⁻¹',
           file=sys.stderr)
     print(f'  Max abyssal speed: {speed_max:.4f} m s⁻¹', file=sys.stderr)
+
+    # Put back the duplicated ±180 column (if the input had one)
+    psi_2d, u, v, ocean_mask = (_restore_seam(a, has_seam)
+                                for a in (psi_2d, u, v, ocean_mask))
+    lons = out_lons
 
     coords = {'lat': lats, 'lon': lons}
     ds = xr.Dataset(
@@ -591,8 +687,8 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    parser.add_argument('--topo', default=DEFAULT_TOPO_FILE, metavar='NC',
-                        help='topo_bathy NetCDF (default: %(default)s)')
+    parser.add_argument('--topo', required=True, metavar='NC',
+                        help='topo_bathy NetCDF (e.g. output/topo_bathy_0060.nc)')
     parser.add_argument('--output', '-o', default=None, metavar='NC',
                         help='Output NetCDF (default: auto-named beside --topo)')
     parser.add_argument('--R-drag', type=float, default=DEFAULT_R_DRAG,
@@ -613,7 +709,8 @@ def main():
                       help='Peak wind-stress [Pa] (default: %(default)s)')
     surf.add_argument('--phi-max', type=float, default=DEFAULT_PHI_MAX,
                       dest='phi_max_deg',
-                      help='Wind zero-crossing latitude [°] (default: %(default)s)')
+                      help='Latitude of peak westerlies [°]; trades change to '
+                           'westerlies at half this latitude (default: %(default)s)')
 
     # Deep / abyssal model
     deep = parser.add_argument_group('deep (abyssal thermohaline) model')
@@ -632,10 +729,9 @@ def main():
     args = parser.parse_args()
 
     if args.deep:
-        out = args.output or args.topo.replace('.nc', '_deep_currents.nc')
         generate_deep_currents(
             topo_file     = args.topo,
-            output_file   = out,
+            output_file   = args.output,
             R_drag        = args.R_drag,
             pole_lat      = args.pole_lat,
             w_deep        = args.w_deep,
@@ -644,10 +740,9 @@ def main():
             plot          = args.plot,
         )
     else:
-        out = args.output or args.topo.replace('.nc', '_surface_currents.nc')
         generate_ocean_currents(
             topo_file     = args.topo,
-            output_file   = out,
+            output_file   = args.output,
             tau0          = args.tau0,
             R_drag        = args.R_drag,
             phi_max_deg   = args.phi_max_deg,

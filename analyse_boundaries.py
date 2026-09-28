@@ -4,8 +4,13 @@ analyse_boundaries.py  —  compute boundary length and crust flux time series.
 Reads boundaries_NNNN.geojson files from an output directory and produces
 boundary_stats.csv with one row per saved timestep.
 
+Divergence values in the boundary files are in km/Myr (= mm/yr), so
+flux = length (km) × |rate| (km/Myr) is in km²/Myr.
+
 Usage:
     python analyse_boundaries.py --output_dir ./output [--delta_time 1.0]
+
+--delta_time (Myr per model step, as in config.yaml) adds a time_myr column.
 """
 
 import argparse
@@ -17,8 +22,7 @@ import geopandas as gpd
 import pandas as pd
 import pygplates
 
-EARTH_RADIUS_KM = 6371.009
-CM_PER_YR_TO_KM_PER_MYR = 10.0   # 1 cm/yr = 10 km/Myr
+EARTH_RADIUS_KM = pygplates.Earth.mean_radius_in_kms
 
 
 def arc_length_km(geom):
@@ -45,7 +49,7 @@ def process_file(path):
 
     gdf['length_km'] = gdf.geometry.apply(arc_length_km)
 
-    # Divergence is cm/yr; convert to km/Myr for flux
+    # Divergence is already km/Myr
     div = gdf['divergence'].astype(float) if 'divergence' in gdf.columns else 0.0
 
     ridge = gdf['boundary_type'] == 'ridge'
@@ -57,10 +61,8 @@ def process_file(path):
     cons_len   = gdf.loc[cons,  'length_km'].sum()
 
     # Flux = sum(length_i × |rate_i|) in km² / Myr
-    ridge_flux = (gdf.loc[ridge, 'length_km'] *
-                  div[ridge].abs() * CM_PER_YR_TO_KM_PER_MYR).sum()
-    sub_flux   = (gdf.loc[sub,   'length_km'] *
-                  div[sub].abs()   * CM_PER_YR_TO_KM_PER_MYR).sum()
+    ridge_flux = (gdf.loc[ridge, 'length_km'] * div[ridge].abs()).sum()
+    sub_flux   = (gdf.loc[sub,   'length_km'] * div[sub].abs()).sum()
 
     return {
         'ridge_length_km':           ridge_len,
@@ -74,6 +76,8 @@ def process_file(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output_dir', default='./output')
+    parser.add_argument('--delta_time', type=float, default=None,
+                        help='Myr per model step; adds a time_myr column')
     args = parser.parse_args()
 
     pattern = os.path.join(args.output_dir, 'boundaries_*.geojson')
@@ -106,6 +110,9 @@ def main():
     cols = ['timestep', 'ridge_length_km', 'subduction_length_km',
             'conservative_length_km', 'ridge_flux_km2_per_myr',
             'subduction_flux_km2_per_myr']
+    if args.delta_time is not None:
+        df['time_myr'] = df['timestep'] * args.delta_time
+        cols.insert(1, 'time_myr')
     df = df[cols]
 
     out_path = os.path.join(args.output_dir, 'boundary_stats.csv')
