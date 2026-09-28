@@ -216,6 +216,9 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
   - With σc 0.5, the continental correlation of Forsyth–Uyeda weakens (r −0.87 → −0.67).
   - σc 1.0 follows the no-rifting run almost exactly, so the trial mode leaves an unsplit
     world unchanged.
+  - σc 0.5 over tie seeds 0, 1 and 2: 24, 28 and 21 rifts. 222 rifts at about 275 Myr in seeds 0
+    and 1 but never in seed 2, so the supercontinent break-up is not yet robust. The early rifts
+    (333, 115, 666, 555) repeat in all three.
 
 ## Open
 
