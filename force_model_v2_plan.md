@@ -23,7 +23,7 @@ Every change is a mode flag, and `simple` keeps today's behaviour (Q14).
 
 | # | Topic | Decision | Options kept |
 |---|---|---|---|
-| Q1 | Trigger | **Trial split:** solve each candidate cut's two halves against the plate as a whole (see Formulation) | `stress` prototype, a side experiment (stage R8) |
+| Q1 | Trigger | **Trial split:** solve each candidate cut's two halves against the plate as a whole (see Formulation) | `stress` prototype, a side experiment (a later stage) |
 | Q2 | Candidate cuts | All three sources, each switchable: `sweep` (great circles), `weak_zones` (sutures etc., Q9), `necks` (rewritten on the sphere, without shapely) | any subset |
 | Q3 | Split line | Least-cost path on the 1° physics grid within ±5° of the chosen cut. Cost is the strength field plus a little noise. The trial-split test is re-checked on the final line | — |
 | Q4 | Resistance | The tension per km of cut is compared with the mean strength along the cut. Continental and oceanic strength differ | — |
@@ -68,7 +68,7 @@ distances on the sphere.
   - Old ocean is therefore 3× continent, 20-Myr ocean 1.5×, and ocean younger than about
     3 Myr 0.6×. Cuts along young ridge flanks are easier than through continents, which allows
     occasional ridge jumps.
-- **σc:** a sweep of 0.25, 0.5 and 1.0 in 500-Myr runs (R7). The default is chosen from those
+- **σc:** a sweep of 0.25, 0.5 and 1.0 in 500-Myr runs (R2). The default is chosen from those
   runs.
 
 Every factor has its own switch and can be set to 1 (off).
@@ -93,7 +93,7 @@ cells and boundary segments into halves 1 and 2. Then:
 through the origin with normal n cos δ + c sin δ, δ ∈ {−15°, 0, 15°} of arc). Cuts that
 leave a half smaller than `min_child_area_deg2` are dropped. The per-candidate sums over cells
 are one matrix product (candidates × cells) @ (cells × 9), so a whole step's test should cost
-0.01–0.05 s. This is to be measured in R3.
+0.01–0.05 s. This is to be measured in R2.
 
 **Split (Q3).**
 
@@ -119,9 +119,9 @@ force_modes:
   rift_candidates: [sweep, necks, weak_zones]
   rift_weakening: cmb_heat       # none | cmb_heat
   overlap: overriding            # plate_id (simple) | overriding
-  collision_weld: on             # off | on   (defaults of these three decided in R7)
+  collision_weld: on             # off | on   (defaults decided when each is added)
 params:
-  rift_strength_continent: 0.5   # σc, units of full slab pull per unit length (R7 sweep 0.25/0.5/1.0)
+  rift_strength_continent: 0.5   # σc, units of full slab pull per unit length (R2 sweep 0.25/0.5/1.0)
   oceanic_strength_ratio: 3
   oceanic_strength_floor: 0.2
   interior_strength_factor: 2
