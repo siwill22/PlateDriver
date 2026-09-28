@@ -74,6 +74,7 @@ All outputs go to the directory specified by `output_dir` in `config.yaml`.
 | `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, slab-force totals and mean trench slab depth (slab modes), seconds per step by phase |
 | `trench_forces_NNNN.csv` | Every `csv_save_interval` steps | One row per trench segment of each plate: position, plates, downgoing or not, convergence, slab depth, seafloor age, pull and suction weights. Only with `slab_pull: ramp/slab_length`, `slab_suction: depth_split` or `polarity: age` |
 | `plate_stats.csv` | Every step | One row per plate per step: angular velocity (pole, rate), RMS speed, area, continental fraction, perimeter and trench (downgoing/overriding), ridge and conservative lengths |
+| `rift_events.csv` | Each rift (`rifting: trial`) | Time, parent plate and new plate of every rift split |
 | `run_info.yaml` | Start of run | The config used, the resolved force modes and the git commit |
 | `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file with finite rotations for all plates up to step NNNN. The time column is elapsed model time (see [Rotation file format](#rotation-file-format)) |
 
@@ -199,6 +200,11 @@ listed is `simple`'s):
     removes the snapping, but it moves every boundary by up to about the tolerance each step,
     which makes plate poles jitter, and it costs about 0.2 s per step. It is kept for
     comparison.
+- **`rifting`** (splitting a plate under tension; see [Rifting](#rifting-trial-split)):
+  - `none`: plates split only at thin necks (fragmentation) or when disconnected.
+  - `trial` (`physical`): each step every plate is tested against a set of straight
+    great-circle cuts, and a cut splits the plate when the tension across it beats the
+    strength along it. It costs about 0.2 s per step.
 
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
@@ -369,6 +375,61 @@ Disconnected pieces of one plate ID (for example, after overlaps are resolved) a
 - Pieces smaller than `min_peninsula_area_deg2` are absorbed by their neighbour.
 - Larger pieces become child plates.
 
+### Rifting (trial split)
+
+With `rifting: trial` (`physical`), plates can split under tension.
+
+**Tension across a cut.**
+- For a plate with solved rotation ω, the torque the plate would need in order to move as one
+  piece is τh = D₁ω − τ₁. Here τ₁ is the driving torque on one half and D₁ that half's drag,
+  including the drag of its collision contacts.
+- The cut's moment is M = ∫ r × n̂ ds along the cut.
+- The tension is τh·M / |M|², per unit length. It is expressed in units of full slab pull,
+  like the strength.
+
+**The candidate cuts.** Each plate has 12 azimuths × 3 offsets (`rift_sweep_offsets_deg`) of
+great circles through its centroid, all on the sphere.
+
+**When a cut passes.** A cut is kept when all of the following hold:
+1. The tension is greater than the mean strength along the cut:
+   - continent: `rift_strength_continent` (σc);
+   - ocean: `oceanic_strength_ratio` × σc × max(`oceanic_strength_floor`, √(min(age, 80)/80)).
+2. The two halves, solved free of each other, would open along at least half of the cut.
+3. Both halves are at least `min_child_area_deg2`.
+4. The circle crosses the plate only once.
+
+**How a split happens.**
+- The plate splits when a similar cut, with its normal carried with the plate and within 15°,
+  has passed for `rift_persist_myr` steps.
+- The split is applied at the start of the next step. The smaller side becomes a new plate
+  that inherits the parent's stage pole and rotation history.
+- The cratons on each side are rebuilt from the split craton raster.
+- Both halves are then left untested for `rift_cooldown_myr`.
+- Each split is written to `rift_events.csv`.
+
+```yaml
+params:
+  rift_strength_continent:     0.5      # σc, full slab pull per unit length
+  oceanic_strength_ratio:      3        # oceanic strength at >= 80 Myr, x σc
+  oceanic_strength_floor:      0.2      # oceanic strength ~ sqrt(min(age, 80)/80), not below this
+  rift_persist_myr:            3        # the cut must pass for this long before the plate splits
+  rift_cooldown_myr:           10       # both halves are not tested again for this long
+  rift_sweep_azimuths:         12       # candidate great circles through the plate centroid
+  rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
+```
+
+**How σc behaves** (500-Myr `physical` runs on atlantis66, one run each; see
+`show-me/2026-09-28-r2-trial-split/`):
+
+| σc | rifts | result |
+|---|---|---|
+| 1.0 | 1 | practically no rifting |
+| 0.5 | 24 | the large continent 222 rifts twice; continents disperse |
+| 0.25 | 530 | runaway, 182 plates at 500 Myr |
+
+**Weak young ocean.** Ocean younger than about 9 Myr is weaker than continent, so at σc 0.5
+most cuts split off small oceanic pieces near ridges, and they last 25–50 Myr.
+
 ### Plate merging
 
 Plates with persistently near-zero relative motion are absorbed into their largest neighbour.
@@ -521,6 +582,8 @@ update_plate_id_raster        rasterize to plate_id grid, highest PLATEID1 first
                               any overlap; fill gaps with the nearest plate (SphereTree), ties by tie_break
 [apply_plate_merges]          merge_pairs from the caller (merging_enabled only)
 [craton raster]               rasterize cratons (with remap of absorbed plates), overwrite plate_id
+[apply_rift_split]            rift splits planned last step, cut along the carried great circle
+                              (rifting: trial)
 split_disconnected_plates     disconnected pieces of one ID → new plates (or absorbed if tiny)
 update_plate_polygons         polygonize raster → [staircase midpoints (plate_rebuild: midpoint)] →
                               toposimplify → clip
@@ -539,6 +602,7 @@ polygons_to_stage_poles       boundary and body forces → torque per plate; pol
                               (any drag or speed mode; simple: ω = torque)
 [apply_collision_coupling]    collision: coupling (and breakoff on coupling)
 [detach_colliding_slabs]      collision: breakoff
+[rift_trial_splits]           tension against strength on candidate cuts (rifting: trial)
 ```
 
 ### Key data structures
@@ -643,7 +707,12 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
 - **Ridge push points mostly exactly N–S or E–W** (`ridge_push: body`): the age grid is piecewise constant (nearest tracer) and its gradient is taken along lon and lat. The effect on plate motion is not measured.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.
 - **Terrain noise is fixed to the grid**: continents move over a stationary noise pattern rather than carrying their texture with them.
-- **No continental rifting** (physical): nothing in the v1 force model breaks a continent, so a supercontinent stays together; in 200-Myr atlantis66 runs (all three members of a tie-seed ensemble) the continents barely rearrange and RMS speed drifts down from 50 to 33–35 km/Myr.
+- **Rifting is plain** (`rifting: trial`):
+  - Cuts are straight great circles through or near the centroid.
+  - Continental strength is one constant.
+  - Young ocean is weaker than continent, so most rifts split off short-lived oceanic slivers.
+  - Sutures, craton cores, welding and path search are later v2 items.
+  - With `rifting: none`, nothing breaks a continent.
 - **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is a v2 item.
 - **Ridges sit close to trenches** in places (a thin strip of young plate made and consumed side by side), in both presets.
 - **Ridges are not split into spreading segments and transforms**; boundaries are continuous lines of varying obliquity. A post-processing step could add this for appearance.

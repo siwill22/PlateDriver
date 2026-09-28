@@ -160,7 +160,7 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
 |---|---|---|
 | R0 | Tracer thinning, so 500-Myr runs stay affordable. **Done:** `tracer_thinning: cell` (physical); tracers level off at ~70k instead of 200k at 500 Myr; tracer step 0.57 → 0.30 s late in a run; 1° age grid changes by < 1 Myr on average, but steps between young and old seafloor on one plate move by up to 0.5°. `show-me/2026-09-28-r0-tracer-thinning/` | physical 500 Myr: step time, tracer count, forces unchanged |
 | R1 | Neck search and `resolve_overlaps(plate_id)` on the sphere, without shapely; re-baseline `simple`. **Done:** overlaps are resolved on the raster (highest ID burnt first), so shapely is gone from that step; `simple` is bit-identical, so there was no re-baseline. The neck search already worked on the raster. New `plate_rebuild` mode: `midpoint` (physical) removes the snapping to meridians and parallels (alignment 1.2 against 7.3); `rotated` was rejected because it makes plate poles jitter. `show-me/2026-09-28-r1-plate-rebuild/` | 3-seed 500-Myr physical runs per mode |
-| R2 | **Plain trial split.** `sweep` candidates only, split along the **straight** great circle. Strength is one constant σc on continents; ocean is 3 σc × max(0.2, √(min(age,80)/80)), the one contrast asked for (easy to set to a constant). Persistence 3 Myr. No weakening, patterns, sutures, welding, rift label or path search. Overlaps stay `plate_id` | first rifts; do new plates survive; cost per step; a quick σc sweep (0.25, 0.5, 1.0) |
+| R2 | **Plain trial split.** `sweep` candidates only, split along the **straight** great circle. Strength is one constant σc on continents; ocean is 3 σc × max(0.2, √(min(age,80)/80)), the one contrast asked for (easy to set to a constant). Persistence 3 Myr. No weakening, patterns, sutures, welding, rift label or path search. Overlaps stay `plate_id`. **Sweep done** (tie seed 0): σc 1.0 gives 1 rift in 500 Myr; σc 0.25 runs away (530 rifts, 182 plates); **σc 0.5 chosen as default for now** (to be tuned): 24 rifts, 222 rifts twice (275 and 406 Myr, both children alive at 500), largest continent 52% → 28%; 15 of 24 rifts are oceanic slivers of 0.1–1% of the sphere living 25–50 Myr; `rift_test` 0.2 s per step. `show-me/2026-09-28-r2-trial-split/` | first rifts; do new plates survive; cost per step; a quick σc sweep (0.25, 0.5, 1.0) |
 
 **Then, one at a time, in an order decided by what R2 shows** (each is its own stage and gate):
 
@@ -209,6 +209,13 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
     gates.
   - Per-plate Forsyth–Uyeda correlations must leave out short-lived slivers (count plates
     living at least 50 Myr).
+
+- **R2 found:**
+  - Young ocean is weaker than continent under the agreed law (3σc√(age/80) < σc below about
+    9 Myr; 0.6σc at the floor), so most rifts cut ridge flanks. This is kept for now (plain).
+  - With σc 0.5, the continental correlation of Forsyth–Uyeda weakens (r −0.87 → −0.67).
+  - σc 1.0 follows the no-rifting run almost exactly, so the trial mode leaves an unsplit
+    world unchanged.
 
 ## Open
 
