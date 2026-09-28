@@ -185,6 +185,20 @@ listed is `simple`'s):
     (about 70k after 500 Myr). On the 1° physics grid this changes the mean age by under
     1 Myr, but where young and old seafloor meet on one plate the step moves by up to one
     cell.
+- **`plate_rebuild`** (not a force; how the plates are rebuilt from the raster every step):
+  - `lonlat`: polygonise the 0.25° plate-ID raster (a staircase of meridians and parallels)
+    and simplify it (`topo_simplify_tolerance`, degrees). Repeated every step, this snaps
+    boundaries that run close to a meridian or parallel onto it exactly: in 500-Myr
+    `physical` runs about 7× more boundary length lies within 1° of N–S or E–W than for
+    random orientations (see `show-me/2026-09-28-boundary-orientation/`).
+  - `midpoint` (`physical`): before simplifying, every staircase vertex is moved to the midpoint
+    of its edge. The midpoints of successive steps lie along a boundary's true direction, so
+    nothing snaps, and it costs the same as `lonlat`.
+  - `rotated`: the same as `lonlat`, but done on the raster resampled onto a lon/lat grid turned
+    by a rotation that changes every step, with the polygons turned back afterwards. It also
+    removes the snapping, but it moves every boundary by up to about the tolerance each step,
+    which makes plate poles jitter, and it costs about 0.2 s per step. It is kept for
+    comparison.
 
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
@@ -503,13 +517,13 @@ Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_re
 ```
 tessellate_polygons           densify polygon edges to tessellation_deg (great circles)
 plate_polygons_to_wrapped_gdf wrap at dateline, keeping interior rings (holes)
-resolve_overlaps              clip overlapping polygons by PLATEID1 priority
-update_plate_id_raster        rasterize to plate_id grid; fill gaps with the nearest plate (SphereTree),
-                              ties by tie_break
+update_plate_id_raster        rasterize to plate_id grid, highest PLATEID1 first so the lowest ID keeps
+                              any overlap; fill gaps with the nearest plate (SphereTree), ties by tie_break
 [apply_plate_merges]          merge_pairs from the caller (merging_enabled only)
 [craton raster]               rasterize cratons (with remap of absorbed plates), overwrite plate_id
 split_disconnected_plates     disconnected pieces of one ID → new plates (or absorbed if tiny)
-update_plate_polygons         polygonize raster → toposimplify → clip → densify edges to ≤ 1°
+update_plate_polygons         polygonize raster → [staircase midpoints (plate_rebuild: midpoint)] →
+                              toposimplify → clip
 [detect_and_split_plates]     shape screening → spherical erosion neck search → cut
                               (fragmentation_enabled only)
 detect_enclosed_plates        absorb plates enclosed by one larger plate
@@ -624,7 +638,9 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
 
 ## Known issues and TODO
 
-- **Overlap priority**: where moved plates overlap, the lower PLATEID wins (`resolve_overlaps`). A physically based rule, for example letting the overriding plate win at trenches, is not implemented.
+- **Overlap priority**: where moved plates overlap, the lower PLATEID wins (the plates are burnt into the raster highest ID first). A physically based rule, for example letting the overriding plate win at trenches, is not implemented.
+- **Boundaries snap to meridians and parallels** with `plate_rebuild: lonlat` (`simple`); see `plate_rebuild`.
+- **Ridge push points mostly exactly N–S or E–W** (`ridge_push: body`): the age grid is piecewise constant (nearest tracer) and its gradient is taken along lon and lat. The effect on plate motion is not measured.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.
 - **Terrain noise is fixed to the grid**: continents move over a stationary noise pattern rather than carrying their texture with them.
 - **No continental rifting** (physical): nothing in the v1 force model breaks a continent, so a supercontinent stays together; in 200-Myr atlantis66 runs (all three members of a tie-seed ensemble) the continents barely rearrange and RMS speed drifts down from 50 to 33–35 km/Myr.
