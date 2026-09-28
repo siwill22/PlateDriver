@@ -190,6 +190,18 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
 - **Mixed seafloor ages on one plate** near the south pole on plate 114 (tracers of 20–190 Myr
   within 1°). This is pre-existing and not caused by thinning; left for later.
 
+- **Boundaries snap to meridians and parallels** (`show-me/2026-09-28-boundary-orientation/`).
+  Every step's raster rebuild (0.25° lon/lat raster, `polygonize`, then `toposimplify(0.4)` in
+  degrees) snaps near-grid-aligned boundaries to exact meridians and parallels. 7–9× more
+  boundary length lies within 1° of N–S or E–W than an isotropic set would have in physical, and
+  4.4–4.8× in simple (slower plates stay snapped). The input topology has 1.8×. A no-force test
+  with rigid rotations reproduces it, so it is the method. Thinning is not measurably worse
+  (7.7 against 7.3; three physical runs without thinning give 7.3–9.4).
+- **The body ridge-push force points mostly exactly N–S or E–W** (10–11× isotropic), with or
+  without thinning. The age grid is piecewise constant (nearest tracer) and its gradient is taken
+  along lon and lat. The effect on plate motion is not tested.
+- Both are candidates to fix alongside R1 (geometry without shapely).
+
 ## Open
 
 - **Other shapely uses** (`update_plate_polygons` smoothing with topojson, `make_valid`, and
