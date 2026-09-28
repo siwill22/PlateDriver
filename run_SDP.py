@@ -61,6 +61,7 @@ params['slab_suction_mode'] = modes['slab_suction']
 params['polarity_mode'] = modes['polarity']
 params['ridge_push_mode'] = modes['ridge_push']
 params['tracer_thinning_mode'] = modes['tracer_thinning']
+params['plate_rebuild_mode'] = modes['plate_rebuild']
 _needs = sdp.force_fields_needed(params)     # per-step fields the force modes read
 
 

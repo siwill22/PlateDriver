@@ -1,4 +1,5 @@
 import time
+import zlib
 
 import pygplates
 from gprm.utils.create_gpml import gpml2gdf, gdf2gpml
@@ -452,27 +453,6 @@ def plate_polygons_to_wrapped_gdf(polygons):
     return gpd.GeoDataFrame(rows, crs=rp_gdf.crs).reset_index(drop=True)
 
 
-def resolve_overlaps(gdf, priority_col):
-    gdf = gdf.sort_values(priority_col).reset_index(drop=True)
-    gdf['geometry'] = gdf.geometry.make_valid()
-
-    result_geoms = []
-    accumulated = None
-
-    for i in range(len(gdf)):
-        geom = gdf.geometry.iloc[i]
-        if accumulated is not None:
-            geom = geom.difference(accumulated)
-        result_geoms.append(geom)
-        # Build cumulative union of original geometries
-        accumulated = gdf.geometry.iloc[i] if accumulated is None else accumulated.union(gdf.geometry.iloc[i])
-
-    result = gdf.copy()
-    result.geometry = result_geoms
-
-    return result
-
-
 def update_plate_id_raster(clipped_polygons, raster_spacing=1, tie_break='hash',
                            previous_plate_id=None, tie_break_seed=0):
     valid = clipped_polygons.dropna(subset=['geometry'])
@@ -486,7 +466,51 @@ def update_plate_id_raster(clipped_polygons, raster_spacing=1, tie_break='hash',
     return plate_id_raster
 
 
-def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1):
+def _rebuild_frame_rotation(plate_id_raster, seed=0):
+    """A random rotation for frame='rotated', fixed by the raster's content and seed, so a
+    run repeats exactly but the frame differs from step to step."""
+    h = zlib.crc32(np.ascontiguousarray(np.nan_to_num(plate_id_raster.values)).tobytes())
+    rng = np.random.default_rng([h, int(seed)])
+    v = rng.normal(size=3)
+    v /= np.linalg.norm(v)
+    return pygplates.FiniteRotation(pygplates.PointOnSphere(*v), rng.uniform(0.0, 2.0 * np.pi))
+
+
+def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1, frame='lonlat',
+                          frame_seed=0, rotated_resimplify_deg=0.05):
+    """Plate polygons from the plate-ID raster: polygonise (edges along the cell edges, a
+    staircase of meridians and parallels) and simplify the shared arcs (Douglas-Peucker,
+    tolerance topo_simplify in degrees).
+
+    frame='lonlat' does this on the raster's own grid.  Repeated every step, it snaps
+    boundaries that run close to a meridian or parallel onto it exactly (about 7x more
+    boundary length within 1 deg of N-S or E-W than isotropic in physical runs; see
+    show-me/2026-09-28-boundary-orientation).  frame='rotated' resamples the raster (nearest
+    cell) onto the same lon/lat grid turned by a rotation Q that changes every step
+    (_rebuild_frame_rotation), polygonises and simplifies there, and turns the polygons back
+    by Q^-1, so the staircase and the simplification point a different way each step.  A plate
+    cut at Q's dateline comes back as two polygons with the same PLATEID1; their common edge is
+    not a boundary (topo_polygons_to_boundaries skips same-plate arcs).
+    """
+    if frame == 'rotated':
+        q = _rebuild_frame_rotation(plate_id_raster, frame_seed)
+        lons, lats = raster_coords(plate_id_raster)
+        lon2d, lat2d = np.meshgrid(lons, lats)
+        lon_src, lat_src = rotate_lonlat(q.get_inverse(), lon2d.ravel(), lat2d.ravel())
+        in_q = plate_id_raster.copy(data=raster_lookup(plate_id_raster, lon_src, lat_src).reshape(lon2d.shape))
+        polys = update_plate_polygons(in_q, raster_spacing, topo_simplify)
+        # clipping can leave degenerate line pieces; pygplates cannot write mixed types
+        polys = polys.explode(index_parts=False).reset_index(drop=True)
+        polys = polys[polys.geometry.geom_type == 'Polygon']
+        back = nudge_polygons(polys, {int(p): q.get_inverse() for p in polys.PLATEID1.unique()})
+        back = plate_polygons_to_wrapped_gdf(back)[['PLATEID1', 'geometry']]
+        # Rotating back needs the edges densified (they were straight in Q's lon/lat); a
+        # light simplification removes the extra vertices again.  The polygons are no longer
+        # a staircase here, so this cannot snap them to the grid.
+        back = tp.Topology(back, prequantize=False).toposimplify(rotated_resimplify_deg).to_gdf()
+        back.geometry = back.geometry.make_valid()
+        return back.set_crs(epsg=4326, allow_override=True)
+
     # Origin offset by half a cell so polygon edges align with raster cell boundaries
     transform = (raster_spacing, 0, -(180 + raster_spacing / 2),
                  0, raster_spacing, -(90 + raster_spacing / 2))
@@ -1725,8 +1749,9 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     rp_gdf = plate_polygons_to_wrapped_gdf(new_features)
     _ct['wrap_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    clipped_polygons = resolve_overlaps(rp_gdf, priority_col='PLATEID1')
-    clipped_polygons = clipped_polygons.explode(index_parts=False).reset_index(drop=True)
+    # Where moved plates overlap, the lower plate ID keeps the area: the plates are burnt
+    # into the raster highest ID first, so the lowest ID is burnt last and wins.
+    clipped_polygons = rp_gdf.sort_values('PLATEID1', ascending=False, kind='stable')
     _ct['resolve_overlaps'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     plate_id_raster = update_plate_id_raster(clipped_polygons, raster_spacing=raster_spacing,
@@ -1793,7 +1818,9 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
 
     def _rebuild_polygons(raster):
         polys = update_plate_polygons(raster, raster_spacing=raster_spacing,
-                                      topo_simplify=topo_simplify)
+                                      topo_simplify=topo_simplify,
+                                      frame=params.get('plate_rebuild_mode', 'lonlat'),
+                                      frame_seed=params.get('tie_break_seed', 0))
         polys = polys.explode(index_parts=False).reset_index(drop=True)
         return polys[polys.geometry.geom_type.isin(['Polygon'])]
 
