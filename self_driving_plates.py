@@ -1924,7 +1924,7 @@ def rebuild_split_cratons(cratons, craton_raster, parent, child, craton_id_remap
                                   topo_simplify=topo_simplify, frame='midpoint')
     polys = polys.explode(index_parts=False).reset_index(drop=True)
     polys = polys[polys.geometry.geom_type.isin(['Polygon']) & polys.PLATEID1.isin([parent, child])]
-    new = list(gdf2gpml(densify_plate_polygons(polys[['PLATEID1', 'geometry']])))
+    new = list(gdf2gpml(densify_plate_polygons(polys[['PLATEID1', 'geometry']]))) if len(polys) else []
     for k in [k for k, v in remap.items() if v == parent]:
         del remap[k]                       # those cratons are now part of the rebuilt features
     return keep + new
