@@ -207,6 +207,13 @@ listed is `simple`'s):
   - `trial` (`physical`): each step every plate is tested against a set of straight
     great-circle cuts, and a cut splits the plate when the tension across it beats the
     strength along it. It costs about 0.2 s per step.
+- **`rift_path`** (the line a trial-split cut follows; `rifting: trial`):
+  - `straight`: the candidate great circle.
+  - `least_cost`: the cheapest path across the plate within `rift_path_corridor_deg` of each
+    candidate that is under tension. It runs on the 1° grid, with cost = great-circle length ×
+    strength, and the test is rerun on the path. It adds about 0.5 s per step. On atlantis66 it
+    gives 1.7× as many rifts, mostly along young ocean, and continents break up less (see
+    `show-me/2026-09-29-r4-least-cost-path/`).
 - **`collision_weld`** (joining plates after a long continental collision):
   - `off`: collided plates stay separate for good.
   - `on`: after `weld_after_myr` of continuous continent–continent collision, the smaller plate

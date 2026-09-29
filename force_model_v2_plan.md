@@ -220,6 +220,18 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
     and 1 but never in seed 2, so the supercontinent break-up is not yet robust. The early rifts
     (333, 115, 666, 555) repeat in all three.
 
+- **R3 found** (`show-me/2026-09-29-r3-weld-sutures/`):
+  - Welding whole plates collapses the world to 2–3 plates, with one over 70% of the sphere,
+    whether welds come after 30, 60 or 100 Myr.
+  - With straight cuts, suture weakening changed no rift at all.
+  - Fixed: merges can't leave fewer than two plates. A plate crossing the dateline from pole to
+    pole now stops the run with an error.
+- **R4 found** (`least_cost`, `show-me/2026-09-29-r4-least-cost-path/`):
+  - 1.7× as many rifts, but the same kind: 78% oceanic and 45% living ≥ 50 Myr.
+  - The paths follow young ocean.
+  - Plate 222 rifts later or not at all, and continents stay more together.
+  - The rift test takes 0.7 s per step, against 0.2 s straight.
+
 ## Open
 
 - **Other shapely uses** (`update_plate_polygons` smoothing with topojson, `make_valid`, and
