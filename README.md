@@ -74,6 +74,8 @@ All outputs go to the directory specified by `output_dir` in `config.yaml`.
 | `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, slab-force totals and mean trench slab depth (slab modes), seconds per step by phase |
 | `trench_forces_NNNN.csv` | Every `csv_save_interval` steps | One row per trench segment of each plate: position, plates, downgoing or not, convergence, slab depth, seafloor age, pull and suction weights. Only with `slab_pull: ramp/slab_length`, `slab_suction: depth_split` or `polarity: age` |
 | `plate_stats.csv` | Every step | One row per plate per step: angular velocity (pole, rate), RMS speed, area, continental fraction, perimeter and trench (downgoing/overriding), ridge and conservative lengths |
+| `welds.csv` | Each weld (`collision_weld: on`) | Time, host plate, absorbed plate, collision length and suture ID of every weld |
+| `sutures_NNNN.csv` | Every `csv_save_interval` steps (`sutures: tracers`) | Suture tracer lon/lat, suture ID and time formed |
 | `rift_events.csv` | Each rift (`rifting: trial`) | Time, parent plate and new plate of every rift split |
 | `run_info.yaml` | Start of run | The config used, the resolved force modes and the git commit |
 | `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file with finite rotations for all plates up to step NNNN. The time column is elapsed model time (see [Rotation file format](#rotation-file-format)) |
@@ -205,6 +207,18 @@ listed is `simple`'s):
   - `trial` (`physical`): each step every plate is tested against a set of straight
     great-circle cuts, and a cut splits the plate when the tension across it beats the
     strength along it. It costs about 0.2 s per step.
+- **`collision_weld`** (joining plates after a long continental collision):
+  - `off`: collided plates stay separate for good.
+  - `on`: after `weld_after_myr` of continuous continent–continent collision, the smaller plate
+    is absorbed into the larger one, as for merging. It needs `collision: coupling` or
+    `breakoff`, which time the collisions. The joined plate is not tested for rifting for
+    `rift_cooldown_myr`. Each weld is written to `welds.csv`.
+- **`sutures`** (weak zones left by welds; needs `collision_weld: on`):
+  - `none`: no sutures.
+  - `tracers`: at each weld, points are dropped every 0.5° along the contact. They move with
+    their plate and are never deleted. Within `suture_width_deg`, continental rift strength is
+    × `suture_strength_factor`. Each suture with at least 5 points on a plate adds its
+    best-fit great circle as an extra candidate cut. Saved steps write `sutures_NNNN.csv`.
 
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
@@ -416,6 +430,13 @@ params:
   rift_cooldown_myr:           10       # both halves are not tested again for this long
   rift_sweep_azimuths:         12       # candidate great circles through the plate centroid
   rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
+```
+
+```yaml
+params:
+  weld_after_myr:              30       # continuous continental collision before the smaller plate is absorbed
+  suture_strength_factor:      0.5      # continental rift strength x this near a suture
+  suture_width_deg:            2        # ... within this great-circle distance of a suture point
 ```
 
 **How σc behaves** (500-Myr `physical` runs on atlantis66, one run each; see
@@ -713,6 +734,12 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
   - Young ocean is weaker than continent, so most rifts split off short-lived oceanic slivers.
   - Sutures, craton cores, welding and path search are later v2 items.
   - With `rifting: none`, nothing breaks a continent.
+- **`collision_weld: on` collapses the world** to 2–3 plates within 500 Myr on atlantis66, with
+  one plate over 70% of the sphere, whether welds come after 30, 60 or 100 Myr of collision.
+  With straight cuts, sutures don't help: none of the rifts follows a suture. Keep it `off`
+  (the default) until it is revised.
+- **A plate crossing the dateline from pole to pole** (over about 3/4 of the sphere) can't be
+  represented by the lon/lat plate polygons. The run stops with an error.
 - **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is a v2 item.
 - **Ridges sit close to trenches** in places (a thin strip of young plate made and consumed side by side), in both presets.
 - **Ridges are not split into spreading segments and transforms**; boundaries are continuous lines of varying obliquity. A post-processing step could add this for appearance.
