@@ -214,6 +214,14 @@ listed is `simple`'s):
     strength, and the test is rerun on the path. It adds about 0.5 s per step. On atlantis66 it
     gives 1.7× as many rifts, mostly along young ocean, and continents break up less (see
     `show-me/2026-09-29-r4-least-cost-path/`).
+- **`continent_strength`** (how strong continents are for the rift test):
+  - `uniform`: σc everywhere on continent.
+  - `cores`: at step 0, random terranes `craton_core_spacing_km` apart are generated in every
+    continent. The belts between them are `craton_belt_width_km` wide. Rift strength is ×
+    `craton_core_factor` on cores and × `belt_strength_factor` on belts. The cores and belts are
+    points that move with their plates (`craton_cores_NNNN.csv`). The seed is
+    `craton_core_seed`, or `random_seed` if that is null, so plate motions then depend on the
+    seed.
 - **`collision_weld`** (joining plates after a long continental collision):
   - `off`: collided plates stay separate for good.
   - `on`: after `weld_after_myr` of continuous continent–continent collision, the smaller plate

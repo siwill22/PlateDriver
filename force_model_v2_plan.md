@@ -232,6 +232,12 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
   - Plate 222 rifts later or not at all, and continents stay more together.
   - The rift test takes 0.7 s per step, against 0.2 s straight.
 
+- **R5 found** (`continent_strength: cores`, `show-me/2026-09-29-r5-craton-cores/`):
+  - With belts ×0.5, continental rifts follow the belts: 100% of their length against the 19%
+    belts cover. They break the small continents into many pieces, but 222 stays whole.
+  - With belts ×1 and ocean floor 1/3, the ridge-flank slivers stop, but there is little
+    rifting at all.
+
 ## Open
 
 - **Other shapely uses** (`update_plate_polygons` smoothing with topojson, `make_valid`, and
