@@ -19,6 +19,7 @@ MODE_CHOICES = {
     'rifting':             ('none', 'trial'),
     'collision_weld':      ('off', 'on'),
     'sutures':             ('none', 'tracers'),
+    'rift_path':           ('straight', 'least_cost'),
 }
 
 PRESETS = {
@@ -35,6 +36,7 @@ PRESETS = {
         'rifting':             'none',
         'collision_weld':      'off',
         'sutures':             'none',
+        'rift_path':           'straight',
     },
     'physical': {
         'drag':                'area_edge',
@@ -49,6 +51,7 @@ PRESETS = {
         'rifting':             'trial',
         'collision_weld':      'off',     # physical default decided at the R3 gate
         'sutures':             'none',    # physical default decided at the R3 gate
+        'rift_path':           'straight',   # physical default decided at the R4 gate
     },
 }
 
@@ -66,6 +69,7 @@ IMPLEMENTED = {
     'rifting':             {'none', 'trial'},
     'collision_weld':      {'off', 'on'},
     'sutures':             {'none', 'tracers'},
+    'rift_path':           {'straight', 'least_cost'},
 }
 
 DEFAULT_PRESET = 'physical'

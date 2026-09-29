@@ -1788,6 +1788,65 @@ def _circle_points(normal, step_deg=0.5):
     return np.cos(t)[:, None] * u + np.sin(t)[:, None] * v
 
 
+def _grid_edges(mask):
+    """8-neighbour edges between the True cells of a global (nlat, nlon) grid whose columns
+    wrap in longitude.  Returns (a, b) flat indices, each edge once."""
+    nlat, nlon = mask.shape
+    idx = np.arange(nlat * nlon).reshape(nlat, nlon)
+    A, B = [], []
+    for di, dj in ((0, 1), (1, -1), (1, 0), (1, 1)):
+        a, ma = idx[:nlat - di], mask[:nlat - di]
+        b, mb = np.roll(idx[di:], -dj, axis=1), np.roll(mask[di:], -dj, axis=1)
+        ok = ma & mb
+        A.append(a[ok]); B.append(b[ok])
+    return np.concatenate(A), np.concatenate(B)
+
+
+def _least_cost_cut(nrm, P, on, full, edge, xyz2, sig2, ea, eb, wgt, corridor_deg):
+    """rift_path: least_cost.  The cheapest 8-connected path across plate `full` (a
+    (nlat, nlon) mask on the 1 deg grid, columns wrapping) between the two ends of the
+    straight cut (great circle with normal nrm; P, on: its points and which lie in the plate),
+    within corridor_deg of it.  Cost of a step: great-circle length × mean strength of its two
+    cells.  Returns (side1 mask: the +nrm half, path flat indices) or None when there is no
+    path or it does not split the plate in two.  The path is also returned as a mask."""
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import dijkstra
+    d_c = xyz2 @ nrm
+    corr = full & (np.abs(d_c) < np.sin(np.radians(corridor_deg)))
+    i_start = np.where(on & ~np.roll(on, 1))[0][0]
+    i_end = np.where(on & ~np.roll(on, -1))[0][0]
+    near = np.cos(np.radians(corridor_deg))
+    src = np.flatnonzero(corr & edge & (xyz2 @ P[i_start] > near))
+    dst = np.flatnonzero(corr & edge & (xyz2 @ P[i_end] > near))
+    if not len(src) or not len(dst):
+        return None
+    cf = corr.ravel()
+    keep = cf[ea] & cf[eb]
+    n = full.size
+    G = csr_matrix((wgt[keep], (ea[keep], eb[keep])), shape=(n, n))
+    dist, pred, _ = dijkstra(G, directed=False, indices=src, min_only=True, return_predecessors=True)
+    t = dst[np.argmin(dist[dst])]
+    if not np.isfinite(dist[t]):
+        return None
+    path = [t]
+    while pred[path[-1]] >= 0:
+        path.append(pred[path[-1]])
+    path = np.array(path[::-1])
+    on_path = np.zeros(n, bool)
+    on_path[path] = True
+    on_path = on_path.reshape(full.shape)
+    lab, n_lab = label_wrapped(full & ~on_path, connectivity=1)
+    side1 = d_c > 0
+    far = np.sin(np.radians(corridor_deg))
+    for k in range(1, n_lab + 1):
+        comp = lab == k
+        up, down = (comp & (d_c > far)).any(), (comp & (d_c < -far)).any()
+        if up and down:
+            return None                        # the path does not separate the two sides
+        side1[comp] = up or (not down and (d_c[comp] > 0).mean() > 0.5)
+    return side1 & full, path, on_path
+
+
 def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, params,
                       contact_scale=0.0, skip_pids=(), slab_pull_weight=6.0, sutures=None):
     """Trial split of every plate (rifting: trial).  For each candidate cut (_cut_candidates),
@@ -1830,6 +1889,7 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
     w_g = np.where(cont_g, params.get('continent_drag_factor', 3.0), 1.0) * dA
     xyz_g = lonlat_to_xyz(lon2d, lat2d)
     body = parts.get('body_tau')
+    path_mode = params.get('rift_path_mode', 'straight') == 'least_cost'
     suture_tree, suture_fits = None, {}
     if sutures is not None and len(sutures):
         from scipy.spatial import cKDTree
@@ -1844,6 +1904,22 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
                 Xq = s_xyz[np.asarray(idx)]
                 # best-fit great circle: the plane normal is the direction of least spread
                 suture_fits.setdefault(int(q), []).append(np.linalg.eigh(Xq.T @ Xq)[1][:, 0])
+    if path_mode:
+        # the 1 deg grid without the duplicate 180 deg column, and the strength of every cell
+        ncol = pid_g.shape[1] - 1 if abs(lons[sl[1]][-1] - lons[sl[1]][0] - 360.0) < 1e-6 else pid_g.shape[1]
+        pid2, xyz2 = pid_g[:, :ncol], xyz_g[:, :ncol]
+        lo2, la2 = lon2d[:, :ncol], lat2d[:, :ncol]
+        f_age2 = np.ones(pid2.shape)
+        if age_grid is not None:
+            a2 = raster_lookup(age_grid, lo2, la2).astype(float)
+            f_age2 = np.where(np.isfinite(a2), np.sqrt(np.clip(np.nan_to_num(a2), 0, 80) / 80.0), 1.0)
+        sc2 = np.full(pid2.shape, sigma_c)
+        if suture_tree is not None:
+            nr = np.array([len(h) > 0 for h in suture_tree.query_ball_point(xyz2.reshape(-1, 3), s_chord)]).reshape(pid2.shape)
+            sc2 = np.where(nr, s_factor * sigma_c, sigma_c)
+        sig2 = np.where(cont_g[:, :ncol], sc2, ratio_o * sigma_c * np.maximum(floor_o, f_age2))
+        corridor = params.get('rift_path_corridor_deg', 5.0)
+        from scipy.spatial import cKDTree as _Tree
     cand_out = {}
     for pid, om in omega.items():
         if pid in skip_pids:
@@ -1865,6 +1941,13 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
         tc = -np.einsum('kij,kj->ki', Gc, om - om_n) if len(Gc) else np.zeros((0, 3))   # contact drag at ω
         centre = (X * dA[cell][:, None]).sum(0)
         centre /= np.linalg.norm(centre)
+        if path_mode:
+            full = pid2 == pid
+            edge = full & ~np.logical_and.reduce(wrap_neighbours(full))
+            ea, eb = _grid_edges(full)
+            x2f, s2f = xyz2.reshape(-1, 3), sig2.ravel()
+            wgt = np.arccos(np.clip((x2f[ea] * x2f[eb]).sum(1), -1, 1)) * 0.5 * (s2f[ea] + s2f[eb])
+            cell_tree = _Tree(X)
         best = None
         sweep = _cut_candidates(centre, params.get('rift_sweep_azimuths', 12),
                                 tuple(params.get('rift_sweep_offsets_deg', (-15.0, 0.0, 15.0))))
@@ -1894,6 +1977,59 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
             if M @ M <= 0:
                 continue
             t = float(tau_h @ M / (M @ M)) / unit
+            if path_mode:
+                # only cuts whose straight version is under tension; the path moves the cut
+                # by at most the corridor, so a compressed straight cut is not searched
+                if t <= 0:
+                    continue
+                res = _least_cost_cut(nrm, P, on, full, edge, xyz2, sig2, ea, eb, wgt, corridor)
+                if res is None:
+                    continue
+                side_2d, path, on_path = res
+                ext = (lambda a: np.concatenate([a, a[:, :1]], axis=1)) if ncol < pid_g.shape[1] else (lambda a: a)
+                s1 = ext(side_2d)[cell]
+                off_path = ~ext(on_path)[cell]
+                a1 = dA[cell][s1].sum() * np.degrees(1.0) ** 2
+                if min(a1, area_deg2 - a1) < min_area:
+                    continue
+                m1s = s1[cell_tree.query(Xs)[1]] if len(Xs) else np.zeros(0, bool)
+                m1c = s1[cell_tree.query(Xc)[1]] if len(Xc) else np.zeros(0, bool)
+                D1 = Dc[s1].sum(0) + es[m1s].sum(0)
+                D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
+                t1 = tb[s1].sum(0) + ts[m1s].sum(0) + tc[m1c].sum(0)
+                K1, K2 = D1 + Gc[m1c].sum(0), D2 + Gc[~m1c].sum(0)
+                tau_h = D1 @ om - t1
+                Rp = x2f[path]
+                r = Rp[:-1] + Rp[1:]
+                r /= np.linalg.norm(r, axis=1)[:, None]
+                ds_k = np.arccos(np.clip((Rp[:-1] * Rp[1:]).sum(1), -1, 1))
+                nk = np.cross(r, Rp[1:] - Rp[:-1])
+                nk /= np.linalg.norm(nk, axis=1)[:, None]
+                # n̂ from half 1 to half 2: flip where a point just off the path is on half 1
+                q = r + np.sin(np.radians(0.7)) * nk
+                nb = cell_tree.query(q / np.linalg.norm(q, axis=1)[:, None], k=8)[1]
+                first = nb[np.arange(len(nb)), np.argmax(off_path[nb], axis=1)]   # nearest cell not on the path
+                nk[s1[first]] *= -1
+                M = (np.cross(r, nk) * ds_k[:, None]).sum(0)
+                if M @ M <= 0:
+                    continue
+                t = float(tau_h @ M / (M @ M)) / unit
+                sig = float((0.5 * (s2f[path[:-1]] + s2f[path[1:]]) * ds_k).sum() / ds_k.sum())
+                if t <= sig:
+                    continue
+                try:
+                    w1 = om - np.linalg.solve(K1, tau_h)
+                    w2 = om + np.linalg.solve(K2, tau_h)
+                except np.linalg.LinAlgError:
+                    continue
+                opening = ((np.cross(w2 - w1, r) * nk).sum(1) > 0) * ds_k
+                if opening.sum() < 0.5 * ds_k.sum():
+                    continue
+                if best is None or t / sig > best['ratio']:
+                    best = dict(normal=nrm, ratio=t / sig, tension=t, strength=sig,
+                                length_deg=float(np.degrees(ds_k.sum())), weak_zone=k_c >= len(sweep),
+                                cells=dict(xyz=X, side1=s1))
+                continue
             # strength along the cut
             cont_c = np.zeros(len(R), bool) if craton_raster is None \
                 else np.nan_to_num(raster_lookup(craton_raster, plo[on], pla[on])) > 0
@@ -1925,16 +2061,24 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
     return cand_out
 
 
-def apply_rift_split(plate_id_raster, craton_raster, pid, normal, next_pid):
-    """Cut plate pid along the great circle with the given plane normal.  The smaller side
-    becomes plate next_pid, on the plate-ID raster and on the craton raster (so a rifted
-    continent stays split when the cratons overwrite the plates next step).
+def apply_rift_split(plate_id_raster, craton_raster, pid, normal, next_pid, cells=None):
+    """Cut plate pid along the great circle with the given plane normal, or, with cells
+    (rift_path: least_cost; dict xyz, side1 of the plate's 1 deg cells, moved with the plate),
+    give each raster cell the side of the nearest of those cells.  The smaller side becomes
+    plate next_pid, on the plate-ID raster and on the craton raster (so a rifted continent stays
+    split when the cratons overwrite the plates next step).
     Returns (plate_id_raster, craton_raster, child_pid or None)."""
     lons, lats = raster_coords(plate_id_raster)
     lon2d, lat2d = np.meshgrid(lons, lats)
-    side = lonlat_to_xyz(lon2d, lat2d) @ np.asarray(normal) > 0
     vals = plate_id_raster.values.copy()
     mine = vals == pid
+    if cells is None:
+        side = lonlat_to_xyz(lon2d, lat2d) @ np.asarray(normal) > 0
+    else:
+        from scipy.spatial import cKDTree
+        side = np.zeros(vals.shape, bool)
+        near = cKDTree(cells['xyz']).query(lonlat_to_xyz(lon2d[mine], lat2d[mine]))[1]
+        side[mine] = np.asarray(cells['side1'])[near]
     a, b = mine & side, mine & ~side
     w = np.cos(np.radians(lat2d))
     child = a if w[a].sum() < w[b].sum() else b
@@ -1947,6 +2091,18 @@ def apply_rift_split(plate_id_raster, craton_raster, pid, normal, next_pid):
         cv[child & (cv == pid)] = next_pid
         craton_raster = craton_raster.copy(data=cv)
     return plate_id_raster, craton_raster, next_pid
+
+
+def rotate_xyz(rotation, xyz):
+    """Unit vectors (n, 3) turned by a pygplates FiniteRotation (Rodrigues' formula)."""
+    xyz = np.asarray(xyz, float)
+    if rotation is None:
+        return xyz
+    axis, angle = rotation_axis_angle(rotation)
+    if angle == 0.0:
+        return xyz.copy()
+    return (xyz * np.cos(angle) + np.cross(axis, xyz) * np.sin(angle)
+            + np.outer(xyz @ axis, axis) * (1.0 - np.cos(angle)))
 
 
 def rotate_vector(rotation, v):
@@ -2138,9 +2294,11 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
 
     new_plates = []
     rift_applied = []
-    for pid, normal in (rift_splits or []):
+    for item in (rift_splits or []):
+        pid, normal = item[0], item[1]
+        cells = item[2] if len(item) > 2 else None
         plate_id_raster, craton_raster, child = apply_rift_split(plate_id_raster, craton_raster,
-                                                                 int(pid), normal, next_plate_id)
+                                                                 int(pid), normal, next_plate_id, cells)
         if child is not None:
             if pid in stage_pole_dict:
                 stage_pole_dict[child] = stage_pole_dict[pid]

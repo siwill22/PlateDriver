@@ -65,6 +65,7 @@ params['plate_rebuild_mode'] = modes['plate_rebuild']
 params['rifting_mode'] = modes['rifting']
 params['collision_weld_mode'] = modes['collision_weld']
 params['sutures_mode'] = modes['sutures']
+params['rift_path_mode'] = modes['rift_path']
 if modes['collision_weld'] == 'on' and modes['collision'] not in ('coupling', 'breakoff'):
     raise SystemExit('collision_weld: on needs collision: coupling or breakoff (they time the collisions)')
 if modes['sutures'] == 'tracers' and modes['collision_weld'] != 'on':
@@ -627,7 +628,9 @@ try:
         # Rebuild the plate configuration and compute the next stage rotations
         # ------------------------------------------------------------------
         # Rift splits decided last step, their cuts moved with the plate
-        _rift_now = [(pid, sdp.rotate_vector(moving_poles.get(pid), n)) for pid, n in _rift_planned]
+        _rift_now = [(pid, sdp.rotate_vector(moving_poles.get(pid), n),
+                      None if c is None else dict(xyz=sdp.rotate_xyz(moving_poles.get(pid), c['xyz']), side1=c['side1']))
+                     for pid, n, c in _rift_planned]
         _rift_planned = []
 
         (new_plate_polygons,
@@ -671,7 +674,7 @@ try:
                     sdp.rotate_vector(moving_poles.get(_pid), _prev['normal']) @ _c['normal']) > np.cos(np.radians(15.0))
                 _count = _prev['count'] + 1 if _same else 1
                 if _count >= _persist:
-                    _rift_planned.append((_pid, _c['normal']))
+                    _rift_planned.append((_pid, _c['normal'], _c.get('cells')))
                     print('  [rift] plate {} passes the trial split for {} steps (tension / strength {:.2f}, '
                           'cut {:.0f} deg): splits next step'.format(_pid, _count, _c['ratio'], _c['length_deg']))
                 else:
