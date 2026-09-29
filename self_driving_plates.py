@@ -442,10 +442,22 @@ def plate_polygons_to_wrapped_gdf(polygons):
                 sphere_poly = pygplates.PolygonOnSphere(exterior, interiors)
             except Exception:
                 sphere_poly = pygplates.PolygonOnSphere(exterior)
-            for wrapped in wrapper.wrap(sphere_poly):
-                shell = [p.to_lat_lon()[::-1] for p in wrapped.get_exterior_points()]
-                holes = [[p.to_lat_lon()[::-1] for p in wrapped.get_interior_points(k)]
-                         for k in range(wrapped.get_number_of_interior_rings())]
+            try:
+                pieces = [([p.to_lat_lon()[::-1] for p in w.get_exterior_points()],
+                           [[p.to_lat_lon()[::-1] for p in w.get_interior_points(k)]
+                            for k in range(w.get_number_of_interior_rings())])
+                          for w in wrapper.wrap(sphere_poly)]
+            except pygplates.InvalidPointsForPolygonConstructionError as err:
+                # Seen only for a plate whose lon/lat outline runs up the dateline on one side
+                # and down it on the other (a plate over most of the sphere): on the sphere
+                # both edges are the same meridian, so the outline encloses no area.
+                raise RuntimeError(
+                    'plate {} cannot be wrapped at the dateline ({}): its outline spans the '
+                    'dateline from pole to pole ({:.0f}% of the sphere by its holes), which '
+                    'the lon/lat plate polygons cannot represent'.format(
+                        row.get('PLATEID1'), err,
+                        100 * (1 - sum(pygplates.PolygonOnSphere(h).get_area() for h in interiors) / (4 * np.pi)))) from err
+            for shell, holes in pieces:
                 new_row = row.copy()
                 new_row['geometry'] = Polygon(shell, holes)
                 rows.append(new_row)
@@ -1451,6 +1463,8 @@ def detect_enclosed_plates(plate_id_raster):
     areas = plate_areas(plate_id_raster)
 
     merge_pairs = []
+    if len(areas) <= 2:
+        return merge_pairs          # a plate with one neighbour on a two-plate sphere is not enclosed
     for pid, nbrs in _neighbour_ids(vals).items():
         if len(nbrs) != 1 or pid in at_pole:
             continue

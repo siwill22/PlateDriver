@@ -750,6 +750,8 @@ try:
                 _p1, _p2 = int(_pair[0]), int(_pair[1])
                 if _steps < _weld_after or _p1 in _used or _p2 in _used or _p1 not in _areas_w or _p2 not in _areas_w:
                     continue
+                if len(_areas_w) - len(_merge_pairs) <= 2:
+                    continue            # never weld the world down to one plate
                 _big, _small = (_p1, _p2) if _areas_w[_p1] >= _areas_w[_p2] else (_p2, _p1)
                 _merge_pairs.append((_big, _small))
                 _used |= {_p1, _p2}
