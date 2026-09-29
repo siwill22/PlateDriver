@@ -66,6 +66,7 @@ params['rifting_mode'] = modes['rifting']
 params['collision_weld_mode'] = modes['collision_weld']
 params['sutures_mode'] = modes['sutures']
 params['rift_path_mode'] = modes['rift_path']
+params['continent_strength_mode'] = modes['continent_strength']
 if modes['collision_weld'] == 'on' and modes['collision'] not in ('coupling', 'breakoff'):
     raise SystemExit('collision_weld: on needs collision: coupling or breakoff (they time the collisions)')
 if modes['sutures'] == 'tracers' and modes['collision_weld'] != 'on':
@@ -225,6 +226,17 @@ force_diag = {}
                                        speed_state=speed_state,
                                        force_fields=_step0_fields,
                                        force_diag=force_diag)
+# Craton cores and belts (continent_strength: cores), from the step-0 continents; they move
+# with their plates like the suture tracers.  Their own generator, so no other random draw
+# changes.
+_cores = None
+if params['continent_strength_mode'] == 'cores':
+    _cores = sdp.generate_craton_cores(rasters['craton'], params.get('craton_core_spacing_km', 2500.0),
+                                       params.get('craton_belt_width_km', 400.0),
+                                       seed=params.get('random_seed') if params.get('craton_core_seed') is None
+                                       else params['craton_core_seed'])
+    print('  [cores] {} terranes; belts {:.0%} of continental points'.format(
+        _cores['terrane'].nunique(), _cores['belt'].mean()))
 if 'last' in speed_state:
     run_info['speed_scale_k'] = float(speed_state['last']['k_used'])
     run_info['rms_speed_unscaled_step0_km_per_myr'] = float(speed_state['last']['rms_unscaled'])
@@ -519,6 +531,8 @@ def _enqueue_outputs(i, force_save=False):
             force_diag['ridge_push'].to_csv(_out('ridge_push_torques_{:04d}.csv'.format(i)), index=False)
         if params['sutures_mode'] == 'tracers':
             _sutures.to_csv(_out('sutures_{:04d}.csv'.format(i)), index=False)
+        if _cores is not None:
+            _cores.to_csv(_out('craton_cores_{:04d}.csv'.format(i)), index=False, float_format='%.3f')
         return True
     return False
 
@@ -616,6 +630,8 @@ try:
                 _craton_stage_poles[_old_pid] = moving_poles[_new_pid]
         cratons = sdp.nudge_polygons(cratons, _craton_stage_poles)
         _sutures = sdp.advect_sutures(_sutures, previous_plate_id, moving_poles)
+        if _cores is not None:
+            _cores = sdp.advect_sutures(_cores, previous_plate_id, moving_poles)
 
         # Accumulate finite rotations: F(t) = S * F(t - dt), for the move just made
         for pid, stage_rot in moving_poles.items():
@@ -653,7 +669,8 @@ try:
                                                force_diag=force_diag,
                                                rift_splits=_rift_now,
                                                rift_skip=set(_rift_cooldown),
-                                               sutures=_sutures if len(_sutures) else None)
+                                               sutures=_sutures if len(_sutures) else None,
+                                               cores=_cores)
         _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         # Rifting (rifting: trial): a plate splits once its best cut has passed the trial

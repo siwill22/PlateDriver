@@ -1848,7 +1848,7 @@ def _least_cost_cut(nrm, P, on, full, edge, xyz2, sig2, ea, eb, wgt, corridor_de
 
 
 def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, params,
-                      contact_scale=0.0, skip_pids=(), slab_pull_weight=6.0, sutures=None):
+                      contact_scale=0.0, skip_pids=(), slab_pull_weight=6.0, sutures=None, cores=None):
     """Trial split of every plate (rifting: trial).  For each candidate cut (_cut_candidates),
     the plate's basal drag, edge drag, contact drag and torques are split between the two
     sides, and the tension across the cut is compared with the strength along it.
@@ -1867,6 +1867,8 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
     With sutures (DataFrame lon, lat, suture_id; sutures: tracers), continental strength is
     × suture_strength_factor within suture_width_deg of a suture point, and each suture with
     at least 5 points on a plate adds its best-fit great circle as a candidate cut.
+    With cores (continent_strength: cores), continental strength is also × the core or belt
+    factor of the nearest craton-core point (_continent_factor).
     Returns {pid: dict(normal, ratio = t/σ̄, tension, strength, length_deg, weak_zone)} for
     the plates whose best cut (largest t/σ̄) passes.
     """
@@ -1890,6 +1892,10 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
     xyz_g = lonlat_to_xyz(lon2d, lat2d)
     body = parts.get('body_tau')
     path_mode = params.get('rift_path_mode', 'straight') == 'least_cost'
+    core_tree = None
+    if cores is not None and len(cores):
+        from scipy.spatial import cKDTree as _CT
+        core_tree = _CT(lonlat_to_xyz(cores['lon'].values.astype(float), cores['lat'].values.astype(float)))
     suture_tree, suture_fits = None, {}
     if sutures is not None and len(sutures):
         from scipy.spatial import cKDTree
@@ -1917,6 +1923,8 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
         if suture_tree is not None:
             nr = np.array([len(h) > 0 for h in suture_tree.query_ball_point(xyz2.reshape(-1, 3), s_chord)]).reshape(pid2.shape)
             sc2 = np.where(nr, s_factor * sigma_c, sigma_c)
+        if core_tree is not None:
+            sc2 = sc2 * _continent_factor(cores, xyz2.reshape(-1, 3), params, core_tree).reshape(pid2.shape)
         sig2 = np.where(cont_g[:, :ncol], sc2, ratio_o * sigma_c * np.maximum(floor_o, f_age2))
         corridor = params.get('rift_path_corridor_deg', 5.0)
         from scipy.spatial import cKDTree as _Tree
@@ -2041,6 +2049,8 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
             if suture_tree is not None:
                 near = np.array([len(h) > 0 for h in suture_tree.query_ball_point(R, s_chord)])
                 sig_cont = np.where(near, s_factor * sigma_c, sigma_c)
+            if core_tree is not None:
+                sig_cont = sig_cont * _continent_factor(cores, R, params, core_tree)
             sig = np.where(cont_c, sig_cont, ratio_o * sigma_c * np.maximum(floor_o, f_age)).mean()
             if t <= sig:
                 continue
@@ -2112,6 +2122,60 @@ def rotate_vector(rotation, v):
     return np.array((rotation * pygplates.PointOnSphere(*np.asarray(v, float))).to_xyz())
 
 
+def generate_craton_cores(craton_raster, spacing_km=2500.0, belt_km=400.0, seed=None, point_deg=0.5):
+    """continent_strength: cores.  Random terranes in every continent of the step-0 craton
+    raster (values are plate IDs): seeds drawn area-uniformly at least spacing_km apart (dart
+    throwing on the sphere), every continental cell takes its nearest seed on the same
+    continent, and cells where (distance to the 2nd-nearest seed − distance to the nearest)
+    × R < belt_km form the belts between terranes; the rest are cores.  Returns points every
+    point_deg (DataFrame lon, lat, terrane, belt), which move with their plates."""
+    from scipy.spatial import cKDTree
+    rng = np.random.default_rng(seed)
+    lons, lats = raster_coords(craton_raster)
+    lon2, lat2 = np.meshgrid(lons, lats)
+    stride = max(1, int(round(point_deg / abs(lons[1] - lons[0]))))
+    lon2, lat2 = lon2[::stride, ::stride], lat2[::stride, ::stride]
+    keep = lon2 < 180.0 - 1e-9                              # no duplicate 180 deg column
+    cont = np.nan_to_num(np.asarray(craton_raster.values, float))[::stride, ::stride].astype(int)
+    cont = np.where(keep, cont, 0)
+    X = lonlat_to_xyz(lon2, lat2)
+    w = np.cos(np.radians(lat2))
+    min_ang = spacing_km / EARTH_RADIUS_KM
+    rows, nid = [], 0
+    for pid in np.unique(cont[cont > 0]):
+        m = cont == pid
+        idx = np.flatnonzero(m)
+        pr = w.ravel()[idx] / w.ravel()[idx].sum()
+        cand = X.reshape(-1, 3)[rng.choice(idx, size=min(4000, len(idx)), p=pr, replace=False)]
+        chosen = []
+        for c in cand:
+            if not chosen or np.arccos(np.clip(np.array(chosen) @ c, -1, 1)).min() > min_ang:
+                chosen.append(c)
+        S = np.array(chosen)
+        if len(S) == 1:
+            terr, belt = np.zeros(m.sum(), int), np.zeros(m.sum(), bool)
+        else:
+            d, j = cKDTree(S).query(X[m], k=2)
+            ang = 2 * np.arcsin(np.clip(d / 2, 0, 1))
+            terr, belt = j[:, 0], (ang[:, 1] - ang[:, 0]) * EARTH_RADIUS_KM < belt_km
+        rows.append(pd.DataFrame({'lon': lon2[m], 'lat': lat2[m], 'terrane': nid + 1 + terr, 'belt': belt}))
+        nid += len(S)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=['lon', 'lat', 'terrane', 'belt'])
+
+
+def _continent_factor(cores, xyz, params, tree=None):
+    """Continental rift-strength factor at points xyz (n, 3) from the craton-core points
+    (continent_strength: cores): craton_core_factor on a core, belt_strength_factor on a belt,
+    by the nearest core point; 1 with no core points."""
+    if cores is None or not len(cores):
+        return np.ones(len(xyz))
+    if tree is None:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(lonlat_to_xyz(cores['lon'].values.astype(float), cores['lat'].values.astype(float)))
+    belt = cores['belt'].values.astype(bool)[tree.query(xyz)[1]]
+    return np.where(belt, params.get('belt_strength_factor', 0.5), params.get('craton_core_factor', 3.0))
+
+
 def suture_points(samples, suture_id, time_myr):
     """Suture tracers for one weld: the contact sample points (lon, lat) of the welded pair
     (sutures: tracers).  Returns a DataFrame lon, lat, suture_id, time_myr."""
@@ -2164,7 +2228,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                      polarity_dict=None, merge_pairs=None, fragmentation_cooldown_pids=None,
                      collision_state=None, craton_id_remap=None, next_plate_id=None,
                      speed_state=None, previous_plate_id=None, force_fields=None,
-                     force_diag=None, rift_splits=None, rift_skip=(), sutures=None):
+                     force_diag=None, rift_splits=None, rift_skip=(), sutures=None, cores=None):
     """Rebuild the plate configuration from moved plate polygons and compute the next
     stage rotations.
 
@@ -2433,7 +2497,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
         rift = rift_trial_splits(plate_id_raster, craton_raster, age_grid, torque_parts,
                                  speed_state['last']['omega'], params, contact_scale=contact_scale,
                                  skip_pids=set(rift_skip), slab_pull_weight=forces.get('slab_pull', 6.0),
-                                 sutures=sutures)
+                                 sutures=sutures, cores=cores)
         if force_diag is not None:
             force_diag['rift'] = rift
         _ct['rift_test'] = time.perf_counter() - _t_rift

@@ -20,6 +20,7 @@ MODE_CHOICES = {
     'collision_weld':      ('off', 'on'),
     'sutures':             ('none', 'tracers'),
     'rift_path':           ('straight', 'least_cost'),
+    'continent_strength':  ('uniform', 'cores'),
 }
 
 PRESETS = {
@@ -37,6 +38,7 @@ PRESETS = {
         'collision_weld':      'off',
         'sutures':             'none',
         'rift_path':           'straight',
+        'continent_strength':  'uniform',
     },
     'physical': {
         'drag':                'area_edge',
@@ -52,6 +54,7 @@ PRESETS = {
         'collision_weld':      'off',     # physical default decided at the R3 gate
         'sutures':             'none',    # physical default decided at the R3 gate
         'rift_path':           'straight',   # physical default decided at the R4 gate
+        'continent_strength':  'uniform',    # physical default decided at the R5 gate
     },
 }
 
@@ -70,6 +73,7 @@ IMPLEMENTED = {
     'collision_weld':      {'off', 'on'},
     'sutures':             {'none', 'tracers'},
     'rift_path':           {'straight', 'least_cost'},
+    'continent_strength':  {'uniform', 'cores'},
 }
 
 DEFAULT_PRESET = 'physical'

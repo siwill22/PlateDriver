@@ -150,6 +150,12 @@ params:
   rift_sweep_azimuths:         12       # candidate great circles through the plate centroid
   rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
   rift_path_corridor_deg:      5        # [rift_path: least_cost] the path stays this close to the straight cut
+  # --- Craton cores and belts (force_modes.continent_strength: cores) ---
+  craton_core_spacing_km:      2500     # random terranes at least this far apart, in each continent
+  craton_belt_width_km:        400      # belts between terranes, about this wide
+  craton_core_factor:          3        # continental rift strength x this on a core
+  belt_strength_factor:        0.5      # ... and x this on a belt
+  craton_core_seed:            null     # null: random_seed
   # --- Welding and sutures (force_modes.collision_weld: on, sutures: tracers) ---
   weld_after_myr:              30       # continuous continental collision before the smaller plate is absorbed
   suture_strength_factor:      0.5      # continental rift strength x this near a suture
