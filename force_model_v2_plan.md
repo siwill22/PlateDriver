@@ -19,6 +19,11 @@ v2 adds one splitting mechanism for **any** plate, continental or oceanic: a pla
 where the forces would pull its two halves apart harder than the lithosphere can resist.
 Every change is a mode flag, and `simple` keeps today's behaviour (Q14).
 
+**Plate 222 is not a target** (decided 2026-09-30). Until R5 the gates asked whether 222 rifts.
+That was a stand-in for "can continents rift at all", which R5 answers. A large plate that
+stays whole for 500 Myr can be a valid outcome. The gates now judge whole runs (see Gate
+measures).
+
 ## Decisions
 
 | # | Topic | Decision | Options kept |
@@ -175,11 +180,13 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
 - the `stress` trigger prototype, a side experiment
 - README, plan and config brought up to date
 
-**Gate measures (Q12):**
-- rifts per 100 Myr, and new plates surviving more than 50 Myr;
-- the largest connected continent over time: continental cells joined across plate
-  boundaries, as a share of all continent, which tracks break-up and re-assembly;
-- RMS speed (it should stop drifting down), plate count and pole swings;
+**Gate measures (Q12; revised 2026-09-30, no single-plate target):**
+- **continental rifts** per 100 Myr, and how long the new continental plates survive;
+- **the largest connected continent over time**: continental cells joined across plate
+  boundaries, as a share of all continent. It shows how long assembled continents stay
+  together, and whether they break up and re-assemble;
+- **the plate-size distribution**, and the share of new plates that are small oceanic slivers;
+- RMS speed, plate count and pole swings;
 - tracer count and step time.
 
 ## Found in R0
