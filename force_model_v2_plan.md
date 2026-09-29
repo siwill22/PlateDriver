@@ -245,6 +245,13 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
   - With belts ×1 and ocean floor 1/3, the ridge-flank slivers stop, but there is little
     rifting at all.
 
+- **R5, three settings × three tie seeds** (`show-me/2026-09-30-r5-three-settings/`):
+  - Only belts ×0.5 (ocean floor 0.2) makes continental rifts follow the belts in every seed:
+    97–100% of their length against 19% by chance, with 2–7 continental rifts per run.
+  - Belts ×0.75 is erratic between seeds.
+  - Belts ×1 with floor 1/3 rifts continents little, and not along belts.
+  - Oceanic slivers are 66–80% of new plates in every setting, a separate problem.
+
 ## Open
 
 - **Other shapely uses** (`update_plate_polygons` smoothing with topojson, `make_valid`, and
