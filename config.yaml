@@ -149,6 +149,10 @@ params:
   rift_cooldown_myr:           10       # both halves are not tested again for this long
   rift_sweep_azimuths:         12       # candidate great circles through the plate centroid
   rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
+  # --- Welding and sutures (force_modes.collision_weld: on, sutures: tracers) ---
+  weld_after_myr:              30       # continuous continental collision before the smaller plate is absorbed
+  suture_strength_factor:      0.5      # continental rift strength x this near a suture
+  suture_width_deg:            2        # ... within this great-circle distance of a suture point
   merging_enabled:             false    # absorb plates with persistently near-zero relative motion
   merge_conservative_threshold: 0.05   # km/Myr (= mm/yr); boundary |divergence| below this = near-zero
   merge_min_steps:             5        # consecutive near-zero steps before merge fires

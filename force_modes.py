@@ -17,6 +17,8 @@ MODE_CHOICES = {
     'tracer_thinning':     ('none', 'cell'),
     'plate_rebuild':       ('lonlat', 'midpoint', 'rotated'),
     'rifting':             ('none', 'trial'),
+    'collision_weld':      ('off', 'on'),
+    'sutures':             ('none', 'tracers'),
 }
 
 PRESETS = {
@@ -31,6 +33,8 @@ PRESETS = {
         'tracer_thinning':     'none',
         'plate_rebuild':       'lonlat',
         'rifting':             'none',
+        'collision_weld':      'off',
+        'sutures':             'none',
     },
     'physical': {
         'drag':                'area_edge',
@@ -43,6 +47,8 @@ PRESETS = {
         'tracer_thinning':     'cell',
         'plate_rebuild':       'midpoint',
         'rifting':             'trial',
+        'collision_weld':      'off',     # physical default decided at the R3 gate
+        'sutures':             'none',    # physical default decided at the R3 gate
     },
 }
 
@@ -58,6 +64,8 @@ IMPLEMENTED = {
     'tracer_thinning':     {'none', 'cell'},
     'plate_rebuild':       {'lonlat', 'midpoint', 'rotated'},
     'rifting':             {'none', 'trial'},
+    'collision_weld':      {'off', 'on'},
+    'sutures':             {'none', 'tracers'},
 }
 
 DEFAULT_PRESET = 'physical'

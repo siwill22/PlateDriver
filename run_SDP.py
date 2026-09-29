@@ -63,6 +63,12 @@ params['ridge_push_mode'] = modes['ridge_push']
 params['tracer_thinning_mode'] = modes['tracer_thinning']
 params['plate_rebuild_mode'] = modes['plate_rebuild']
 params['rifting_mode'] = modes['rifting']
+params['collision_weld_mode'] = modes['collision_weld']
+params['sutures_mode'] = modes['sutures']
+if modes['collision_weld'] == 'on' and modes['collision'] not in ('coupling', 'breakoff'):
+    raise SystemExit('collision_weld: on needs collision: coupling or breakoff (they time the collisions)')
+if modes['sutures'] == 'tracers' and modes['collision_weld'] != 'on':
+    raise SystemExit('sutures: tracers are dropped at welds, so they need collision_weld: on')
 _needs = sdp.force_fields_needed(params)     # per-step fields the force modes read
 
 
@@ -240,6 +246,9 @@ _rift_state    = {}   # {pid: {'count', 'normal'}} plates whose best cut has pas
 _rift_planned  = []   # [(pid, plane normal)] splits to make next step
 _rift_cooldown = {}   # {pid: remaining_myr} plates just split, not tested again yet
 _rift_events   = []
+_welds         = []   # collision_weld: on, one row per weld
+_sutures       = pd.DataFrame(columns=['lon', 'lat', 'suture_id', 'time_myr'])   # sutures: tracers
+_next_suture_id = 1
 _craton_plate_remap     = {}   # {craton_plateid: host_plateid} for absorbed cratons
 if _slab_enabled:
     _mantle_spacing = params.get('mantle_grid_spacing_deg', 5.0)
@@ -507,6 +516,8 @@ def _enqueue_outputs(i, force_save=False):
             force_diag['segments'].to_csv(_out('trench_forces_{:04d}.csv'.format(i)), index=False)
         if force_diag.get('ridge_push') is not None:
             force_diag['ridge_push'].to_csv(_out('ridge_push_torques_{:04d}.csv'.format(i)), index=False)
+        if params['sutures_mode'] == 'tracers':
+            _sutures.to_csv(_out('sutures_{:04d}.csv'.format(i)), index=False)
         return True
     return False
 
@@ -603,6 +614,7 @@ try:
             if _new_pid in moving_poles:
                 _craton_stage_poles[_old_pid] = moving_poles[_new_pid]
         cratons = sdp.nudge_polygons(cratons, _craton_stage_poles)
+        _sutures = sdp.advect_sutures(_sutures, previous_plate_id, moving_poles)
 
         # Accumulate finite rotations: F(t) = S * F(t - dt), for the move just made
         for pid, stage_rot in moving_poles.items():
@@ -637,7 +649,8 @@ try:
                                                force_fields=_fields,
                                                force_diag=force_diag,
                                                rift_splits=_rift_now,
-                                               rift_skip=set(_rift_cooldown))
+                                               rift_skip=set(_rift_cooldown),
+                                               sutures=_sutures if len(_sutures) else None)
         _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         # Rifting (rifting: trial): a plate splits once its best cut has passed the trial
@@ -726,6 +739,32 @@ try:
                     _new_contact[_pair]  = 0
 
             _conservative_contact = _new_contact
+
+        # Welding (collision_weld: on): after weld_after_myr of continuous continental
+        # collision the smaller plate is absorbed next step; sutures: tracers marks the join
+        if params['collision_weld_mode'] == 'on':
+            _weld_after = max(1, int(round(params.get('weld_after_myr', 30.0) / delta_time)))
+            _areas_w = sdp.plate_areas(rasters['plate_id'])
+            _used = {_p for _pr in _merge_pairs for _p in _pr}
+            for _pair, _steps in sorted(collision_state.items()):
+                _p1, _p2 = int(_pair[0]), int(_pair[1])
+                if _steps < _weld_after or _p1 in _used or _p2 in _used or _p1 not in _areas_w or _p2 not in _areas_w:
+                    continue
+                _big, _small = (_p1, _p2) if _areas_w[_p1] >= _areas_w[_p2] else (_p2, _p1)
+                _merge_pairs.append((_big, _small))
+                _used |= {_p1, _p2}
+                _rift_cooldown[_big] = params.get('rift_cooldown_myr', 10.0)
+                _row = dict(time_myr=t, host=_big, absorbed=_small, collided_myr=_steps * delta_time, suture_id=0)
+                _smp = force_diag.get('collision_samples', {}).get((_p1, _p2))
+                if params['sutures_mode'] == 'tracers' and _smp:
+                    _sutures = pd.concat([_sutures, sdp.suture_points(_smp, _next_suture_id, t)], ignore_index=True)
+                    _row['suture_id'] = _next_suture_id
+                    _next_suture_id += 1
+                _welds.append(_row)
+                pd.DataFrame(_welds).to_csv(os.path.join(output_dir, 'welds.csv'), index=False)
+                print('  [weld] plates {} and {} collided for {:.0f} Myr: {} absorbed into {} next step{}'.format(
+                    _p1, _p2, _steps * delta_time, _small, _big,
+                    ', suture {} ({} points)'.format(_row['suture_id'], len(_smp)) if _row['suture_id'] else ''))
 
         if params.get('fragmentation_enabled', False) and _new_plates:
             _frag_cooldown = params.get('fragmentation_cooldown_myr', 5.0)
