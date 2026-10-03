@@ -71,12 +71,13 @@ All outputs go to the directory specified by `output_dir` in `config.yaml`.
 | `craton_NNNN.nc` | Every `csv_save_interval` steps | Craton ID raster (lon/lat) |
 | `divergence_NNNN.nc` | Every `csv_save_interval` steps | Horizontal divergence of the plate velocity field (1/Myr); ≈0 inside rigid plates, positive at spreading and negative at converging boundaries |
 | `seamounts_final.geojson` | End of run | All active seamounts at final timestep |
-| `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, slab-force totals and mean trench slab depth (slab modes), seconds per step by phase |
+| `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, slab-force totals and mean trench slab depth (slab modes), continental area and the continent hidden by overlapping continents (`continent_area_km2`, `continent_hidden_km2`), seconds per step by phase |
 | `trench_forces_NNNN.csv` | Every `csv_save_interval` steps | One row per trench segment of each plate: position, plates, downgoing or not, convergence, slab depth, seafloor age, pull and suction weights. Only with `slab_pull: ramp/slab_length`, `slab_suction: depth_split` or `polarity: age` |
 | `plate_stats.csv` | Every step | One row per plate per step: angular velocity (pole, rate), RMS speed, area, continental fraction, perimeter and trench (downgoing/overriding), ridge and conservative lengths |
-| `welds.csv` | Each weld (`collision_weld: on`) | Time, host plate, absorbed plate, collision length and suture ID of every weld |
+| `welds.csv` | Each weld (`collision_weld: on`) | Time, host plate, absorbed (or giving) plate, collision length, suture ID, scope, whether it was an accretion, welded area and host area after the weld (shares of the sphere) of every weld |
 | `sutures_NNNN.csv` | Every `csv_save_interval` steps (`sutures: tracers`) | Suture tracer lon/lat, suture ID and time formed |
-| `rift_events.csv` | Each rift (`rifting: trial`) | Time, parent plate and new plate of every rift split |
+| `rift_trials.csv` | Every step (`rifting: trial`) | One row per plate tested: area, candidate cuts reaching each test (`cuts`, `one_piece`, `under_tension`), the largest tension of any cut, the best tension / strength with its tension and strength, and whether a cut passed |
+| `rift_events.csv` | Each rift (`rifting: trial`) | Time, parent plate, new plate and kind of cut (`sweep`, `suture` or `tear`) of every rift split |
 | `run_info.yaml` | Start of run | The config used, the resolved force modes and the git commit |
 | `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file with finite rotations for all plates up to step NNNN. The time column is elapsed model time (see [Rotation file format](#rotation-file-format)) |
 
@@ -202,6 +203,18 @@ listed is `simple`'s):
     removes the snapping, but it moves every boundary by up to about the tolerance each step,
     which makes plate poles jitter, and it costs about 0.2 s per step. It is kept for
     comparison.
+- **`rebuild_tiles`** (not a force; how plates are turned into polygons each step):
+  - `off`: each plate is polygonised whole on the lon/lat grid.
+  - `on`: each plate is polygonised in pieces of at most 90° longitude × 45° latitude, which then
+    get their plate ID back. A plate that touches both edges of the lon/lat map and a pole (one
+    reaching from pole to pole) is otherwise turned inside out by the dateline wrap: it is
+    replaced by its complement and its cells go to its neighbours, with no error
+    (`show-me/2026-10-01-giant-plate-breakup/`). The pieces' shared edges are not plate
+    boundaries, and they are left out of the force sum, so they carry no edge drag. The same
+    applies to the dateline seam inside a plate that crosses it; with `off` that seam (about
+    17% of all polygon outline length at 240 Myr in one run) is counted in the edge drag.
+    Plate boundaries and plate areas are otherwise the same as `off` (within about 0.1% of
+    cells per rebuild).
 - **`rifting`** (splitting a plate under tension; see [Rifting](#rifting-trial-split)):
   - `none`: plates split only at thin necks (fragmentation) or when disconnected.
   - `trial` (`physical`): each step every plate is tested against a set of straight
@@ -222,12 +235,47 @@ listed is `simple`'s):
     points that move with their plates (`craton_cores_NNNN.csv`). The seed is
     `craton_core_seed`, or `random_seed` if that is null, so plate motions then depend on the
     seed.
+  - `cores_random`: as `cores` (the same terranes and belts), but each terrane's core and each
+    belt (one per pair of neighbouring terranes) has its own factor, lognormal about
+    `craton_core_factor` and `belt_strength_factor`: median × exp(`strength_spread` × N(0, 1)).
+    Some belts are then much weaker than others. The factors are in `craton_cores_NNNN.csv`
+    (`factor`).
 - **`collision_weld`** (joining plates after a long continental collision):
   - `off`: collided plates stay separate for good.
   - `on`: after `weld_after_myr` of continuous continent–continent collision, the smaller plate
     is absorbed into the larger one, as for merging. It needs `collision: coupling` or
     `breakoff`, which time the collisions. The joined plate is not tested for rifting for
     `rift_cooldown_myr`. Each weld is written to `welds.csv`.
+- **`collision_weld_scope`** (what a weld joins; needs `collision_weld: on`):
+  - `plate`: the whole smaller plate, ocean included, is absorbed.
+  - `continent`: only the smaller plate's continent at the contact (each connected piece within
+    `weld_contact_reach_deg` of a contact point) passes to the larger plate. The rest of the
+    smaller plate, its ocean and any continent elsewhere, stays a plate of its own.
+- **`collision_weld_giver`** (which plate gives its continent; needs `collision_weld_scope: continent`):
+  - `smaller`: the smaller plate's colliding continent passes to the larger plate.
+  - `downgoing`: the continent that arrived on the subducting plate is accreted to the
+    overriding plate, as a terrane is, if it is no larger than `weld_accrete_max_frac` of the
+    sphere; a larger one is not welded and the collision goes on. The overriding plate's new
+    edge is the far side of the accreted continent, where the subducting plate's ocean meets
+    it, so subduction steps out behind it. Without a known polarity the smaller plate gives.
+- **`collision_contact`** (how hard a continental contact resists; viscous contact drag only):
+  - `length`: the drag grows with the contact length (`collision_drag_factor`), so a short
+    contact resists little and the continents keep converging into each other.
+  - `stiff`: every contact resists with the same drag (`collision_stiff_factor`), whatever its
+    length, so convergence stops at the contact. Rotation about the contact and slip along it
+    stay free: a short contact acts as a pivot.
+- **`collision_radius_deg`** (param): two plates are in collision where both have continent
+  within this distance of their boundary (null: `boundary_search_radius_deg`, 2°). Slab forces
+  stop, and contact drag, breakoff and the weld timer start, at that distance. With
+  `collision_contact: stiff` and the 2° default the convergence stops while up to about 200 km
+  of ocean is left between the continents; 0.5° lets them close.
+- **`collision_tear`** (tearing a plate held at a continental collision; needs `rifting: trial`):
+  - `off`: the rift test uses its usual cuts only.
+  - `on`: for each plate in a continent–continent collision (at least 5 contact segments), the
+    rift test also tries the contact's best-fit great circle moved `collision_tear_offsets_deg`
+    to either side of it. These cuts are judged like any other (tension against strength). A
+    passing one tears the plate between the part held at the collision and the part still
+    pulled by its other trenches. `rift_events.csv` marks such rifts `tear`.
 - **`sutures`** (weak zones left by welds; needs `collision_weld: on`):
   - `none`: no sutures.
   - `tracers`: at each weld, points are dropped every 0.5° along the contact. They move with
@@ -401,7 +449,8 @@ Areas are spherical, given in equatorial-equivalent deg².
 5. **New plates.** The child plate gets a new, never-reused PLATEID. It inherits the parent's stage pole and full rotation history, then diverges naturally as its new boundary is classified.
 
 Disconnected pieces of one plate ID (for example, after overlaps are resolved) are handled the same way at every step:
-- Pieces smaller than `min_peninsula_area_deg2` are absorbed by their neighbour.
+- Pieces smaller than `min_peninsula_area_deg2` are absorbed by their neighbour. Disconnected
+  pieces of a plate use `min_piece_area_deg2` instead, if it is set.
 - Larger pieces become child plates.
 
 ### Rifting (trial split)
@@ -417,7 +466,9 @@ With `rifting: trial` (`physical`), plates can split under tension.
   like the strength.
 
 **The candidate cuts.** Each plate has 12 azimuths × 3 offsets (`rift_sweep_offsets_deg`) of
-great circles through its centroid, all on the sphere.
+great circles through its centroid, all on the sphere. With `collision_tear: on`, a plate in a continental collision
+also gets the contact's best-fit great circle moved each of `collision_tear_offsets_deg` to
+either side.
 
 **When a cut passes.** A cut is kept when all of the following hold:
 1. The tension is greater than the mean strength along the cut:
@@ -445,11 +496,19 @@ params:
   rift_cooldown_myr:           10       # both halves are not tested again for this long
   rift_sweep_azimuths:         12       # candidate great circles through the plate centroid
   rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
+  collision_tear_offsets_deg:  [5, 10, 15, 20]   # [collision_tear: on] cuts parallel to a collision contact, this far either side
 ```
 
 ```yaml
 params:
   weld_after_myr:              30       # continuous continental collision before the smaller plate is absorbed
+  weld_contact_reach_deg:      1        # [collision_weld_scope: continent] continent pieces within this of the contact are welded
+  weld_accrete_max_frac:       0.03     # [collision_weld_giver: downgoing] largest continent accreted to the overriding plate (share of the sphere)
+  weld_accrete_min_frac:       0        # [collision_weld_giver: downgoing] smaller continent pieces are not accreted
+  min_piece_area_deg2:         null     # disconnected pieces of a plate smaller than this join a neighbour (null: min_peninsula_area_deg2)
+  collision_stiff_factor:      100      # [collision_contact: stiff] contact drag per collision, independent of the contact length
+  collision_radius_deg:        null     # continents of two plates this close to a boundary are in collision (null: boundary_search_radius_deg)
+  strength_spread:             0.5      # [continent_strength: cores_random] each core / belt factor = median x exp(spread x N(0,1))
   suture_strength_factor:      0.5      # continental rift strength x this near a suture
   suture_width_deg:            2        # ... within this great-circle distance of a suture point
 ```
@@ -477,9 +536,10 @@ params:
   merge_min_steps:              5      # consecutive near-zero steps before merge fires
   merge_require_no_driver:      true   # only merge if smaller plate has no ridge/subduction
   merge_cooldown_myr:           10.0   # Myr before merged plate is eligible again
+  merge_max_area_frac:          null   # only absorb plates smaller than this share of the sphere (null: any size)
 ```
 
-A `_conservative_contact` counter is maintained across timesteps for each plate pair. When the mean absolute divergence stays below `merge_conservative_threshold` for `merge_min_steps` consecutive steps, the smaller plate's raster pixels are relabelled with the larger plate's ID. Plate size is spherical area. With `merge_require_no_driver`, a merge only happens if the smaller plate has no ridge or subduction boundary. Cratons of an absorbed plate move with the host from then on. The merged polygon is re-derived from the updated raster; no special stage-pole initialisation is needed. A cooldown suppresses re-merging or re-fragmentation shortly after an event.
+A `_conservative_contact` counter is maintained across timesteps for each plate pair. When the mean absolute divergence stays below `merge_conservative_threshold` for `merge_min_steps` consecutive steps, the smaller plate's raster pixels are relabelled with the larger plate's ID. Plate size is spherical area. With `merge_require_no_driver`, a merge only happens if the smaller plate has no ridge or subduction boundary. Cratons of an absorbed plate move with the host from then on. The merged polygon is re-derived from the updated raster; no special stage-pole initialisation is needed. A cooldown suppresses re-merging or re-fragmentation shortly after an event. With `merge_max_area_frac`, only a plate smaller than that share of the sphere is absorbed. In the physical model, boundary divergence is in km/Myr and only about 10% of plate pairs move apart or together at less than about 8 km/Myr on average, so the default threshold (0.05) never fires there; a few km/Myr is needed.
 
 ---
 
@@ -742,6 +802,10 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
 - **Boundaries snap to meridians and parallels** with `plate_rebuild: lonlat` (`simple`); see `plate_rebuild`.
 - **Ridge push points mostly exactly N–S or E–W** (`ridge_push: body`): the age grid is piecewise constant (nearest tracer) and its gradient is taken along lon and lat. The effect on plate motion is not measured.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.
+- **Continents can overlap.** Continents are rigid polygons carried by their plates, and a
+  continent–continent collision only resists convergence (drag or velocity blending); nothing
+  stops it. Where two continents overlap, the grids and maps show only one, so continent is
+  hidden. `step_stats.csv` records the hidden area (`continent_hidden_km2`).
 - **Terrain noise is fixed to the grid**: continents move over a stationary noise pattern rather than carrying their texture with them.
 - **Rifting is plain** (`rifting: trial`):
   - Cuts are straight great circles through or near the centroid.
@@ -753,8 +817,10 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
   one plate over 70% of the sphere, whether welds come after 30, 60 or 100 Myr of collision.
   With straight cuts, sutures don't help: none of the rifts follows a suture. Keep it `off`
   (the default) until it is revised.
-- **A plate crossing the dateline from pole to pole** (over about 3/4 of the sphere) can't be
-  represented by the lon/lat plate polygons. The run stops with an error.
+- **A plate reaching from pole to pole** can't be represented by whole lon/lat plate polygons
+  (`rebuild_tiles: off`). In one form the run stops with an error; in others the dateline wrap
+  turns the plate inside out and the plates are scrambled with no error (seen when welds made one
+  plate 70–85% of the sphere). `rebuild_tiles: on` avoids it.
 - **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is a v2 item.
 - **Ridges sit close to trenches** in places (a thin strip of young plate made and consumed side by side), in both presets.
 - **Ridges are not split into spreading segments and transforms**; boundaries are continuous lines of varying obliquity. A post-processing step could add this for appearance.

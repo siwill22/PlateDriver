@@ -64,11 +64,24 @@ params['tracer_thinning_mode'] = modes['tracer_thinning']
 params['plate_rebuild_mode'] = modes['plate_rebuild']
 params['rifting_mode'] = modes['rifting']
 params['collision_weld_mode'] = modes['collision_weld']
+params['collision_weld_scope_mode'] = modes['collision_weld_scope']
+params['collision_weld_giver_mode'] = modes['collision_weld_giver']
+params['collision_contact_mode'] = modes['collision_contact']
 params['sutures_mode'] = modes['sutures']
 params['rift_path_mode'] = modes['rift_path']
 params['continent_strength_mode'] = modes['continent_strength']
+params['collision_tear_mode'] = modes['collision_tear']
+params['rebuild_tiles_mode'] = modes['rebuild_tiles']
+if modes['collision_tear'] == 'on' and modes['rifting'] != 'trial':
+    raise SystemExit('collision_tear: on adds candidate cuts to the rifting trial split, so it needs rifting: trial')
 if modes['collision_weld'] == 'on' and modes['collision'] not in ('coupling', 'breakoff'):
     raise SystemExit('collision_weld: on needs collision: coupling or breakoff (they time the collisions)')
+if modes['collision_weld_giver'] == 'downgoing' and modes['collision_weld_scope'] != 'continent':
+    raise SystemExit('collision_weld_giver: downgoing accretes a continent, so it needs collision_weld_scope: continent')
+if modes['collision_contact'] == 'stiff' and not (modes['collision'] == 'viscous' or (
+        modes['collision'] == 'breakoff' and params.get('breakoff_contact', 'viscous') == 'viscous')):
+    raise SystemExit('collision_contact: stiff changes the viscous contact drag, so it needs collision: viscous '
+                     'or breakoff with breakoff_contact: viscous')
 if modes['sutures'] == 'tracers' and modes['collision_weld'] != 'on':
     raise SystemExit('sutures: tracers are dropped at welds, so they need collision_weld: on')
 _needs = sdp.force_fields_needed(params)     # per-step fields the force modes read
@@ -106,7 +119,7 @@ _write_run_info()
 # Per-step statistics are appended every step; start them afresh
 _step_stats_csv  = _out('step_stats.csv')
 _plate_stats_csv = _out('plate_stats.csv')
-for _f in (_step_stats_csv, _plate_stats_csv):
+for _f in (_step_stats_csv, _plate_stats_csv, _out('rift_trials.csv')):
     if os.path.exists(_f):
         os.remove(_f)
 
@@ -230,11 +243,15 @@ force_diag = {}
 # with their plates like the suture tracers.  Their own generator, so no other random draw
 # changes.
 _cores = None
-if params['continent_strength_mode'] == 'cores':
+if params['continent_strength_mode'] in ('cores', 'cores_random'):
     _cores = sdp.generate_craton_cores(rasters['craton'], params.get('craton_core_spacing_km', 2500.0),
                                        params.get('craton_belt_width_km', 400.0),
                                        seed=params.get('random_seed') if params.get('craton_core_seed') is None
-                                       else params['craton_core_seed'])
+                                       else params['craton_core_seed'],
+                                       spread=params.get('strength_spread', 0.5)
+                                       if params['continent_strength_mode'] == 'cores_random' else None,
+                                       core_factor=params.get('craton_core_factor', 3.0),
+                                       belt_factor=params.get('belt_strength_factor', 0.5))
     print('  [cores] {} terranes; belts {:.0%} of continental points'.format(
         _cores['terrane'].nunique(), _cores['belt'].mean()))
 if 'last' in speed_state:
@@ -259,6 +276,7 @@ _rift_state    = {}   # {pid: {'count', 'normal'}} plates whose best cut has pas
 _rift_planned  = []   # [(pid, plane normal)] splits to make next step
 _rift_cooldown = {}   # {pid: remaining_myr} plates just split, not tested again yet
 _rift_events   = []
+_rift_kind     = {}   # {pid: cut kind (sweep | suture | tear)} of a planned rift, for rift_events.csv
 _welds         = []   # collision_weld: on, one row per weld
 _sutures       = pd.DataFrame(columns=['lon', 'lat', 'suture_id', 'time_myr'])   # sutures: tracers
 _next_suture_id = 1
@@ -570,6 +588,11 @@ def _record_step_stats(i, step_times=None, previous_poles=None):
     _plate_id_history.append(pid_now.copy())
     del _plate_id_history[:-2]
     last = speed_state.get('last', {})
+    _ov = force_diag.get('continent_overlap')
+    if _ov is not None:
+        # continents are rigid polygons; where two overlap the grids show only one
+        step_row['continent_area_km2'] = _ov['continent_area_km2']
+        step_row['continent_hidden_km2'] = _ov['continent_hidden_km2']
     step_row['speed_scale_k'] = last.get('k_used', np.nan)
     step_row['rms_speed_unscaled_km_per_myr'] = last.get('rms_unscaled', np.nan)
     step_row['speed_capped'] = bool(last.get('capped', False))
@@ -681,7 +704,8 @@ try:
                                                     _craton_plate_remap, params['raster_spacing'],
                                                     params.get('topo_simplify_tolerance', 0.4))
                 _rift_cooldown[_child] = _rift_cooldown[_parent] = params.get('rift_cooldown_myr', 10.0)
-                _rift_events.append(dict(time_myr=t, parent=_parent, child=_child))
+                _rift_events.append(dict(time_myr=t, parent=_parent, child=_child,
+                                         cut=_rift_kind.pop(_parent, 'sweep')))
                 pd.DataFrame(_rift_events).to_csv(os.path.join(output_dir, 'rift_events.csv'), index=False)
             _persist = max(1, int(round(params.get('rift_persist_myr', 3.0) / delta_time)))
             _state = {}
@@ -692,11 +716,23 @@ try:
                 _count = _prev['count'] + 1 if _same else 1
                 if _count >= _persist:
                     _rift_planned.append((_pid, _c['normal'], _c.get('cells')))
+                    _rift_kind[_pid] = _c.get('cut_kind', 'sweep')
                     print('  [rift] plate {} passes the trial split for {} steps (tension / strength {:.2f}, '
-                          'cut {:.0f} deg): splits next step'.format(_pid, _count, _c['ratio'], _c['length_deg']))
+                          'cut {:.0f} deg, {}): splits next step'.format(_pid, _count, _c['ratio'], _c['length_deg'],
+                                                                      _rift_kind[_pid]))
                 else:
                     _state[_pid] = dict(count=_count, normal=_c['normal'])
             _rift_state = _state
+            # every plate's rift test this step (rift_trials.csv): how close it came to splitting
+            _tr = force_diag.get('rift_trials', {})
+            if _tr:
+                _trf = os.path.join(output_dir, 'rift_trials.csv')
+                pd.DataFrame([dict(time_myr=t, plate_id=_p, area_frac=_r['area_deg2'] / 41252.96,
+                                   **{k: v for k, v in _r.items() if k != 'area_deg2'}) for _p, _r in _tr.items()]
+                             ).to_csv(_trf, mode='a', header=not os.path.exists(_trf), index=False, float_format='%.4g')
+            for _pid, _r in force_diag.get('tear_report', {}).items():
+                print('  [tear] plate {}: {} tear cuts, {} cross it once, {} under tension, best tension / strength {:.2f}'.format(
+                    _pid, _r['tear_cuts'], _r['one_piece'], _r['under_tension'], _r['best_ratio']))
             _rift_cooldown = {p: r - delta_time for p, r in _rift_cooldown.items() if r > delta_time}
 
         # New plates (fragments) inherit their parent's rotation history, so the
@@ -753,6 +789,10 @@ try:
                     # only absorb a plate that is not itself driven by a ridge or trench
                     if _no_driver_req and _plate_driver.get(_small, False):
                         continue
+                    # optionally only small plates are absorbed (merge_max_area_frac of the sphere)
+                    _max_frac = params.get('merge_max_area_frac')
+                    if _max_frac is not None and _areas.get(_small, 0) / sum(_areas.values()) > _max_frac:
+                        continue
                     _merge_pairs.append((_big, _small))
                     _plate_cooldown[_p1] = _merge_cooldown
                     _plate_cooldown[_p2] = _merge_cooldown
@@ -761,22 +801,58 @@ try:
             _conservative_contact = _new_contact
 
         # Welding (collision_weld: on): after weld_after_myr of continuous continental
-        # collision the smaller plate is absorbed next step; sutures: tracers marks the join
+        # collision the smaller plate is absorbed next step (collision_weld_scope: plate), or
+        # only its continent at the contact passes to the larger plate (scope: continent).
+        # With collision_weld_giver: downgoing the continent that arrived on the subducting
+        # plate is accreted to the overriding plate instead, if it is no larger than
+        # weld_accrete_max_frac of the sphere (larger ones stay in collision); the new edge
+        # of the overriding plate is the far side of that continent, where the subducting
+        # plate's ocean meets it.  sutures: tracers marks the join
         if params['collision_weld_mode'] == 'on':
             _weld_after = max(1, int(round(params.get('weld_after_myr', 30.0) / delta_time)))
+            _scope = params['collision_weld_scope_mode']
             _areas_w = sdp.plate_areas(rasters['plate_id'])
+            _total_w = sum(_areas_w.values())
+            if _scope == 'continent':
+                _cell_w = sdp.cell_area_weights(sdp.raster_coords(rasters['craton'])[1], rasters['craton'].shape)
             _used = {_p for _pr in _merge_pairs for _p in _pr}
             for _pair, _steps in sorted(collision_state.items()):
                 _p1, _p2 = int(_pair[0]), int(_pair[1])
                 if _steps < _weld_after or _p1 in _used or _p2 in _used or _p1 not in _areas_w or _p2 not in _areas_w:
                     continue
-                if len(_areas_w) - len(_merge_pairs) <= 2:
+                if _scope == 'plate' and len(_areas_w) - len(_merge_pairs) <= 2:
                     continue            # never weld the world down to one plate
                 _big, _small = (_p1, _p2) if _areas_w[_p1] >= _areas_w[_p2] else (_p2, _p1)
-                _merge_pairs.append((_big, _small))
+                _down = polarity_dict.get((min(_p1, _p2), max(_p1, _p2)))
+                _accrete = params['collision_weld_giver_mode'] == 'downgoing' and _down in (_p1, _p2)
+                if _accrete:
+                    _small, _big = _down, _p1 + _p2 - _down      # giver: the subducting plate
+                if _scope == 'continent':
+                    _pts = force_diag.get('collision_points', {})
+                    _moved = sdp.welded_continent_mask(rasters['craton'], _small,
+                                                       _pts.get((_p1, _p2), []) + _pts.get((_p2, _p1), []),
+                                                       params.get('weld_contact_reach_deg', 1.0))
+                    _gain = float(_cell_w[_moved].sum())
+                    if not _moved.any():
+                        continue
+                    if _accrete and _gain / _total_w > params.get('weld_accrete_max_frac', 0.03):
+                        continue        # too large to accrete: the collision goes on
+                    if _accrete and _gain / _total_w < params.get('weld_accrete_min_frac', 0.0):
+                        continue        # a sliver of continent: not worth a new plate edge
+                else:
+                    _gain = _areas_w[_small]
+                if _scope == 'continent':
+                    cratons = sdp.transfer_welded_continent(cratons, rasters['craton'], _small, _big, _moved,
+                                                            _craton_plate_remap, params['raster_spacing'],
+                                                            params.get('topo_simplify_tolerance', 0.4))
+                    collision_state[_pair] = 0      # the pair carries on; a new weld needs a new collision
+                else:
+                    _merge_pairs.append((_big, _small))
                 _used |= {_p1, _p2}
                 _rift_cooldown[_big] = params.get('rift_cooldown_myr', 10.0)
-                _row = dict(time_myr=t, host=_big, absorbed=_small, collided_myr=_steps * delta_time, suture_id=0)
+                _row = dict(time_myr=t, host=_big, absorbed=_small, collided_myr=_steps * delta_time, suture_id=0,
+                            scope=_scope, accreted=bool(_accrete), welded_area_frac=round(_gain / _total_w, 4),
+                            host_area_frac=round((_areas_w[_big] + _gain) / _total_w, 4))
                 _smp = force_diag.get('collision_samples', {}).get((_p1, _p2))
                 if params['sutures_mode'] == 'tracers' and _smp:
                     _sutures = pd.concat([_sutures, sdp.suture_points(_smp, _next_suture_id, t)], ignore_index=True)
@@ -784,8 +860,11 @@ try:
                     _next_suture_id += 1
                 _welds.append(_row)
                 pd.DataFrame(_welds).to_csv(os.path.join(output_dir, 'welds.csv'), index=False)
-                print('  [weld] plates {} and {} collided for {:.0f} Myr: {} absorbed into {} next step{}'.format(
-                    _p1, _p2, _steps * delta_time, _small, _big,
+                print('  [weld] plates {} and {} collided for {:.0f} Myr: {} {} {} next step{}'.format(
+                    _p1, _p2, _steps * delta_time,
+                    _small, 'absorbed into' if _scope == 'plate' else
+                    '{} its colliding continent ({:.1%} of the sphere) to'.format(
+                        'accretes' if _accrete else 'gives', _gain / _total_w), _big,
                     ', suture {} ({} points)'.format(_row['suture_id'], len(_smp)) if _row['suture_id'] else ''))
 
         if params.get('fragmentation_enabled', False) and _new_plates:

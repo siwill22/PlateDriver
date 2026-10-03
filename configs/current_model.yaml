@@ -1,0 +1,166 @@
+# PlateDriver: the current model (2026-10-03), as shown in the viewer as "Current model, tie seed 0/1/2".
+#
+#   conda run -n pygmt17 python run_SDP.py --config configs/current_model.yaml
+#
+# The three viewer runs differ only in params.tie_break_seed (0, 1, 2); this file has 2.
+# Full config (config.yaml plus the changes below), so it does not change if config.yaml does.
+#
+# force_modes changed from the physical preset:
+#   rift_path: least_cost
+#   continent_strength: cores_random
+#   collision_weld: on
+#   rebuild_tiles: on
+#   collision_weld_scope: continent
+#   collision_weld_giver: downgoing
+#   collision_contact: stiff
+# params different from config.yaml:
+#   collision_radius_deg: 0.5
+#   csv_save_interval: 10
+#   merge_conservative_threshold: 5.0
+#   merge_max_area_frac: 0.02
+#   merge_require_no_driver: False
+#   merging_enabled: True
+#   min_child_area_deg2: 100.0
+#   min_piece_area_deg2: 25.0
+#   plot_interval: None
+#   random_seed: 42
+#   tie_break_seed: 2
+#   weld_accrete_min_frac: 0.002
+
+force_model: physical
+force_modes:
+  rift_path: least_cost
+  continent_strength: cores_random
+  collision_weld: 'on'
+  rebuild_tiles: 'on'
+  collision_weld_scope: continent
+  collision_weld_giver: downgoing
+  collision_contact: stiff
+forces:
+  continental_collision: 18
+  ridge_push: 3
+  slab_pull: 6
+  slab_suction: 6
+  slab_suction_deep: 3
+input_files:
+  cratons: /Users/simon/GIT/octopus/Atlantis3/atlantis66_cratons.geojson
+  dynamic_polygons:
+  - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topologies.gpml
+  - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topological_polygons.gpml
+  rotation_model: /Users/simon/GIT/octopus/Atlantis3/atlantis3_rotations.rot
+output_dir: ./output/current_model
+params:
+  belt_strength_factor: 0.5
+  boundary_search_radius_deg: 2
+  breakoff_contact: viscous
+  breakoff_delay_myr: 10
+  cmb_dVs_scale: -0.5
+  cmb_decay_km: 400.0
+  cmb_heating_rate: 0.02
+  cmb_max_heat: 3.0
+  cmb_sigma_deg: 10.0
+  cmb_slab_suppression: 0.05
+  cmb_surface_coupling: 0.1
+  collision_coupling_max: 0.5
+  collision_coupling_timescale: 30
+  collision_drag_factor: 10
+  continent_drag_factor: 3.0
+  craton_belt_width_km: 400
+  craton_core_factor: 3
+  craton_core_seed: null
+  craton_core_spacing_km: 2500
+  csv_save_interval: 10
+  div_threshold_ridge: 0.2
+  div_threshold_subduction: -0.0001
+  edge_drag_width_km: 3000
+  eq_n_candidates: 100000
+  eq_ridge_max_depth_km: 50.0
+  eq_ridge_max_dist_deg: 1.0
+  eq_ridge_prob: 0.15
+  eq_slab_dip_deg: 45.0
+  eq_slab_max_depth_km: 650.0
+  eq_subduction_prob: 1.0
+  fragmentation_cooldown_myr: 5.0
+  fragmentation_enabled: true
+  hotspot_prob: 1.0
+  initial_slab_depth_km: 1320
+  mantle_depth_interval_km: 100
+  mantle_grid_spacing_deg: 5.0
+  max_aspect_ratio: 2.0
+  max_rms_speed_factor: 3.0
+  merge_conservative_threshold: 5.0
+  merge_cooldown_myr: 10.0
+  merge_min_steps: 5
+  merge_require_no_driver: false
+  merging_enabled: true
+  min_child_area_deg2: 100.0
+  min_concavity_ratio: 0.85
+  min_neck_ratio: 0.35
+  min_peninsula_area_deg2: 5.0
+  n_hotspots: 30
+  oceanic_strength_floor: 0.2
+  oceanic_strength_ratio: 3
+  physics_grid_deg: 1.0
+  plot_interval: null
+  pull_ramp_km_per_myr: 10
+  random_seed: 42
+  raster_spacing: 0.25
+  ridge_push_age_cutoff_myr: 80
+  ridge_push_smooth_deg: 0
+  rift_cooldown_myr: 10
+  rift_path_corridor_deg: 5
+  rift_persist_myr: 3
+  rift_strength_continent: 0.5
+  rift_sweep_azimuths: 12
+  rift_sweep_offsets_deg:
+  - -15
+  - 0
+  - 15
+  seafloor_spacing_deg: 1.0
+  slab_age_saturation_myr: 80
+  slab_line_tol_deg: 1
+  slab_max_sink_rate: 400
+  slab_ref_depth_km: 660
+  slab_search_radius_deg: 5
+  slab_sink_rate_factor: 1.0
+  slab_slowing_factor: 4
+  slab_thermal_tau_myr: 4
+  slab_tracers_enabled: true
+  speed_scale: null
+  spreading_rate_km_per_myr: 50.0
+  suture_strength_factor: 0.5
+  suture_width_deg: 2
+  target_rms_speed: 50
+  tessellation_deg: 0.2
+  tie_break: previous_owner
+  tie_break_seed: 2
+  tomo_smooth_depth_km: 150.0
+  tomo_smooth_horiz_deg: 5.0
+  topo_andean_arc_dist_deg: 4.5
+  topo_andean_max_dist_deg: 11.0
+  topo_andean_peak_m: 3000
+  topo_continental_base_m: 400
+  topo_himalayan_max_dist_deg: 8.0
+  topo_himalayan_peak_m: 5000
+  topo_noise_fraction: 0.3
+  topo_simplify_tolerance: 0.4
+  topo_spectral_beta: 2.0
+  tracer_offset_deg: 0.6
+  tracer_spacing_deg: 1.0
+  tracer_thin_cell_deg: 0.5
+  tracer_thin_interval: 10
+  weld_after_myr: 30
+  collision_tear_offsets_deg:
+  - 5
+  - 10
+  - 15
+  - 20
+  strength_spread: 0.5
+  collision_radius_deg: 0.5
+  weld_accrete_min_frac: 0.002
+  min_piece_area_deg2: 25.0
+  merge_max_area_frac: 0.02
+run:
+  delta_time: 1.0
+  reconstruction_time: 0
+  total_time: 1000.0

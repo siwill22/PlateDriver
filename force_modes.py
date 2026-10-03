@@ -18,9 +18,14 @@ MODE_CHOICES = {
     'plate_rebuild':       ('lonlat', 'midpoint', 'rotated'),
     'rifting':             ('none', 'trial'),
     'collision_weld':      ('off', 'on'),
+    'collision_weld_scope': ('plate', 'continent'),
+    'collision_weld_giver': ('smaller', 'downgoing'),
+    'collision_contact':   ('length', 'stiff'),
     'sutures':             ('none', 'tracers'),
     'rift_path':           ('straight', 'least_cost'),
-    'continent_strength':  ('uniform', 'cores'),
+    'continent_strength':  ('uniform', 'cores', 'cores_random'),
+    'collision_tear':      ('off', 'on'),
+    'rebuild_tiles':       ('off', 'on'),
 }
 
 PRESETS = {
@@ -36,9 +41,14 @@ PRESETS = {
         'plate_rebuild':       'lonlat',
         'rifting':             'none',
         'collision_weld':      'off',
+        'collision_weld_scope': 'plate',
+        'collision_weld_giver': 'smaller',
+        'collision_contact':   'length',
         'sutures':             'none',
         'rift_path':           'straight',
         'continent_strength':  'uniform',
+        'collision_tear':      'off',
+        'rebuild_tiles':       'off',
     },
     'physical': {
         'drag':                'area_edge',
@@ -52,9 +62,14 @@ PRESETS = {
         'plate_rebuild':       'midpoint',
         'rifting':             'trial',
         'collision_weld':      'off',     # physical default decided at the R3 gate
+        'collision_weld_scope': 'plate',
+        'collision_weld_giver': 'smaller',
+        'collision_contact':   'length',
         'sutures':             'none',    # physical default decided at the R3 gate
         'rift_path':           'straight',   # physical default decided at the R4 gate
         'continent_strength':  'uniform',    # physical default decided at the R5 gate
+        'collision_tear':      'off',
+        'rebuild_tiles':       'off',
     },
 }
 
@@ -71,9 +86,14 @@ IMPLEMENTED = {
     'plate_rebuild':       {'lonlat', 'midpoint', 'rotated'},
     'rifting':             {'none', 'trial'},
     'collision_weld':      {'off', 'on'},
+    'collision_weld_scope': {'plate', 'continent'},
+    'collision_weld_giver': {'smaller', 'downgoing'},
+    'collision_contact':   {'length', 'stiff'},
     'sutures':             {'none', 'tracers'},
     'rift_path':           {'straight', 'least_cost'},
-    'continent_strength':  {'uniform', 'cores'},
+    'continent_strength':  {'uniform', 'cores', 'cores_random'},
+    'collision_tear':      {'off', 'on'},
+    'rebuild_tiles':       {'off', 'on'},
 }
 
 DEFAULT_PRESET = 'physical'
