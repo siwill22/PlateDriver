@@ -252,7 +252,55 @@ regression check (bit-identical, except at R1's re-baseline). Runs are 500 Myr o
   - Belts ×1 with floor 1/3 rifts continents little, and not along belts.
   - Oceanic slivers are 66–80% of new plates in every setting, a separate problem.
 
-## Open
+- **R6 found** (collisions; `show-me/2026-09-30-collision-fixes/`):
+  - The continent overlap diagnostic (`continent_hidden_km2`) shows up to 7.5% of continent
+    hidden in the R5 run: colliding continents slide over each other.
+  - Welding whole plates caps the overlap (1.9%) but collapses the world, as in R3.
+  - `collision_tear` never passes: best tension / strength above 1 in only 3 plate-steps.
+- **R7 found** (`show-me/2026-10-01-giant-plate-breakup/`):
+  - The many parallel boundaries at 244–250 Myr in the weld run were not tectonics: a plate
+    touching both map edges and a pole is turned inside out by the dateline wrap.
+  - `rebuild_tiles: on` (90° × 45° tiles) fixes it: a no-motion rebuild changes 0.1% of cells,
+    against 33–51%. Internal tile edges and the ±180° seam are dropped from edge drag.
+- **R8 found** (weld scope and a size cap):
+  - A cap on welded plate size brings the overlap back: a blocked weld leaves the collision
+    resisted only by contact drag (hidden continent 5.3%).
+  - Welding only the colliding continent (`collision_weld_scope: continent`) still grows one
+    ocean-dominated plate to 62–85% of the sphere over three seeds.
+  - `rift_trials.csv` shows why: tension across a cut stays about 0.2–0.4 for every plate
+    size, while the mean strength of the best cut rises from 0.5 (plates under 2% of the
+    sphere) to 1.2 (over 30%), mostly old ocean. Plates over 30% pass in 0.1% of steps.
+- **R9 found** (accretion and the stiff contact):
+  - `collision_weld_giver: downgoing` (the subducting plate's continent accretes to the
+    overriding plate; subduction steps out behind it) with `collision_contact: stiff`: no
+    hidden continent, largest plate 39–42% over three seeds.
+  - The stiff contact stopped continents about 200 km apart, because collision starts when
+    both continents are within the 2° search radius; `collision_radius_deg: 0.5` halves the
+    gap (median about 100 km) but doubles the plate count, mostly slivers.
+  - `continent_strength: cores_random` (lognormal per core and belt, spread 0.5): too few
+    runs to see a change in continental rifting.
+  - `weld_accrete_min_frac` (0.2%) and `min_piece_area_deg2` (25) remove tiny accretions and
+    most disconnected pieces but do not reduce the plate count.
+- **R10 found** (1000 Myr):
+  - Two of three seeds snowball to 50–90 plates after 500 Myr: small plates rift more easily,
+    so slivers make more slivers.
+  - `min_child_area_deg2` 100 halves it; 200 stops it but a plate then grows to 56% of the
+    sphere (no rifts at all in large old ocean).
+  - Merging small plates that barely move relative to a neighbour (`merging_enabled`,
+    `merge_conservative_threshold` 5 km/Myr, `merge_require_no_driver: false`,
+    `merge_max_area_frac` 0.02) with child size 100: 11–22 plates throughout, largest plate
+    37%, 37% and 49% over three seeds, no hidden continent, RMS 37–47 km/Myr.
+
+## Status (2026-10-04): closed
+
+The current model is `configs/current_model.yaml`; its three 1000-Myr runs (tie seeds 0–2) are
+in the viewer, and their map sequence is in `show-me/2026-10-04-current-model/`. The next phase
+is planned in `force_model_v3_plan.md` (this folder).
+
+Not done from the list above: `necks` as candidates, the `rift` label, craton-ID lines,
+`rift_weakening: cmb_heat`, the `stress` prototype and `overlap: overriding`.
+
+## Open (carried to v3)
 
 - **Other shapely uses** (`update_plate_polygons` smoothing with topojson, `make_valid`, and
   `contains_xy`) are out of scope for v2 unless they block the rifting work.

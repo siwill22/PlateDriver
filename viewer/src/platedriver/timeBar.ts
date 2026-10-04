@@ -3,7 +3,7 @@
  *
  * Labelled in forward model time t (Myr), never Ma -- a PlateDriver run is not
  * real Earth history, and an age readout would invite students to read it as
- * one (viewer_plan.md, "Time").
+ * one (docs/viewer_plan.md, "Time").
  *
  * The slider only offers the saved steps: `setSteps` takes the list of times
  * a run saved, and the thumb moves by index through them, so every value it

@@ -42,6 +42,22 @@ python run_SDP.py --config config.yaml
 
 All configuration is in the YAML file given by `--config` (default `config.yaml`). Missing input files are reported before the run starts.
 
+### The current model
+
+`config.yaml` keeps every optional mode off, so the plain `physical` preset is what it runs.
+The model used for teaching material (October 2026) is `configs/current_model.yaml`: the
+`physical` preset with continental rifting along random-strength belts, accretion of colliding
+continents with a stiff collision contact, tiled plate rebuild, and merging of small plates;
+its header lists every setting that differs from `config.yaml`. It runs to 1000 Myr on
+atlantis66, at about 2.5–3.5 s per step:
+
+```bash
+conda run -n pygmt17 python run_SDP.py --config configs/current_model.yaml
+```
+
+The three runs in the viewer differ only in `tie_break_seed` (0, 1, 2). How each option was
+chosen is in `docs/force_model_v2_plan.md` (stages R0–R10).
+
 ### Requirements
 
 Python ≥ 3.10 with pygplates (≥ 0.36; developed with 1.0), [gprm](https://github.com/siwill22/GPlatesReconstructionModel), PyGMT, geopandas, shapely ≥ 2, xarray, numpy, scipy, scikit-learn, scikit-image, pyproj, topojson, xarray-spatial, pyshtools and PyYAML. The `pygmt17` conda environment has all of these.
@@ -105,7 +121,7 @@ force_modes: {}          # per-component overrides, e.g. {collision: coupling}
 and useful for teaching. `physical` is the v1 force model (basal and edge
 drag, slab pull from slab length and seafloor age, suction from the deep slab, ridge
 push as a body force over young seafloor, polarity by age, slab breakoff after
-collision, calibrated speed); see `force_model_v1_plan.md` for the design. The resolved
+collision, calibrated speed); see `docs/force_model_v1_plan.md` for the design. The resolved
 modes are printed at the start of the run and written to `run_info.yaml`. The older
 `params.collision_mode` is still read as `force_modes.collision`.
 
@@ -802,26 +818,47 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
 - **Boundaries snap to meridians and parallels** with `plate_rebuild: lonlat` (`simple`); see `plate_rebuild`.
 - **Ridge push points mostly exactly N–S or E–W** (`ridge_push: body`): the age grid is piecewise constant (nearest tracer) and its gradient is taken along lon and lat. The effect on plate motion is not measured.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.
-- **Continents can overlap.** Continents are rigid polygons carried by their plates, and a
-  continent–continent collision only resists convergence (drag or velocity blending); nothing
-  stops it. Where two continents overlap, the grids and maps show only one, so continent is
-  hidden. `step_stats.csv` records the hidden area (`continent_hidden_km2`).
+- **Continents can overlap** without `collision_contact: stiff`. Continents are rigid polygons
+  carried by their plates, and the length-scaled contact drag only slows a collision, so
+  converging continents slide over each other and the grids show only one of them
+  (`continent_hidden_km2` in `step_stats.csv`). With the stiff contact and
+  `collision_radius_deg: 0.5` (the current model) at most 0.4% of continent is hidden, but
+  colliding continents stop with up to about 100 km of ocean still between them.
+- **Hidden continent is lost at a rift.** After a rift, the parent's continents are rebuilt
+  from the raster, which only holds the visible continent, so any continent hidden under
+  another is deleted.
 - **Terrain noise is fixed to the grid**: continents move over a stationary noise pattern rather than carrying their texture with them.
-- **Rifting is plain** (`rifting: trial`):
-  - Cuts are straight great circles through or near the centroid.
-  - Continental strength is one constant.
-  - Young ocean is weaker than continent, so most rifts split off short-lived oceanic slivers.
-  - Sutures, craton cores, welding and path search are later v2 items.
+- **Rifting** (`rifting: trial`):
+  - With the default straight cuts and one continental strength, most rifts split off
+    short-lived oceanic slivers; `rift_path: least_cost` and `continent_strength: cores` or
+    `cores_random` make continents rift along their belts.
+  - **Large ocean plates never rift.** Old ocean is the strongest material (1.5, against
+    tensions of about 0.2–0.4 across a cut) and the tension across a cut does not grow with
+    plate size. Nothing else starts a new boundary inside a plate: there is no subduction
+    initiation and no back-arc rifting. A large ocean plate therefore only shrinks at its own
+    trenches; in one of the three current-model runs one reaches 49% of the sphere by 1000 Myr.
+  - **Small plates rift more easily than large ones**, so without merging the slivers multiply:
+    current-model settings without merging reach 50–90 plates by 500–750 Myr in two of three
+    seeds. `merging_enabled` with `merge_max_area_frac` keeps it in check.
+  - `collision_tear` never passes (best tension / strength above 1 in only 3 plate-steps).
   - With `rifting: none`, nothing breaks a continent.
-- **`collision_weld: on` collapses the world** to 2–3 plates within 500 Myr on atlantis66, with
-  one plate over 70% of the sphere, whether welds come after 30, 60 or 100 Myr of collision.
-  With straight cuts, sutures don't help: none of the rifts follows a suture. Keep it `off`
-  (the default) until it is revised.
+- **`collision_weld: on` with `collision_weld_scope: plate` collapses the world** to 1–3 plates
+  within 300–500 Myr: each weld absorbs a whole plate, ocean included, so the host grows, loses
+  trenches and stops rifting. The guard against welding down to one plate does not cover the
+  absorption of enclosed plates. Use `collision_weld_scope: continent` with
+  `collision_weld_giver: downgoing` (the current model).
+- **Collision settings are not calibrated.** `collision_stiff_factor` (100) and
+  `weld_accrete_max_frac` (3% of the sphere) are order-of-magnitude choices; the convergence
+  left at a stiff contact has not been measured.
+- **Edge drag along the dateline** with `rebuild_tiles: off`: a plate crossing ±180° is split into
+  two polygons there, and the seam between them counts as plate boundary in the edge drag
+  (`drag: area_edge`). `rebuild_tiles: on` drops it, which changes the calibrated speed scale by
+  about 5% (k 1.68 → 1.60).
 - **A plate reaching from pole to pole** can't be represented by whole lon/lat plate polygons
   (`rebuild_tiles: off`). In one form the run stops with an error; in others the dateline wrap
   turns the plate inside out and the plates are scrambled with no error (seen when welds made one
   plate 70–85% of the sphere). `rebuild_tiles: on` avoids it.
-- **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is a v2 item.
+- **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is not implemented.
 - **Ridges sit close to trenches** in places (a thin strip of young plate made and consumed side by side), in both presets.
 - **Ridges are not split into spreading segments and transforms**; boundaries are continuous lines of varying obliquity. A post-processing step could add this for appearance.
 - **Seafloor tracers accumulate** where plates are slow with `tracer_thinning: none` (146k–150k after 200 Myr in physical, against 45k–58k in simple, over three members each). `physical` thins them (`cell`).

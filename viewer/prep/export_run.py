@@ -3,7 +3,7 @@
     conda run -n pygmt17 python viewer/prep/export_run.py <run_dir> [--name NAME] [--label LABEL]
 
 Writes viewer/public/data/runs/<name>/ and adds the run to viewer/public/data/runs.json.
-Works on any run folder; run_SDP.py is not changed.  See viewer_plan.md.
+Works on any run folder; run_SDP.py is not changed.  See docs/viewer_plan.md.
 
 V1 exports boundaries, plates and velocities:
 

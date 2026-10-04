@@ -1,6 +1,6 @@
 # PlateDriver viewer
 
-A local globe viewer for PlateDriver runs. Plan and stages: [`../viewer_plan.md`](../viewer_plan.md).
+A local globe viewer for PlateDriver runs. Plan and stages: [`../docs/viewer_plan.md`](../docs/viewer_plan.md).
 
 ```
 cd viewer

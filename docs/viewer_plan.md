@@ -82,6 +82,17 @@ viewer/public/data/runs/<name>/
 linked globes to compare runs, interpolating plates between saved steps with the run's `.rot`
 file, a shareable static build.
 
+## Status (2026-10-04)
+
+- **V0, V1 done.**
+- **V2 in part:** continents and belts (class grid) and rift strength (scalar layer, viridis,
+  with a colour bar). Seafloor age, topo_bathy, divergence and plate ID are not exported yet,
+  and there is no hover readout of grid values.
+- **V3 not started.**
+- **V4 in part:** run picker (`Run` dropdown) and a diagnostics plot above the time slider
+  (plates, RMS speed, boundary length, largest plate, net rotation, hidden continent, rift and
+  weld ticks). No run info panel or legend yet.
+
 ## Open questions (to decide at the stage that needs them)
 
 - V2: are 0.5° grids good enough for teaching, or should 0.25° be the default?

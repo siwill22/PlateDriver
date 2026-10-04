@@ -1,5 +1,8 @@
 # Stress-Based Plate Fragmentation Strategy
 
+> **Superseded** by the rifting trial split of `force_model_v2_plan.md` (2026-09). Kept for the
+> record of the original neck-fragmentation idea, which still runs as `fragmentation_enabled`.
+
 ## Problem
 
 Plates in the simulation can evolve into implausible shapes (U-shapes, thin isthmuses) because

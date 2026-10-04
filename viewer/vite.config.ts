@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite';
 
-// Local only for now (see viewer_plan.md): `npm run dev` on localhost:5173.
+// Local only for now (see docs/viewer_plan.md): `npm run dev` on localhost:5173.
 export default defineConfig({
   base: process.env.VITE_BASE ?? '/',
   server: { port: 5173 },

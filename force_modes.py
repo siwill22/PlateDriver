@@ -3,7 +3,7 @@
 config.yaml chooses a preset with ``force_model: simple | physical``; any key under
 ``force_modes`` overrides the preset for that one component.  ``simple`` is the
 original model (boundary forces only, torque = angular velocity); ``physical`` is the
-v1 force model described in force_model_v1_plan.md.
+v1 force model described in docs/force_model_v1_plan.md.
 """
 
 MODE_CHOICES = {

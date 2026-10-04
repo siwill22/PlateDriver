@@ -16,7 +16,7 @@ run:
   total_time: 1000.0
 
 # Force model preset: 'physical' (the v1 force model, the default; see
-# force_model_v1_plan.md) or 'simple' (the original boundary-force model: fastest, and
+# docs/force_model_v1_plan.md) or 'simple' (the original boundary-force model: fastest, and
 # useful for teaching). Any component listed under force_modes overrides the preset, e.g.
 #   force_modes:
 #     slab_pull: slab_length   # hard | ramp | slab_length
