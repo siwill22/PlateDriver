@@ -2,6 +2,9 @@
 
     python regression_check.py <reference_dir> <new_dir> [--tol 0]
 
+Grids written with grid_output: compact (float32) against a full (float64) reference differ by
+float32 rounding: up to about 5e-4 in topography (m), so compare them with --tol 1e-3.
+
 Every output that exists in both folders is compared: NetCDF grids (all variables,
 NaN-aware), CSVs, GeoJSONs (attributes and vertex coordinates) and rotation files.
 Plots and run_info.yaml are skipped, and so are the wall-clock columns (seconds_*) of

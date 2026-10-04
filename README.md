@@ -72,6 +72,12 @@ Python ≥ 3.10 with pygplates (≥ 0.36; developed with 1.0), [gprm](https://gi
 
 All outputs go to the directory specified by `output_dir` in `config.yaml`.
 
+Grids (`*.nc`) are written as NetCDF-4 with `grid_output: compact` (the default): floats as
+float32, the plate-ID grids (`plate_id`, `craton`) as int32 with −1 for no data, all
+zlib-compressed. That is about 5× smaller than `grid_output: full` (float64, uncompressed,
+the format before October 2026); xarray, GMT and PyGMT read both. The model never reads its
+grids back, so the format does not change a run.
+
 | File pattern | Interval | Contents |
 |---|---|---|
 | `plot_NNNN.png` | Every `plot_interval` steps | Map: plate polygons, boundary types, velocity vectors, cratons, seafloor tracers coloured by age, seamounts (red triangles) |

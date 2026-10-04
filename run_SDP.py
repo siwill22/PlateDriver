@@ -337,6 +337,35 @@ def _do_plot(i, active_tracers, new_plate_polygons, boundaries_gdf,
     fig.savefig(os.path.join(output_dir, 'plot_{:04d}.png'.format(i)))
 
 
+ID_GRIDS = {'plate_id', 'craton'}     # grids of whole-number plate IDs
+
+
+def _save_grid(obj, path, params):
+    """Write a grid (DataArray or Dataset) to NetCDF.  grid_output: compact (default) stores
+    floats as float32 and the plate-ID grids as int32 (NaN as -1), zlib-compressed (level 4),
+    about 5x smaller than full; full keeps the arrays as they are (float64), uncompressed.
+    The model never reads these files back, so the choice does not change a run."""
+    if params.get('grid_output', 'compact') == 'full':
+        obj.to_netcdf(path)
+        return
+    import xarray as xr
+    if isinstance(obj, xr.DataArray):
+        names = {obj.name if obj.name is not None else '__xarray_dataarray_variable__': obj}
+    else:
+        names = dict(obj.data_vars)
+    enc = {}
+    for name, v in names.items():
+        e = dict(zlib=True, complevel=4)
+        if np.issubdtype(v.dtype, np.integer):
+            e['dtype'] = 'int32'
+        elif name in ID_GRIDS:
+            e.update(dtype='int32', _FillValue=-1)
+        elif np.issubdtype(v.dtype, np.floating):
+            e['dtype'] = 'float32'
+        enc[name] = e
+    obj.to_netcdf(path, encoding=enc)
+
+
 def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
              new_plate_polygons, seamounts, rotation_records, params, output_dir,
              slab_tracers=None, cmb_heat=None, noise_seed=None):
@@ -364,7 +393,7 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             _out('tracers_{:04d}.csv'),
             craton_raster=rasters.get('craton'),
             spacing=params['raster_spacing'])
-        grid.to_netcdf(_out('seafloor_age_{:04d}.nc'))
+        _save_grid(grid, _out('seafloor_age_{:04d}.nc'), params)
         return grid
 
     wrote_tracers = _try('tracers', _tracers)
@@ -372,10 +401,10 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
     if wrote_tracers and len(active_tracers):
         age_grid = _try('seafloor age grid', _age_grid)
 
-    _try('divergence', lambda: rasters['divergence'].to_netcdf(_out('divergence_{:04d}.nc')))
-    _try('plate_id', lambda: rasters['plate_id'].to_netcdf(_out('plate_id_{:04d}.nc')))
+    _try('divergence', lambda: _save_grid(rasters['divergence'], _out('divergence_{:04d}.nc'), params))
+    _try('plate_id', lambda: _save_grid(rasters['plate_id'], _out('plate_id_{:04d}.nc'), params))
     if 'craton' in rasters:
-        _try('craton', lambda: rasters['craton'].to_netcdf(_out('craton_{:04d}.nc')))
+        _try('craton', lambda: _save_grid(rasters['craton'], _out('craton_{:04d}.nc'), params))
 
     craton_counts = sdp.craton_counts_from_raster(
         rasters['craton'] if 'craton' in rasters else None)
@@ -442,14 +471,14 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             himalayan_peak_m=params['topo_himalayan_peak_m'],
             div_threshold_subduction=params['div_threshold_subduction'],
             noise_seed=noise_seed)
-        grid.to_netcdf(_out('topography_{:04d}.nc'))
+        _save_grid(grid, _out('topography_{:04d}.nc'), params)
         return grid
 
     topo = _try('topography', _topography) if 'craton' in rasters else None
 
     if age_grid is not None:
-        _try('topo_bathy', lambda: sdp.generate_topo_bathy_grid(
-            age_grid, topography_raster=topo).to_netcdf(_out('topo_bathy_{:04d}.nc')))
+        _try('topo_bathy', lambda: _save_grid(sdp.generate_topo_bathy_grid(
+            age_grid, topography_raster=topo), _out('topo_bathy_{:04d}.nc'), params))
 
     _try('rotations', lambda: sdp.write_rotation_file(rotation_records, _out('rotations_{:04d}.rot')))
 
@@ -459,7 +488,7 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             _out('seamounts_{:04d}.geojson'), driver='GeoJSON'))
 
     if slab_tracers is not None and cmb_heat is not None:
-        _try('mantle_temp', lambda: sdp.generate_mantle_temp_field(
+        _try('mantle_temp', lambda: _save_grid(sdp.generate_mantle_temp_field(
             slab_tracers,
             spacing_deg=params.get('mantle_grid_spacing_deg', 5.0),
             depth_interval_km=params.get('mantle_depth_interval_km', 100.0),
@@ -469,7 +498,7 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             cmb_decay_km=params.get('cmb_decay_km', 400.0),
             tomo_smooth_horiz_deg=params.get('tomo_smooth_horiz_deg', 0.0),
             tomo_smooth_depth_km=params.get('tomo_smooth_depth_km', 0.0)
-        ).to_netcdf(_out('mantle_temp_{:04d}.nc')))
+        ), _out('mantle_temp_{:04d}.nc'), params))
 
 
 # ---------------------------------------------------------------------------

@@ -16,3 +16,6 @@ gmt.history
 
 # Gate figures for review (kept locally, not versioned)
 show-me/
+
+# Model runs (large; kept locally, never versioned)
+/runs/

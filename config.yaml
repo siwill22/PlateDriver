@@ -48,6 +48,7 @@ params:
 
   # --- Output ---
   csv_save_interval:           5        # save outputs every N timesteps
+  grid_output:                 compact  # compact: grids as float32 / int32 IDs, zlib-compressed (~5x smaller); full: float64, uncompressed
   plot_interval:               1        # make plots every N timesteps; set to null to disable
   random_seed:                 null     # integer → repeatable run (hotspots, seamounts, earthquakes, terrain noise)
 
