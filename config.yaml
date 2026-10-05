@@ -152,6 +152,8 @@ params:
   rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
   rift_path_corridor_deg:      5        # [rift_path: least_cost] the path stays this close to the straight cut
   collision_tear_offsets_deg:  [5, 10, 15, 20]   # [collision_tear: on] extra cuts parallel to a continental collision contact, this far to either side
+  init_min_cells:              5        # [subduction_init] a passive-margin stretch has at least this many ocean cells
+  init_boundary_gap_cells:     3        # [subduction_init] ... at least this many cells inside the plate's edge
   # --- Craton cores and belts (force_modes.continent_strength: cores) ---
   craton_core_spacing_km:      2500     # random terranes at least this far apart, in each continent
   craton_belt_width_km:        400      # belts between terranes, about this wide

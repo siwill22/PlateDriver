@@ -99,6 +99,7 @@ grids back, so the format does not change a run.
 | `welds.csv` | Each weld (`collision_weld: on`) | Time, host plate, absorbed (or giving) plate, collision length, suture ID, scope, whether it was an accretion, welded area and host area after the weld (shares of the sphere) of every weld |
 | `sutures_NNNN.csv` | Every `csv_save_interval` steps (`sutures: tracers`) | Suture tracer lon/lat, suture ID and time formed |
 | `rift_trials.csv` | Every step (`rifting: trial`) | One row per plate tested: area, candidate cuts reaching each test (`cuts`, `one_piece`, `under_tension`), the largest tension of any cut, the best tension / strength with its tension and strength, and whether a cut passed |
+| `init_trials.csv` | Every step (`subduction_init: log`) | One row per passive-margin stretch tested: plate, stretch size and centre, ocean age along it (median, min, max), plate share on the ocean side, whether the cut crosses the plate once, traction across the cut (negative: compression), strength along the cut and of the stretch, and the share of the cut along which the free halves would converge |
 | `rift_events.csv` | Each rift (`rifting: trial`) | Time, parent plate, new plate and kind of cut (`sweep`, `suture` or `tear`) of every rift split |
 | `run_info.yaml` | Start of run | The config used, the resolved force modes and the git commit |
 | `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file with finite rotations for all plates up to step NNNN. The time column is elapsed model time (see [Rotation file format](#rotation-file-format)) |
@@ -304,6 +305,15 @@ listed is `simple`'s):
     their plate and are never deleted. Within `suture_width_deg`, continental rift strength is
     × `suture_strength_factor`. Each suture with at least 5 points on a plate adds its
     best-fit great circle as an extra candidate cut. Saved steps write `sutures_NNNN.csv`.
+- **`subduction_init`** (new trenches at passive margins; needs `rifting: trial`; force model v3,
+  stage S1):
+  - `off`: no test.
+  - `log`: each step, every passive margin inside a plate is tested like a rift cut, and the
+    result goes to `init_trials.csv`; nothing is split, so the run is otherwise the same as
+    `off`. A passive margin is a stretch of at least `init_min_cells` ocean cells (physics
+    grid) next to the plate's own continent and at least `init_boundary_gap_cells` cells from
+    the plate's edge. The cut is the stretch's best-fit great circle across the whole plate,
+    and the traction across it is worked out as in the rift test (negative: compression).
 
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor

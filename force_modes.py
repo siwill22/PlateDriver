@@ -26,6 +26,7 @@ MODE_CHOICES = {
     'continent_strength':  ('uniform', 'cores', 'cores_random'),
     'collision_tear':      ('off', 'on'),
     'rebuild_tiles':       ('off', 'on'),
+    'subduction_init':     ('off', 'log'),
 }
 
 PRESETS = {
@@ -49,6 +50,7 @@ PRESETS = {
         'continent_strength':  'uniform',
         'collision_tear':      'off',
         'rebuild_tiles':       'off',
+        'subduction_init':     'off',
     },
     'physical': {
         'drag':                'area_edge',
@@ -70,6 +72,7 @@ PRESETS = {
         'continent_strength':  'uniform',    # physical default decided at the R5 gate
         'collision_tear':      'off',
         'rebuild_tiles':       'off',
+        'subduction_init':     'off',
     },
 }
 
@@ -94,6 +97,7 @@ IMPLEMENTED = {
     'continent_strength':  {'uniform', 'cores', 'cores_random'},
     'collision_tear':      {'off', 'on'},
     'rebuild_tiles':       {'off', 'on'},
+    'subduction_init':     {'off', 'log'},
 }
 
 DEFAULT_PRESET = 'physical'

@@ -72,6 +72,9 @@ params['rift_path_mode'] = modes['rift_path']
 params['continent_strength_mode'] = modes['continent_strength']
 params['collision_tear_mode'] = modes['collision_tear']
 params['rebuild_tiles_mode'] = modes['rebuild_tiles']
+params['subduction_init_mode'] = modes['subduction_init']
+if modes['subduction_init'] != 'off' and modes['rifting'] != 'trial':
+    raise SystemExit('subduction_init tests passive margins inside the rifting trial split, so it needs rifting: trial')
 if modes['collision_tear'] == 'on' and modes['rifting'] != 'trial':
     raise SystemExit('collision_tear: on adds candidate cuts to the rifting trial split, so it needs rifting: trial')
 if modes['collision_weld'] == 'on' and modes['collision'] not in ('coupling', 'breakoff'):
@@ -119,7 +122,7 @@ _write_run_info()
 # Per-step statistics are appended every step; start them afresh
 _step_stats_csv  = _out('step_stats.csv')
 _plate_stats_csv = _out('plate_stats.csv')
-for _f in (_step_stats_csv, _plate_stats_csv, _out('rift_trials.csv')):
+for _f in (_step_stats_csv, _plate_stats_csv, _out('rift_trials.csv'), _out('init_trials.csv')):
     if os.path.exists(_f):
         os.remove(_f)
 
@@ -759,6 +762,11 @@ try:
                 pd.DataFrame([dict(time_myr=t, plate_id=_p, area_frac=_r['area_deg2'] / 41252.96,
                                    **{k: v for k, v in _r.items() if k != 'area_deg2'}) for _p, _r in _tr.items()]
                              ).to_csv(_trf, mode='a', header=not os.path.exists(_trf), index=False, float_format='%.4g')
+            # every passive-margin trial this step (init_trials.csv; subduction_init: log)
+            if force_diag.get('init_trials'):
+                _itf = os.path.join(output_dir, 'init_trials.csv')
+                pd.DataFrame(force_diag['init_trials']).assign(time_myr=t).to_csv(
+                    _itf, mode='a', header=not os.path.exists(_itf), index=False, float_format='%.4g')
             for _pid, _r in force_diag.get('tear_report', {}).items():
                 print('  [tear] plate {}: {} tear cuts, {} cross it once, {} under tension, best tension / strength {:.2f}'.format(
                     _pid, _r['tear_cuts'], _r['one_piece'], _r['under_tension'], _r['best_ratio']))

@@ -1983,9 +1983,24 @@ def rift_strength(xyz, continent, age, params, cores=None, core_tree=None, sutur
                     * np.maximum(params.get('oceanic_strength_floor', 0.2), f_age))
 
 
+def passive_margin_stretches(full, cont, gap_cells=3, min_cells=5):
+    """Passive-margin candidates of one plate on a global (nlat, nlon) grid whose columns wrap
+    (no duplicate seam column): the plate's ocean cells next to its own continent (4-neighbours),
+    at least gap_cells cells inside the plate's edge (so not at an existing boundary), grouped
+    into connected stretches (8-neighbours) of at least min_cells cells.
+    full: the plate's cells; cont: continent cells.  Returns a list of boolean masks."""
+    margin = full & ~cont & np.logical_or.reduce(wrap_neighbours(full & cont))
+    inner = full.copy()
+    for _ in range(gap_cells):
+        inner &= np.logical_and.reduce(wrap_neighbours(inner))
+    lab, n = label_wrapped(margin & inner, connectivity=2)
+    counts = np.bincount(lab.ravel(), minlength=n + 1)
+    return [lab == k for k in range(1, n + 1) if counts[k] >= min_cells]
+
+
 def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, params,
                       contact_scale=0.0, skip_pids=(), slab_pull_weight=6.0, sutures=None, cores=None,
-                      collision_points=None, report=None, trials=None):
+                      collision_points=None, report=None, trials=None, margins=None):
     """Trial split of every plate (rifting: trial).  For each candidate cut (_cut_candidates),
     the plate's basal drag, edge drag, contact drag and torques are split between the two
     sides, and the tension across the cut is compared with the strength along it.
@@ -2017,6 +2032,14 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
     under_tension, max_tension, best_ratio, tension, strength, passed)}: how many candidate cuts
     reached each test, the largest tension of any cut, and the best t/σ̄ with its tension and
     strength (whether or not that cut also opens).
+    margins, if a list, receives one record per passive-margin stretch of every plate tested
+    (subduction_init: log; passive_margin_stretches): the straight cut along the stretch's
+    best-fit great circle, with the ocean on side 1, judged like a rift cut but nothing is
+    split.  Record: plate_id, margin, cells, lon, lat (stretch centre), age_median, age_min,
+    age_max (ocean along the stretch), ocean_side_frac (plate area on the ocean side),
+    one_piece, traction (t as above: negative = compression across the cut), strength (σ̄
+    along the cut), strength_margin (σ of the stretch's cells), closing_frac (share of the
+    cut along which the free halves converge).
     Returns {pid: dict(normal, ratio = t/σ̄, tension, strength, length_deg, weak_zone, cut_kind)}
     for the plates whose best cut (largest t/σ̄) passes; cut_kind is 'sweep', 'suture' or
     'tear'.
@@ -2057,9 +2080,14 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
                 suture_fits.setdefault(int(q), []).append(np.linalg.eigh(Xq.T @ Xq)[1][:, 0])
     tear_fits = collision_tear_candidates(collision_points, params.get('collision_tear_offsets_deg', (5, 10, 15, 20))) \
         if collision_points else {}
+    # the 1 deg grid without the duplicate 180 deg column
+    ncol = pid_g.shape[1] - 1 if abs(lons[sl[1]][-1] - lons[sl[1]][0] - 360.0) < 1e-6 else pid_g.shape[1]
+    if margins is not None:
+        m_age = None if age_grid is None else \
+            raster_lookup(age_grid, lon2d[:, :ncol], lat2d[:, :ncol]).astype(float)
+        m_gap, m_min = params.get('init_boundary_gap_cells', 3), params.get('init_min_cells', 5)
     if path_mode:
-        # the 1 deg grid without the duplicate 180 deg column, and the strength of every cell
-        ncol = pid_g.shape[1] - 1 if abs(lons[sl[1]][-1] - lons[sl[1]][0] - 360.0) < 1e-6 else pid_g.shape[1]
+        # the strength of every cell
         pid2, xyz2 = pid_g[:, :ncol], xyz_g[:, :ncol]
         lo2, la2 = lon2d[:, :ncol], lat2d[:, :ncol]
         a2 = None if age_grid is None else raster_lookup(age_grid, lo2, la2).astype(float).ravel()
@@ -2088,6 +2116,58 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
         tc = -np.einsum('kij,kj->ki', Gc, om - om_n) if len(Gc) else np.zeros((0, 3))   # contact drag at ω
         centre = (X * dA[cell][:, None]).sum(0)
         centre /= np.linalg.norm(centre)
+        if margins is not None:
+            # passive-margin cuts (subduction_init: log): the straight cut of the rift test along
+            # each stretch, recorded whatever the result
+            full_m, cont_m, xyz_m = cell[:, :ncol], cont_g[:, :ncol], xyz_g[:, :ncol]
+            for k_m, mk in enumerate(passive_margin_stretches(full_m, cont_m, m_gap, m_min)):
+                Xm = xyz_m[mk]
+                nrm = np.linalg.eigh(Xm.T @ Xm)[1][:, 0]       # best-fit great circle
+                cm = Xm.sum(0) / np.linalg.norm(Xm.sum(0))
+                # the plate's continent within 3 deg of the stretch on side 2 (X·n < 0)
+                Xn = xyz_m[full_m & cont_m]
+                Xn = Xn[Xn @ cm > np.cos(np.radians(3.0))]
+                if len(Xn) and (Xn @ nrm).mean() > 0:
+                    nrm = -nrm
+                s1 = X @ nrm > 0
+                a1 = dA[cell][s1].sum() * np.degrees(1.0) ** 2
+                P = _circle_points(nrm, 0.5)
+                plo, pla = xyz_to_lonlat(P)
+                on = raster_lookup(plate_id_raster, plo, pla) == pid
+                ag = np.full(len(Xm), np.nan) if m_age is None else m_age[mk]
+                fin = np.isfinite(ag)
+                mlon, mlat = xyz_to_lonlat(cm)
+                r = dict(plate_id=int(pid), margin=k_m, cells=int(mk.sum()), lon=float(mlon), lat=float(mlat),
+                         age_median=float(np.median(ag[fin])) if fin.any() else np.nan,
+                         age_min=float(ag[fin].min()) if fin.any() else np.nan,
+                         age_max=float(ag[fin].max()) if fin.any() else np.nan,
+                         ocean_side_frac=float(a1 / area_deg2),
+                         one_piece=bool(on.sum() >= 2 and np.count_nonzero(on != np.roll(on, 1)) == 2),
+                         traction=np.nan, strength=np.nan, closing_frac=np.nan,
+                         strength_margin=float(rift_strength(Xm, np.zeros(len(Xm), bool), ag, params).mean()))
+                margins.append(r)
+                if on.sum() < 2 or not 0 < a1 < area_deg2:
+                    continue
+                m1s, m1c = Xs @ nrm > 0, Xc @ nrm > 0
+                D1 = Dc[s1].sum(0) + es[m1s].sum(0)
+                D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
+                t1 = tb[s1].sum(0) + ts[m1s].sum(0) + tc[m1c].sum(0)
+                K1, K2 = D1 + Gc[m1c].sum(0), D2 + Gc[~m1c].sum(0)
+                tau_h = D1 @ om - t1
+                R = P[on]
+                M = np.cross(R, -nrm).sum(0) * np.radians(0.5)
+                if M @ M <= 0:
+                    continue
+                cont_c = np.zeros(len(R), bool) if craton_raster is None \
+                    else np.nan_to_num(raster_lookup(craton_raster, plo[on], pla[on])) > 0
+                age_c = None if age_grid is None else raster_lookup(age_grid, plo[on], pla[on]).astype(float)
+                r.update(traction=float(tau_h @ M / (M @ M)) / unit,
+                         strength=float(rift_strength(R, cont_c, age_c, params, cores, core_tree, suture_tree).mean()))
+                try:
+                    w1, w2 = om - np.linalg.solve(K1, tau_h), om + np.linalg.solve(K2, tau_h)
+                    r['closing_frac'] = float(((np.cross(w2 - w1, R) @ (-nrm)) < 0).mean())
+                except np.linalg.LinAlgError:
+                    pass
         if path_mode:
             full = pid2 == pid
             edge = full & ~np.logical_and.reduce(wrap_neighbours(full))
@@ -2773,16 +2853,19 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
             torque_parts['contact_G'] = torque_parts['contact_G'] * f[:, None, None]
             contact_scale = 1.0
         tear_report, rift_trials = {}, {}
+        init_trials = [] if params.get('subduction_init_mode', 'off') == 'log' else None
         rift = rift_trial_splits(plate_id_raster, craton_raster, age_grid, torque_parts,
                                  speed_state['last']['omega'], params, contact_scale=contact_scale,
                                  skip_pids=set(rift_skip), slab_pull_weight=forces.get('slab_pull', 6.0),
                                  sutures=sutures, cores=cores,
                                  collision_points=collision_info.get('points')
                                  if params.get('collision_tear_mode', 'off') == 'on' else None,
-                                 report=tear_report, trials=rift_trials)
+                                 report=tear_report, trials=rift_trials, margins=init_trials)
         if force_diag is not None:
             force_diag['rift'] = rift
             force_diag['rift_trials'] = rift_trials
+            if init_trials is not None:
+                force_diag['init_trials'] = init_trials
             if tear_report:
                 force_diag['tear_report'] = tear_report
         _ct['rift_test'] = time.perf_counter() - _t_rift
