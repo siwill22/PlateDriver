@@ -16,14 +16,15 @@ starting map or from a polarity rule at a new contact. Two measures show the cos
 | Current model, 1000 Myr | Tie seed 0 | Tie seed 1 | Tie seed 2 | Earth today |
 |---|---|---|---|---|
 | Ocean older than 200 Myr | 25% | 28% | 25% | 0% |
-| Oldest ocean | 1016 Myr | 1085 Myr | 1054 Myr | about 180 Myr (Mediterranean relics older) |
+| Ocean older than 400 Myr | 8% | 11% | 7% | 0% |
+| Ocean left from the starting map | 0.01% | 0.01% | 0.06% | — |
 | Median ocean age | 126 Myr | 67 Myr | 71 Myr | about 60 Myr |
 | Largest plate, max | 37% | 37% | 49% | Pacific, about 20% |
 
 The Earth column is for orientation only, **not a target**: the oldest ocean today is about
-180 Myr, but it may well have been much older at other times. What matters is that ocean is
-never recycled unless it happens to sit next to a trench, so ocean of the starting map survives
-for the whole run. It is also the strongest material in the rift test (strength 1.5, against
+180 Myr, but it may well have been much older at other times. Ocean does get recycled (almost
+none of the starting map's ocean is left by 500 Myr), but only at trenches that already exist,
+so ocean away from them can live for hundreds of Myr. It is also the strongest material in the rift test (strength 1.5, against
 tensions of 0.2–0.4), so the plates made of it never break either. On Earth new trenches
 start mostly at weaknesses near existing boundaries: passive margins, fracture zones and
 transforms, often pushed by compression from elsewhere, or helped by a plume (Stern 2004;
@@ -51,6 +52,10 @@ closes with one three-seed 1000-Myr check.
 | S2 | **Fracture zones and old ocean.** Add age steps inside a plate (fracture zones, ridge jumps) as candidate lines; the older side subducts. | as S1; are intra-oceanic arcs made? |
 | S3 | **Back-arc rifting.** A weak zone on the overriding plate behind a retreating trench (`strength × factor` within a distance behind it), so rifts open there. | back-arc basins form behind rolling-back trenches and close again |
 | S4 | **Plume weakening** (`rift_weakening: cmb_heat`, planned in v2 and not done): lower strength above hot spots of the CMB heat field, for rifting and initiation. | breakups near plume heads; does it change supercontinent lifetimes |
+
+**S0 done (2026-10-05):** `gate.py configs/current_model.yaml --name current_model` reran the
+three seeds to 500 Myr; `step_stats`, `plate_stats`, `rift_trials` and `welds` are identical to
+the reference runs. Figures and table in `show-me/2026-10-05-current_model/`.
 
 **Then the teaching outputs (D4)**, each its own small stage:
 

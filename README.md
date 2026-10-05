@@ -567,6 +567,27 @@ A `_conservative_contact` counter is maintained across timesteps for each plate 
 
 ## Analysis scripts
 
+### `gate.py`
+
+Runs one gate: a config over several tie seeds, then the standard table, the map sequence and,
+optionally, the viewer export:
+
+```bash
+conda run -n pygmt17 python gate.py configs/current_model.yaml --name current_model \
+    [--seeds 0 1 2] [--until 500] [--period 250] [--export [--replace-viewer]] [--no-run]
+```
+
+- Runs go to `runs/<name>/tbN/` (gitignored), all seeds in parallel; a seed that already
+  reached `--until` is not run again (`--rerun` forces it).
+- `runs/<name>/gate_table.csv`: one row per seed and period and one per whole run. Columns:
+  plates, slivers (< 0.5% of the sphere), plates > 2%, largest plate (mean, max), RMS speed,
+  rifts, continental rifts, welds, accretions, hidden continent, trench and ridge length, step
+  time, and the ocean-age distribution at the period's end (median; shares older than 100, 150
+  and 200 Myr; oldest; the share left from t = 0).
+- `show-me/<date>-<name>/`: `diagnose_run.py`'s map sequence (one column per seed), time series
+  and Forsyth–Uyeda plots, the table and a README.
+- `--export` adds the runs to the viewer (`--replace-viewer` removes every other run first).
+
 ### `analyse_boundaries.py`
 
 Reads boundary GeoJSON time series and produces a CSV of boundary lengths and crust flux:
