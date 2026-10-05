@@ -2039,7 +2039,9 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
     age_max (ocean along the stretch), ocean_side_frac (plate area on the ocean side),
     one_piece, traction (t as above: negative = compression across the cut), strength (σ̄
     along the cut), strength_margin (σ of the stretch's cells), closing_frac (share of the
-    cut along which the free halves converge).
+    cut along which the free halves converge); with rift_path: least_cost also path_traction,
+    path_strength, path_cont_frac (share of the path on continent) and path_closing_frac for
+    the same cut moved onto the weakest path within the corridor (_least_cost_cut).
     Returns {pid: dict(normal, ratio = t/σ̄, tension, strength, length_deg, weak_zone, cut_kind)}
     for the plates whose best cut (largest t/σ̄) passes; cut_kind is 'sweep', 'suture' or
     'tear'.
@@ -2089,6 +2091,7 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
     if path_mode:
         # the strength of every cell
         pid2, xyz2 = pid_g[:, :ncol], xyz_g[:, :ncol]
+        cont2 = cont_g[:, :ncol]
         lo2, la2 = lon2d[:, :ncol], lat2d[:, :ncol]
         a2 = None if age_grid is None else raster_lookup(age_grid, lo2, la2).astype(float).ravel()
         sig2 = rift_strength(xyz2.reshape(-1, 3), cont_g[:, :ncol].ravel(), a2, params,
@@ -2116,6 +2119,53 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
         tc = -np.einsum('kij,kj->ki', Gc, om - om_n) if len(Gc) else np.zeros((0, 3))   # contact drag at ω
         centre = (X * dA[cell][:, None]).sum(0)
         centre /= np.linalg.norm(centre)
+        if path_mode:
+            full = pid2 == pid
+            edge = full & ~np.logical_and.reduce(wrap_neighbours(full))
+            ea, eb = _grid_edges(full)
+            x2f, s2f = xyz2.reshape(-1, 3), sig2.ravel()
+            wgt = np.arccos(np.clip((x2f[ea] * x2f[eb]).sum(1), -1, 1)) * 0.5 * (s2f[ea] + s2f[eb])
+            cell_tree = _Tree(X)
+
+            def _path_cut(nrm, P, on):
+                """The least-cost version of the straight cut nrm (P, on as in the loop below):
+                dict(s1, t, sig, r, nk, ds_k, tau_h, K1, K2), or None when there is no path,
+                a side is smaller than min_area, or M vanishes."""
+                res = _least_cost_cut(nrm, P, on, full, edge, xyz2, sig2, ea, eb, wgt, corridor)
+                if res is None:
+                    return None
+                side_2d, path, on_path = res
+                ext = (lambda a: np.concatenate([a, a[:, :1]], axis=1)) if ncol < pid_g.shape[1] else (lambda a: a)
+                s1 = ext(side_2d)[cell]
+                off_path = ~ext(on_path)[cell]
+                a1 = dA[cell][s1].sum() * np.degrees(1.0) ** 2
+                if min(a1, area_deg2 - a1) < min_area:
+                    return None
+                m1s = s1[cell_tree.query(Xs)[1]] if len(Xs) else np.zeros(0, bool)
+                m1c = s1[cell_tree.query(Xc)[1]] if len(Xc) else np.zeros(0, bool)
+                D1 = Dc[s1].sum(0) + es[m1s].sum(0)
+                D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
+                t1 = tb[s1].sum(0) + ts[m1s].sum(0) + tc[m1c].sum(0)
+                K1, K2 = D1 + Gc[m1c].sum(0), D2 + Gc[~m1c].sum(0)
+                tau_h = D1 @ om - t1
+                Rp = x2f[path]
+                r = Rp[:-1] + Rp[1:]
+                r /= np.linalg.norm(r, axis=1)[:, None]
+                ds_k = np.arccos(np.clip((Rp[:-1] * Rp[1:]).sum(1), -1, 1))
+                nk = np.cross(r, Rp[1:] - Rp[:-1])
+                nk /= np.linalg.norm(nk, axis=1)[:, None]
+                # n̂ from half 1 to half 2: flip where a point just off the path is on half 1
+                q = r + np.sin(np.radians(0.7)) * nk
+                nb = cell_tree.query(q / np.linalg.norm(q, axis=1)[:, None], k=8)[1]
+                first = nb[np.arange(len(nb)), np.argmax(off_path[nb], axis=1)]   # nearest cell not on the path
+                nk[s1[first]] *= -1
+                M = (np.cross(r, nk) * ds_k[:, None]).sum(0)
+                if M @ M <= 0:
+                    return None
+                return dict(s1=s1, t=float(tau_h @ M / (M @ M)) / unit,
+                            sig=float((0.5 * (s2f[path[:-1]] + s2f[path[1:]]) * ds_k).sum() / ds_k.sum()),
+                            r=r, nk=nk, ds_k=ds_k, tau_h=tau_h, K1=K1, K2=K2,
+                            cont_frac=float((cont2.ravel()[path]).mean()))
         if margins is not None:
             # passive-margin cuts (subduction_init: log): the straight cut of the rift test along
             # each stretch, recorded whatever the result
@@ -2144,10 +2194,22 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
                          ocean_side_frac=float(a1 / area_deg2),
                          one_piece=bool(on.sum() >= 2 and np.count_nonzero(on != np.roll(on, 1)) == 2),
                          traction=np.nan, strength=np.nan, closing_frac=np.nan,
+                         path_traction=np.nan, path_strength=np.nan, path_cont_frac=np.nan, path_closing_frac=np.nan,
                          strength_margin=float(rift_strength(Xm, np.zeros(len(Xm), bool), ag, params).mean()))
                 margins.append(r)
                 if on.sum() < 2 or not 0 < a1 < area_deg2:
                     continue
+                if path_mode and r['one_piece']:
+                    # the same cut moved onto the weakest path within the corridor (rift_path: least_cost)
+                    pc = _path_cut(nrm, P, on)
+                    if pc is not None:
+                        r.update(path_traction=pc['t'], path_strength=pc['sig'], path_cont_frac=pc['cont_frac'])
+                        try:
+                            w1, w2 = om - np.linalg.solve(pc['K1'], pc['tau_h']), om + np.linalg.solve(pc['K2'], pc['tau_h'])
+                            r['path_closing_frac'] = float((((np.cross(w2 - w1, pc['r']) * pc['nk']).sum(1) < 0)
+                                                            * pc['ds_k']).sum() / pc['ds_k'].sum())
+                        except np.linalg.LinAlgError:
+                            pass
                 m1s, m1c = Xs @ nrm > 0, Xc @ nrm > 0
                 D1 = Dc[s1].sum(0) + es[m1s].sum(0)
                 D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
@@ -2168,13 +2230,6 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
                     r['closing_frac'] = float(((np.cross(w2 - w1, R) @ (-nrm)) < 0).mean())
                 except np.linalg.LinAlgError:
                     pass
-        if path_mode:
-            full = pid2 == pid
-            edge = full & ~np.logical_and.reduce(wrap_neighbours(full))
-            ea, eb = _grid_edges(full)
-            x2f, s2f = xyz2.reshape(-1, 3), sig2.ravel()
-            wgt = np.arccos(np.clip((x2f[ea] * x2f[eb]).sum(1), -1, 1)) * 0.5 * (s2f[ea] + s2f[eb])
-            cell_tree = _Tree(X)
         best = None
         sweep = _cut_candidates(centre, params.get('rift_sweep_azimuths', 12),
                                 tuple(params.get('rift_sweep_offsets_deg', (-15.0, 0.0, 15.0))))
@@ -2239,39 +2294,10 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
                     continue
                 if is_tear:
                     rep_t['under_tension'] += 1
-                res = _least_cost_cut(nrm, P, on, full, edge, xyz2, sig2, ea, eb, wgt, corridor)
-                if res is None:
+                pc = _path_cut(nrm, P, on)
+                if pc is None:
                     continue
-                side_2d, path, on_path = res
-                ext = (lambda a: np.concatenate([a, a[:, :1]], axis=1)) if ncol < pid_g.shape[1] else (lambda a: a)
-                s1 = ext(side_2d)[cell]
-                off_path = ~ext(on_path)[cell]
-                a1 = dA[cell][s1].sum() * np.degrees(1.0) ** 2
-                if min(a1, area_deg2 - a1) < min_area:
-                    continue
-                m1s = s1[cell_tree.query(Xs)[1]] if len(Xs) else np.zeros(0, bool)
-                m1c = s1[cell_tree.query(Xc)[1]] if len(Xc) else np.zeros(0, bool)
-                D1 = Dc[s1].sum(0) + es[m1s].sum(0)
-                D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
-                t1 = tb[s1].sum(0) + ts[m1s].sum(0) + tc[m1c].sum(0)
-                K1, K2 = D1 + Gc[m1c].sum(0), D2 + Gc[~m1c].sum(0)
-                tau_h = D1 @ om - t1
-                Rp = x2f[path]
-                r = Rp[:-1] + Rp[1:]
-                r /= np.linalg.norm(r, axis=1)[:, None]
-                ds_k = np.arccos(np.clip((Rp[:-1] * Rp[1:]).sum(1), -1, 1))
-                nk = np.cross(r, Rp[1:] - Rp[:-1])
-                nk /= np.linalg.norm(nk, axis=1)[:, None]
-                # n̂ from half 1 to half 2: flip where a point just off the path is on half 1
-                q = r + np.sin(np.radians(0.7)) * nk
-                nb = cell_tree.query(q / np.linalg.norm(q, axis=1)[:, None], k=8)[1]
-                first = nb[np.arange(len(nb)), np.argmax(off_path[nb], axis=1)]   # nearest cell not on the path
-                nk[s1[first]] *= -1
-                M = (np.cross(r, nk) * ds_k[:, None]).sum(0)
-                if M @ M <= 0:
-                    continue
-                t = float(tau_h @ M / (M @ M)) / unit
-                sig = float((0.5 * (s2f[path[:-1]] + s2f[path[1:]]) * ds_k).sum() / ds_k.sum())
+                s1, t, sig, r, nk, ds_k, tau_h, K1, K2 = (pc[k] for k in ('s1', 't', 'sig', 'r', 'nk', 'ds_k', 'tau_h', 'K1', 'K2'))
                 _note(t, sig)
                 if is_tear:
                     rep_t['best_ratio'] = np.nanmax([rep_t['best_ratio'], t / sig])
