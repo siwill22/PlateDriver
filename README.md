@@ -411,7 +411,7 @@ Hotspot positions are fixed in the mantle frame (not reconstructed). Seamounts a
 
 Tracks subducted material vertically through the mantle and synthesises a 3D seismic velocity anomaly field.
 
-The code is in the `mantle/` package, which is shared with the real-reconstruction stream and never imports PlateDriver code. Every mantle parameter and its default is in `mantle/params.py` (`MantleParams`); the config keys below are its field names. PlateDriver hands it trench samples through `self_driving_plates.trench_samples`. The same model runs on real reconstructions with `conda run -n pygmt17 python reconstructions/run_mantle.py configs/real/muller2019.yaml` (Müller et al. 2019, 250 Ma to present: about 30 s the first time, about 5 s once the trench samples are cached). Its `mantle:` block takes the same keys as here.
+The code is in the `mantle/` package, which is shared with the real-reconstruction stream and never imports PlateDriver code. Every mantle parameter and its default is in `mantle/params.py` (`MantleParams`); the config keys below are its field names. PlateDriver hands it trench samples through `self_driving_plates.trench_samples`. The same model runs on real reconstructions with `conda run -n pygmt17 python reconstructions/run_mantle.py configs/real/muller2022.yaml` (Müller et al. 2022 in its optimised mantle frame, 250 Ma to present: about 20 s the first time, about 8 s once the trench samples are cached; `configs/real/muller2019.yaml` is an alternative). A config lists the model's rotation and topology files explicitly, because model folders often hold several frames. Its `mantle:` block takes the same keys as here.
 
 ```yaml
 params:
