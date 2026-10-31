@@ -285,7 +285,7 @@ _sutures       = pd.DataFrame(columns=['lon', 'lat', 'suture_id', 'time_myr'])  
 _next_suture_id = 1
 _craton_plate_remap     = {}   # {craton_plateid: host_plateid} for absorbed cratons
 if _slab_enabled:
-    cmb_heat = mantle.new_cmb_heat(mantle_p)
+    llsvp_state = mantle.new_llsvp_state(mantle_p)   # CMB heat, pile thickness or None (mantle_p.llsvp)
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +368,7 @@ def _save_grid(obj, path, params):
 
 def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
              new_plate_polygons, seamounts, rotation_records, params, output_dir,
-             slab_tracers=None, cmb_heat=None, noise_seed=None):
+             slab_tracers=None, llsvp_state=None, noise_seed=None):
     """Write all outputs for step i.  Each output is written independently, so one
     failure does not prevent the others; failures are reported with a traceback."""
     def _out(filename):
@@ -487,8 +487,8 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
         _try('seamounts', lambda: _active_seamounts[['geometry', 'hotspot_id', 'age']].to_file(
             _out('seamounts_{:04d}.geojson'), driver='GeoJSON'))
 
-    if slab_tracers is not None and cmb_heat is not None:
-        _try('mantle_temp', lambda: _save_grid(mantle.dvs_field(slab_tracers, cmb_heat, mantle_p),
+    if slab_tracers is not None:          # passed only with slab_tracers_enabled
+        _try('mantle_temp', lambda: _save_grid(mantle.dvs_field(slab_tracers, llsvp_state, mantle_p),
                                                _out('mantle_temp_{:04d}.nc'), params))
 
 
@@ -561,7 +561,7 @@ def _enqueue_outputs(i, force_save=False):
         )
         if _slab_enabled:
             _save_payload['slab_tracers'] = slab_tracers.copy()
-            _save_payload['cmb_heat']     = cmb_heat.copy()
+            _save_payload['llsvp_state']  = None if llsvp_state is None else llsvp_state.copy()
         _output_queue.put(('save', _save_payload))
         if force_diag.get('segments') is not None:
             force_diag['segments'].to_csv(_out('trench_forces_{:04d}.csv'.format(i)), index=False)
@@ -936,7 +936,7 @@ try:
                                              _trench_samples(boundaries_gdf), delta_time, mantle_p)
             _step_times['slab_tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
         if _slab_enabled:
-            cmb_heat = mantle.update_cmb_heat(cmb_heat, slab_tracers, delta_time, mantle_p)
+            llsvp_state = mantle.update_llsvp(llsvp_state, slab_tracers, delta_time, mantle_p)
             _step_times['cmb_heat'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
         if _slab_track and 'divergence' in boundaries_gdf.columns:
             _sub = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
