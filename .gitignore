@@ -19,3 +19,6 @@ show-me/
 
 # Model runs (large; kept locally, never versioned)
 /runs/
+
+# Real-reconstruction mantle runs and their trench-sample cache (local only)
+/runs_real/
