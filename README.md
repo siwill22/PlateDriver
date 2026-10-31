@@ -411,6 +411,8 @@ Hotspot positions are fixed in the mantle frame (not reconstructed). Seamounts a
 
 Tracks subducted material vertically through the mantle and synthesises a 3D seismic velocity anomaly field.
 
+The code is in the `mantle/` package, which is shared with the real-reconstruction stream and never imports PlateDriver code. Every mantle parameter and its default is in `mantle/params.py` (`MantleParams`); the config keys below are its field names. PlateDriver hands it trench samples through `self_driving_plates.trench_samples`.
+
 ```yaml
 params:
   slab_tracers_enabled:    true   # enable slab tracking; produces mantle_temp_NNNN.nc
@@ -656,6 +658,7 @@ Runs with the same `random_seed` are repeatable, so `force_model: simple` is che
 | File | Role |
 |---|---|
 | `self_driving_plates.py` | Library — all simulation logic as importable functions |
+| `mantle/` | The simplified mantle model (slab tracers, CMB heat, dVs field), shared with the real-reconstruction stream. Imports nothing from PlateDriver; `tests/test_mantle.py` checks this and that it reproduces the pre-extraction code |
 | `run_SDP.py` | Driver script — config loading, bootstrapping, main loop, plotting, output |
 | `plate_driver.py` | Torque helpers: segment torque, torque → stage rotation, and the bootstrap torques from the GPlates boundary feature types |
 | `force_modes.py` | Force-model presets (`simple`, `physical`), mode choices and their validation |
@@ -686,7 +689,7 @@ Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_re
                                                     (only used to classify the initial boundaries)
     [if a force mode reads seafloor age or slab depth]
         compute_timestep(..., simple modes)       → the step-0 boundaries only
-        generate_seafloor_age_tracers; seed_initial_slabs (columns to initial_slab_depth_km)
+        generate_seafloor_age_tracers; mantle.initial_slab_columns (columns to initial_slab_depth_km)
     compute_timestep(initial polygons, seed poles, ..., force_fields) → configuration at t = 0, stage poles S0
     [else] generate_seafloor_age_tracers
     generate_hotspot_locations; outputs for step 0
@@ -714,8 +717,8 @@ Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_re
     deactivate_subducted_tracers(tracers, boundaries_gdf, ...)        → only on the downgoing plate
     seed_ridge_tracers(boundaries_gdf, ...)                           → new crust, age 0
     [same for seamounts; then seed_hotspot_seamounts]
-    [if slab_tracers_enabled or a slab mode] update_slab_tracers
-    [if slab_tracers_enabled] update_cmb_heat
+    [if slab_tracers_enabled or a slab mode] mantle.sink_slabs, then mantle.seed_slabs(trench_samples)
+    [if slab_tracers_enabled] mantle.update_cmb_heat
 
     [at plot_interval / csv_save_interval steps, and always at the last step]
         plot_NNNN.png, tracers, seafloor age, boundaries, earthquakes, topography,
@@ -769,7 +772,7 @@ Maps plate ID → craton raster pixel count. Used by `resolve_downgoing_plate`.
 
 **`slab_tracers`**: `DataFrame` with columns `lon`, `lat`, `depth_km`, `age` (Myr since subduction), `active` (bool), `sink_rate_km_per_myr`, `weight`, and `attached` (bool; `collision: breakoff` sets it False for a detached slab, which stops pulling).
 
-**`cmb_heat`**: `ndarray` (nlat × nlon) of heat accumulation units. Built up over time by `update_cmb_heat`; injected into the deep mantle by `generate_mantle_temp_field`.
+**`cmb_heat`**: `ndarray` (nlat × nlon) of heat accumulation units. Built up over time by `mantle.update_cmb_heat`; injected into the deep mantle by `mantle.dvs_field`.
 
 **`rasters`**: `xr.Dataset` with variables `plate_id`, `velocity_east`, `velocity_north`, `divergence`, and optionally `craton`. All on a regular lon/lat grid at `raster_spacing` degree resolution.
 

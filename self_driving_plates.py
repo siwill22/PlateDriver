@@ -21,6 +21,10 @@ except ImportError:
 from shapely.geometry import Point, Polygon
 from sklearn.neighbors import BallTree
 
+import mantle
+from mantle import slab_depth_near
+from mantle.sphere import lonlat_to_xyz, xyz_to_lonlat, spherical_gaussian_smooth, _spherical_kernel
+
 
 # Velocities throughout this module come from pygplates.calculate_velocities (or the
 # equivalent numpy code below) and are in km/Myr, which is numerically equal to mm/yr.
@@ -31,20 +35,7 @@ EARTH_RADIUS_KM = pygplates.Earth.mean_radius_in_kms
 # Small spherical helpers shared by the functions below
 # ---------------------------------------------------------------------------
 
-def lonlat_to_xyz(lon, lat):
-    """Unit vectors (..., 3) for lon/lat in degrees."""
-    lon_r, lat_r = np.radians(lon), np.radians(lat)
-    return np.stack([np.cos(lat_r) * np.cos(lon_r),
-                     np.cos(lat_r) * np.sin(lon_r),
-                     np.sin(lat_r)], axis=-1)
-
-
-def xyz_to_lonlat(xyz):
-    """lon, lat in degrees for unit vectors (..., 3)."""
-    xyz = xyz / np.linalg.norm(xyz, axis=-1, keepdims=True)
-    lat = np.degrees(np.arcsin(np.clip(xyz[..., 2], -1.0, 1.0)))
-    lon = np.degrees(np.arctan2(xyz[..., 1], xyz[..., 0]))
-    return lon, lat
+# lonlat_to_xyz and xyz_to_lonlat live in mantle/sphere.py and are imported above.
 
 
 class SphereTree:
@@ -313,46 +304,6 @@ def label_wrapped(mask, connectivity=1):
     remap = np.zeros(n + 1, dtype=int)
     remap[1:] = np.searchsorted(uniq, roots[1:]) + 1
     return remap[labels], len(uniq)
-
-
-def spherical_gaussian_smooth(field, lats, lons, sigma_deg):
-    """Gaussian smoothing on the sphere of one 2-D field (nlat, nlon) or a stack
-    (..., nlat, nlon), using great-circle distances and cell-area weights.
-
-    Unlike scipy.ndimage.gaussian_filter on a lon/lat grid, the kernel has the same
-    physical width everywhere, wraps across ±180 and passes smoothly over the poles.
-    The sparse kernel is cached per grid/sigma.
-    """
-    if sigma_deg is None or sigma_deg <= 0:
-        return field
-    K = _spherical_kernel(tuple(np.round(lats, 6)), tuple(np.round(lons, 6)), float(sigma_deg))
-    shape = field.shape
-    flat = field.reshape(-1, shape[-2] * shape[-1])
-    out = (K @ flat.T).T
-    return out.reshape(shape)
-
-
-_KERNEL_CACHE = {}
-
-
-def _spherical_kernel(lats, lons, sigma_deg):
-    key = (lats, lons, sigma_deg)
-    if key in _KERNEL_CACHE:
-        return _KERNEL_CACHE[key]
-    from scipy.sparse import csr_matrix
-    lon2d, lat2d = np.meshgrid(lons, lats)
-    pts = np.radians(np.column_stack([lat2d.ravel(), lon2d.ravel()]))
-    area = np.clip(np.cos(pts[:, 0]), 1e-6, None)
-    tree = BallTree(pts, metric='haversine')   # radius query; built once per grid (cached)
-    idx, dist = tree.query_radius(pts, r=np.radians(4 * sigma_deg), return_distance=True)
-    rows = np.repeat(np.arange(len(pts)), [len(i) for i in idx])
-    cols = np.concatenate(idx)
-    w = np.exp(-0.5 * (np.degrees(np.concatenate(dist)) / sigma_deg) ** 2) * area[cols]
-    K = csr_matrix((w, (rows, cols)), shape=(len(pts), len(pts)))
-    row_sums = np.asarray(K.sum(axis=1)).ravel()
-    K = csr_matrix(K.multiply(1.0 / row_sums[:, None]))
-    _KERNEL_CACHE[key] = K
-    return K
 
 
 def nudge_topological_polygons(snapshot, stage_pole_dict=None):
@@ -1019,7 +970,7 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                     slab_length  × √(min(age, A)/A) × min(1, z / z_ref), where age is the
                                  seafloor age 1° inside the downgoing plate (age_grid; A =
                                  slab_age_saturation_myr) and z the depth of the deepest
-                                 slab tracer near the segment (slab_depth_at_segments,
+                                 slab tracer near the segment (slab_depth_near,
                                  z_ref = slab_ref_depth_km).  Any segment that is not
                                  divergent and whose plate pair has subducted (has a
                                  polarity) is pulled if there is slab: a slab pulls by
@@ -1184,7 +1135,7 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                 and slab_tracers is not None and subduct.any():
             # the slab lies on the overriding side: outward from the downgoing plate
             side = np.where(is_down[:, None], outward, -outward)
-            slab_depth[subduct] = slab_depth_at_segments(
+            slab_depth[subduct] = slab_depth_near(
                 mid_lon[subduct], mid_lat[subduct], side[subduct],
                 slab_tracers['lon'].values, slab_tracers['lat'].values,
                 slab_tracers['depth_km'].values,
@@ -1442,7 +1393,7 @@ def detach_colliding_slabs(slab_tracers, collision_state, collision_points, delt
     """collision: breakoff.  For every plate pair that has been colliding for at least
     delay_myr, mark the slab tracers within radius_deg (great-circle) of its collision
     segments as detached (column 'attached' = False, in place).  A detached slab no longer
-    pulls (slab_depth_at_segments only sees attached tracers) but stays in the mantle
+    pulls (slab_depth_near only sees attached tracers) but stays in the mantle
     outputs.  Slab seeded later, if subduction starts again, is attached."""
     if slab_tracers is None or not len(slab_tracers):
         return
@@ -3237,337 +3188,18 @@ def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_di
     return tracers
 
 
-# Slablets from trenches converging at least this fast (km/Myr = mm/yr) get full weight;
-# slower (near-stalled) boundaries contribute proportionally less.
-SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR = 10.0
-
-
-def update_slab_tracers(slab_tracers, boundaries_gdf, delta_time,
-                         div_threshold_subduction=-0.0001,
-                         slowing_factor=4,
-                         sample_deg=1.0,
-                         upper_mantle_km=670.0,
-                         cmb_depth_km=2890.0,
-                         max_sink_rate_km_per_myr=200.0,
-                         sink_rate_factor=1.0):
-    """Seed new slablets at subduction zones and sink existing ones downward.
-
-    slab_tracers is a plain DataFrame with columns:
-        lon, lat, depth_km, age, active, sink_rate_km_per_myr, weight
-    All sinking is vertical — lon/lat stay fixed after seeding.
-    Sinking rate: sink_rate_factor × convergence rate (km/Myr) in the upper mantle,
-    divided by slowing_factor in the lower mantle, capped at max_sink_rate_km_per_myr.
-    Each slablet's weight is delta_time × min(1, |convergence| / 10 km/Myr): the
-    mantle signal per Myr of subduction does not depend on the time step, and
-    near-stalled boundaries contribute little.
-    Slablets that reach the CMB are removed.
-    """
-    slab_tracers = slab_tracers.copy()
-
-    if len(slab_tracers) > 0:
-        active = slab_tracers['active'].astype(bool)
-        upper = active & (slab_tracers['depth_km'] < upper_mantle_km)
-        lower = active & (slab_tracers['depth_km'] >= upper_mantle_km)
-        slab_tracers.loc[upper, 'depth_km'] += (
-            slab_tracers.loc[upper, 'sink_rate_km_per_myr'] * delta_time)
-        slab_tracers.loc[lower, 'depth_km'] += (
-            slab_tracers.loc[lower, 'sink_rate_km_per_myr'] / slowing_factor * delta_time)
-        slab_tracers.loc[active, 'age'] += delta_time
-        slab_tracers = slab_tracers[slab_tracers['depth_km'] < cmb_depth_km].reset_index(drop=True)
-
+def trench_samples(boundaries_gdf, div_threshold_subduction=-0.0001, sample_deg=1.0):
+    """Trench samples for the mantle model (mantle.core): points every sample_deg along
+    the boundaries converging faster than div_threshold_subduction, with
+    convergence_km_per_myr = |divergence|.  PlateDriver's grid is the mantle frame."""
     if boundaries_gdf is None or 'divergence' not in boundaries_gdf.columns:
-        return slab_tracers
-
-    sub = (boundaries_gdf['divergence'] < div_threshold_subduction).values
-    s_lat, s_lon, s_row, _ = _points_every(boundaries_gdf, sub, sample_deg)
-    if len(s_lat):
-        convergence = np.abs(boundaries_gdf['divergence'].values[s_row].astype(float))
-        new = pd.DataFrame({
-            'lon': s_lon, 'lat': s_lat, 'depth_km': 0.0, 'age': 0.0, 'active': True,
-            'sink_rate_km_per_myr': np.minimum(convergence * sink_rate_factor, max_sink_rate_km_per_myr),
-            'weight': delta_time * np.minimum(1.0, convergence / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR),
-            'attached': True})
-        slab_tracers = new if len(slab_tracers) == 0 else pd.concat([slab_tracers, new], ignore_index=True)
-    return slab_tracers
-
-
-def seed_initial_slabs(boundaries_gdf, depth_km, delta_time,
-                       div_threshold_subduction=-0.0001,
-                       sample_deg=1.0,
-                       upper_mantle_km=670.0,
-                       slowing_factor=4,
-                       max_sink_rate_km_per_myr=200.0,
-                       sink_rate_factor=1.0):
-    """Slab tracers for the trenches of the starting configuration.
-
-    Each convergent boundary (sampled every sample_deg, as in update_slab_tracers) gets
-    the column of slablets the model itself would have built had it been subducting at
-    its present rate until its slab reached depth_km: one slablet per delta_time of that
-    history, sinking at the same rates as update_slab_tracers.  The sink rate is floored
-    at SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR so a near-stalled trench does not need
-    thousands of Myr of history.  Columns are vertical (lon/lat fixed, mantle frame).
-    Returns a DataFrame with the update_slab_tracers columns (empty if no trenches).
-    """
-    columns = ['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight', 'attached']
-    if (depth_km <= 0 or boundaries_gdf is None or len(boundaries_gdf) == 0
-            or 'divergence' not in boundaries_gdf.columns):
-        return pd.DataFrame(columns=columns)
+        return mantle.empty_samples()
     sub = (boundaries_gdf['divergence'] < div_threshold_subduction).values
     s_lat, s_lon, s_row, _ = _points_every(boundaries_gdf, sub, sample_deg)
     if not len(s_lat):
-        return pd.DataFrame(columns=columns)
-    convergence = np.abs(boundaries_gdf['divergence'].values[s_row].astype(float))
-    rate = np.clip(convergence * sink_rate_factor, SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR,
-                   max_sink_rate_km_per_myr)
-    # time for the slab to reach depth_km: upper mantle at rate, lower at rate / slowing_factor
-    upper = min(depth_km, upper_mantle_km)
-    t_end = upper / rate + max(0.0, depth_km - upper_mantle_km) * slowing_factor / rate
-    n = np.ceil(t_end / delta_time).astype(int) + 1          # ages 0, dt, ..., >= t_end
-    point = np.repeat(np.arange(len(s_lat)), n)
-    age = (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n)) * delta_time
-    r = rate[point]
-    t_um = upper_mantle_km / r
-    depth = np.where(age <= t_um, r * age, upper_mantle_km + (age - t_um) * r / slowing_factor)
-    return pd.DataFrame({
-        'lon': s_lon[point], 'lat': s_lat[point],
-        'depth_km': np.minimum(depth, depth_km), 'age': age, 'active': True,
-        'sink_rate_km_per_myr': r,
-        'weight': delta_time * np.minimum(1.0, convergence[point] / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR),
-        'attached': True})
-
-
-def slab_depth_at_segments(mid_lon, mid_lat, side_xyz, slab_lon, slab_lat, slab_depth,
-                           radius_deg=5.0, line_tol_deg=1.0, depth_cap_km=None, cell_deg=0.25):
-    """Depth (km) of the deepest slab tracer near each boundary segment, on one side of it.
-
-    side_xyz (n, 3) is the segment's great-circle normal, signed to point to the side
-    where the slab lies (the overriding plate).  A tracer counts if it is within
-    radius_deg (great-circle) of the segment midpoint and not more than line_tol_deg on
-    the other side of the segment's great circle (slablets are seeded on the trench
-    line, and the line moves).  Slablets sink vertically where they were seeded, so the
-    deep part of a retreating trench's slab lies under the overriding plate, as a
-    dipping slab does.  0 where there is no slab.
-
-    For speed, depths are capped at depth_cap_km (the depth beyond which no force grows)
-    and the slab is reduced to its deepest tracer in each cell_deg lon/lat cell, keeping
-    that tracer's own position.  Only a cell whose deepest tracer is on the wrong side of
-    a segment while a shallower one is on the right side can differ, which cell_deg well
-    below line_tol_deg makes rare.
-    """
-    z = np.zeros(len(mid_lon))
-    if len(slab_depth) == 0 or len(mid_lon) == 0:
-        return z
-    slab_lon, slab_lat = np.asarray(slab_lon, float), np.asarray(slab_lat, float)
-    slab_depth = np.asarray(slab_depth, float)
-    if depth_cap_km is not None:
-        slab_depth = np.minimum(slab_depth, depth_cap_km)
-    if cell_deg:
-        cell = (np.floor((slab_lat + 90.0) / cell_deg).astype(np.int64) * 100000
-                + np.floor(((slab_lon + 180.0) % 360.0) / cell_deg).astype(np.int64))
-        order = np.lexsort((-slab_depth, cell))                # by cell, deepest first
-        first = order[np.r_[True, cell[order][1:] != cell[order][:-1]]]
-        slab_lon, slab_lat, slab_depth = slab_lon[first], slab_lat[first], slab_depth[first]
-    from scipy.spatial import cKDTree
-    s_xyz = lonlat_to_xyz(np.asarray(slab_lon, float), np.asarray(slab_lat, float))
-    m_xyz = lonlat_to_xyz(np.asarray(mid_lon, float), np.asarray(mid_lat, float))
-    chord = 2.0 * np.sin(np.radians(radius_deg) / 2.0)
-    pairs = cKDTree(m_xyz).sparse_distance_matrix(cKDTree(s_xyz), chord, output_type='ndarray')
-    if len(pairs) == 0:
-        return z
-    seg, idx = pairs['i'], pairs['j']
-    side = np.einsum('ij,ij->i', s_xyz[idx], np.asarray(side_xyz, float)[seg])   # sin(distance from the great circle), + on the slab side
-    ok = side > -np.sin(np.radians(line_tol_deg))
-    np.maximum.at(z, seg[ok], np.asarray(slab_depth, float)[idx[ok]])
-    return z
-
-
-def _mantle_grid(spacing_deg):
-    lons_g = np.arange(-180 + spacing_deg / 2, 180, spacing_deg)
-    lats_g = np.arange( -90 + spacing_deg / 2,  90, spacing_deg)
-    return lons_g, lats_g
-
-
-def _slab_weights(slab_tracers):
-    if 'weight' in slab_tracers.columns:
-        return slab_tracers['weight'].values.astype(float)
-    return np.ones(len(slab_tracers))
-
-
-def update_cmb_heat(cmb_heat, slab_tracers, delta_time,
-                    spacing_deg=5.0,
-                    cmb_depth_km=2890.0,
-                    cmb_layer_km=400.0,
-                    heating_rate=0.02,
-                    slab_suppression=0.05,
-                    surface_coupling=0.1,
-                    sigma_deg=10.0,
-                    max_heat=3.0):
-    """Accumulate CMB heat each timestep, building LLSVP-like warm regions.
-
-    Core heating increments the 2D field (nlat × nlon) everywhere each step;
-    slablets suppress it with depth-weighted coupling.  A wide spherical
-    Gaussian keeps the pattern large-scale.  Positive values = warm regions
-    (slow dVs); passed to generate_mantle_temp_field as the upwelling anomaly.
-
-    Two physical mechanisms are combined:
-      - Thermal (material): slablets near the CMB suppress with full weight (1.0).
-      - Dynamic pressure (incompressibility): surface slablets suppress with
-        surface_coupling weight, representing instantaneous Stokes-flow coupling.
-    Coupling varies linearly with depth from surface_coupling at 0 km to 1.0 at
-    cmb_depth_km, so the LLSVP anti-correlation with subduction appears from the
-    first timestep rather than waiting ~50 Myr for material to arrive physically.
-
-    Parameters
-    ----------
-    heating_rate : float
-        Heat units added per Myr everywhere (core heating).
-    slab_suppression : float
-        Heat units removed per unit-weight slablet per Myr (at full coupling = CMB depth).
-    surface_coupling : float
-        Fractional coupling at depth=0 (0 = no instantaneous signal, 1 = full).
-    sigma_deg : float
-        Horizontal smoothing (degrees) applied each Myr; for other time steps the
-        width scales with sqrt(delta_time) so the smoothing acts like diffusion.
-    max_heat : float
-        Safety cap on accumulated heat units.
-    """
-    lons_g, lats_g = _mantle_grid(spacing_deg)
-    nlat, nlon = cmb_heat.shape
-
-    # Core heating everywhere
-    cmb_heat = cmb_heat + heating_rate * delta_time
-
-    if len(slab_tracers) > 0:
-        all_active = slab_tracers[slab_tracers['active'].astype(bool)]
-        if len(all_active) > 0:
-            lons_f   = all_active['lon'].values.astype(float)
-            lats_f   = all_active['lat'].values.astype(float)
-            depths_f = all_active['depth_km'].values.astype(float)
-
-            coupling = surface_coupling + (1.0 - surface_coupling) * (depths_f / cmb_depth_km)
-            weights  = slab_suppression * delta_time * coupling * _slab_weights(all_active)
-
-            lon_idx = np.clip(np.floor((lons_f + 180) / spacing_deg).astype(int), 0, nlon - 1)
-            lat_idx = np.clip(np.floor((lats_f + 90)  / spacing_deg).astype(int), 0, nlat - 1)
-            suppress = np.zeros_like(cmb_heat)
-            np.add.at(suppress, (lat_idx, lon_idx), weights)
-            cmb_heat = np.maximum(cmb_heat - suppress, 0.0)
-
-    cmb_heat = spherical_gaussian_smooth(cmb_heat, lats_g, lons_g, sigma_deg * np.sqrt(delta_time))
-
-    return np.minimum(cmb_heat, max_heat)
-
-
-def _remove_area_weighted_mean(field, lats):
-    w = np.cos(np.radians(lats))[:, None] * np.ones(field.shape[-1])
-    means = (field * w).sum(axis=(-2, -1)) / w.sum()
-    return field - means[:, None, None]
-
-
-def generate_mantle_temp_field(slab_tracers,
-                                spacing_deg=5.0,
-                                depth_interval_km=100.0,
-                                max_depth_km=2890.0,
-                                temp_anomaly_K=-500.0,
-                                thermal_tau_myr=200.0,
-                                dVs_per_K=-0.001,
-                                sigma_deg=3.0,
-                                sigma_depth_km=150.0,
-                                cmb_heat=None,
-                                cmb_dVs_scale=-0.5,
-                                cmb_decay_km=400.0,
-                                tomo_smooth_horiz_deg=0.0,
-                                tomo_smooth_depth_km=0.0):
-    """Bin slab tracers onto a 3D grid and return a dVs/Vs anomaly Dataset.
-
-    Each slablet contributes a cold temperature anomaly (temp_anomaly_K × its weight)
-    that decays exponentially with age (thermal_tau_myr).  The summed ΔT per grid cell
-    is smoothed (spherical Gaussian horizontally, Gaussian in depth) and converted to
-    dVs/Vs % (dVs_per_K, default -0.001 %/K, so a fresh unit-weight slablet gives
-    -0.5% per cell).
-
-    If cmb_heat (a 2D nlat×nlon array from update_cmb_heat) is provided, a warm
-    negative-dVs anomaly is added in the deepest layers, decaying upward as
-    exp(-(distance from CMB / cmb_decay_km)²).
-
-    Each depth layer has zero area-weighted mean, like tomography models.
-    Returns xr.Dataset with variables 'dVs' and optionally 'cmb_heat'
-    (dims: depth, lat, lon).
-    """
-    from scipy.ndimage import gaussian_filter1d
-
-    lons_g, lats_g = _mantle_grid(spacing_deg)
-    depths_g = np.arange(depth_interval_km / 2, max_depth_km, depth_interval_km)
-    nlon, nlat, ndepth = len(lons_g), len(lats_g), len(depths_g)
-    field = np.zeros((ndepth, nlat, nlon), dtype=float)
-
-    def _smooth(f, sig_h_deg, sig_d_km):
-        f = spherical_gaussian_smooth(f, lats_g, lons_g, sig_h_deg)
-        if sig_d_km > 0:
-            f = gaussian_filter1d(f, sig_d_km / depth_interval_km, axis=0, mode='nearest')
-        return f
-
-    if len(slab_tracers) > 0:
-        active = slab_tracers[slab_tracers['active'].astype(bool)]
-        if len(active) > 0:
-            ages_f   = active['age'].values.astype(float)
-            lons_f   = active['lon'].values.astype(float)
-            lats_f   = active['lat'].values.astype(float)
-            depths_f = active['depth_km'].values.astype(float)
-
-            dT  = temp_anomaly_K * np.exp(-ages_f / thermal_tau_myr) * _slab_weights(active)
-            dVs = dT * dVs_per_K
-
-            lon_idx = np.clip(
-                np.floor((lons_f + 180) / spacing_deg).astype(int), 0, nlon - 1)
-            lat_idx = np.clip(
-                np.floor((lats_f + 90)  / spacing_deg).astype(int), 0, nlat - 1)
-            dep_idx = np.clip(
-                np.floor(depths_f / depth_interval_km).astype(int), 0, ndepth - 1)
-            np.add.at(field, (dep_idx, lat_idx, lon_idx), dVs)
-
-            field = _smooth(field, sigma_deg, sigma_depth_km)
-
-    # Inject LLSVP-like warm anomaly from CMB heat accumulation.
-    # Iterate deepest→shallowest; break once decay becomes negligible.
-    if cmb_heat is not None and cmb_heat.shape == (nlat, nlon):
-        _n_injected = 0
-        for dep_i in range(ndepth - 1, -1, -1):
-            dist_from_cmb = max_depth_km - depths_g[dep_i]
-            decay = np.exp(-(dist_from_cmb / cmb_decay_km) ** 2)
-            if decay < 1e-4:
-                break
-            field[dep_i] += cmb_heat * cmb_dVs_scale * decay
-            _n_injected += 1
-        print(f'  [mantle] LLSVP injected into {_n_injected} depth layers; '
-              f'cmb_heat range {cmb_heat.min():.3f}–{cmb_heat.max():.3f}; '
-              f'dVs at CMB: {field[-1].min():.4f}–{field[-1].max():.4f} %')
-    elif cmb_heat is not None:
-        print(f'  [mantle] WARNING: cmb_heat shape {cmb_heat.shape} != expected ({nlat},{nlon}) — LLSVP skipped')
-
-    field = _remove_area_weighted_mean(field, lats_g)
-
-    if tomo_smooth_horiz_deg > 0 or tomo_smooth_depth_km > 0:
-        field = _smooth(field, tomo_smooth_horiz_deg, tomo_smooth_depth_km)
-        field = _remove_area_weighted_mean(field, lats_g)
-
-    data_vars = {
-        'dVs': xr.DataArray(
-            field, dims=['depth', 'lat', 'lon'],
-            coords={'depth': depths_g, 'lat': lats_g, 'lon': lons_g},
-            attrs={'units': '%',
-                   'long_name': 'dVs/Vs anomaly (positive = cold fast slab; negative = warm slow region)',
-                   'temp_anomaly_K': temp_anomaly_K,
-                   'thermal_tau_myr': thermal_tau_myr,
-                   'dVs_per_K': dVs_per_K}),
-    }
-    if cmb_heat is not None and cmb_heat.shape == (nlat, nlon):
-        data_vars['cmb_heat'] = xr.DataArray(
-            cmb_heat, dims=['lat', 'lon'],
-            coords={'lat': lats_g, 'lon': lons_g},
-            attrs={'units': 'heat units',
-                   'long_name': 'CMB heat accumulation (proxy for LLSVP intensity)'})
-    return xr.Dataset(data_vars)
+        return mantle.empty_samples()
+    return {'lon': s_lon, 'lat': s_lat,
+            'convergence_km_per_myr': np.abs(boundaries_gdf['divergence'].values[s_row].astype(float))}
 
 
 def generate_hotspot_locations(n=20, locations=None, seed=None):

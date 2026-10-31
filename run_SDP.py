@@ -18,6 +18,7 @@ from gprm.utils.create_gpml import gpml2gdf
 
 import force_modes
 import plate_driver as pdriver
+import mantle
 import self_driving_plates as sdp
 import step_stats
 
@@ -190,8 +191,12 @@ _params_step0 = {**params, 'fragmentation_enabled': False}
 
 _slab_enabled = params.get('slab_tracers_enabled', False)   # mantle outputs (CMB heat, mantle_temp)
 _slab_track = _slab_enabled or _needs['slab']                # slab tracers kept (outputs or forces)
-_slab_columns = ['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight']
-slab_tracers = pd.DataFrame(columns=_slab_columns) if _slab_track else None
+mantle_p = mantle.MantleParams.from_config(params)                # every mantle parameter, with defaults
+slab_tracers = pd.DataFrame(columns=mantle.SLAB_COLUMNS) if _slab_track else None
+
+
+def _trench_samples(bdry):
+    return sdp.trench_samples(bdry, params['div_threshold_subduction'], mantle_p.slab_sample_deg)
 
 
 def _new_seafloor_tracers(plate_polygons, bdry):
@@ -217,15 +222,10 @@ if _needs['age'] or _needs['slab']:
     _step0_fields = {'tracers': (tracers.geometry.x.values, tracers.geometry.y.values,
                                  tracers.age.values.astype(float), None)}
     if _needs['slab']:
-        slab_tracers = sdp.seed_initial_slabs(
-            _pass1[3], params.get('initial_slab_depth_km', 1320.0), delta_time,
-            div_threshold_subduction=params['div_threshold_subduction'],
-            slowing_factor=params.get('slab_slowing_factor', 4),
-            max_sink_rate_km_per_myr=params.get('slab_max_sink_rate', 200.0),
-            sink_rate_factor=params.get('slab_sink_rate_factor', 1.0))
+        slab_tracers = mantle.initial_slab_columns(_trench_samples(_pass1[3]), delta_time, mantle_p)
         _step0_fields['slab_tracers'] = slab_tracers
         print('  [slab] {} initial slab tracers at the step-0 trenches, to {:.0f} km'.format(
-            len(slab_tracers), params.get('initial_slab_depth_km', 1320.0)))
+            len(slab_tracers), mantle_p.initial_slab_depth_km))
     del _pass1
 
 force_diag = {}
@@ -285,10 +285,7 @@ _sutures       = pd.DataFrame(columns=['lon', 'lat', 'suture_id', 'time_myr'])  
 _next_suture_id = 1
 _craton_plate_remap     = {}   # {craton_plateid: host_plateid} for absorbed cratons
 if _slab_enabled:
-    _mantle_spacing = params.get('mantle_grid_spacing_deg', 5.0)
-    _cmb_nlat = len(np.arange(-90  + _mantle_spacing / 2, 90,  _mantle_spacing))
-    _cmb_nlon = len(np.arange(-180 + _mantle_spacing / 2, 180, _mantle_spacing))
-    cmb_heat = np.zeros((_cmb_nlat, _cmb_nlon))
+    cmb_heat = mantle.new_cmb_heat(mantle_p)
 
 
 # ---------------------------------------------------------------------------
@@ -491,17 +488,8 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             _out('seamounts_{:04d}.geojson'), driver='GeoJSON'))
 
     if slab_tracers is not None and cmb_heat is not None:
-        _try('mantle_temp', lambda: _save_grid(sdp.generate_mantle_temp_field(
-            slab_tracers,
-            spacing_deg=params.get('mantle_grid_spacing_deg', 5.0),
-            depth_interval_km=params.get('mantle_depth_interval_km', 100.0),
-            thermal_tau_myr=params.get('slab_thermal_tau_myr', 200.0),
-            cmb_heat=cmb_heat,
-            cmb_dVs_scale=params.get('cmb_dVs_scale', -0.5),
-            cmb_decay_km=params.get('cmb_decay_km', 400.0),
-            tomo_smooth_horiz_deg=params.get('tomo_smooth_horiz_deg', 0.0),
-            tomo_smooth_depth_km=params.get('tomo_smooth_depth_km', 0.0)
-        ), _out('mantle_temp_{:04d}.nc'), params))
+        _try('mantle_temp', lambda: _save_grid(mantle.dvs_field(slab_tracers, cmb_heat, mantle_p),
+                                               _out('mantle_temp_{:04d}.nc'), params))
 
 
 # ---------------------------------------------------------------------------
@@ -944,22 +932,11 @@ try:
         _step_times['tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         if _slab_track:
-            slab_tracers = sdp.update_slab_tracers(
-                slab_tracers, boundaries_gdf, delta_time,
-                div_threshold_subduction=params['div_threshold_subduction'],
-                slowing_factor=params.get('slab_slowing_factor', 4),
-                max_sink_rate_km_per_myr=params.get('slab_max_sink_rate', 200.0),
-                sink_rate_factor=params.get('slab_sink_rate_factor', 1.0))
+            slab_tracers = mantle.seed_slabs(mantle.sink_slabs(slab_tracers, delta_time, mantle_p),
+                                             _trench_samples(boundaries_gdf), delta_time, mantle_p)
             _step_times['slab_tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
         if _slab_enabled:
-            cmb_heat = sdp.update_cmb_heat(
-                cmb_heat, slab_tracers, delta_time,
-                spacing_deg=_mantle_spacing,
-                heating_rate=params.get('cmb_heating_rate', 0.02),
-                slab_suppression=params.get('cmb_slab_suppression', 0.05),
-                surface_coupling=params.get('cmb_surface_coupling', 0.1),
-                sigma_deg=params.get('cmb_sigma_deg', 10.0),
-                max_heat=params.get('cmb_max_heat', 3.0))
+            cmb_heat = mantle.update_cmb_heat(cmb_heat, slab_tracers, delta_time, mantle_p)
             _step_times['cmb_heat'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
         if _slab_track and 'divergence' in boundaries_gdf.columns:
             _sub = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
