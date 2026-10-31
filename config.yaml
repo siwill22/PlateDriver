@@ -94,7 +94,7 @@ params:
   slab_slowing_factor:         4        # lower-mantle sinking slowdown (Lithgow-Bertelloni & Richards 1998)
   slab_sink_rate_factor:       1.0      # upper-mantle sinking rate = factor × convergence rate (km/Myr); 10 reproduces runs before the unit fix
   slab_max_sink_rate:          400      # km/Myr; cap on sinking rate (real Earth max ~100-200 km/Myr)
-  slab_thermal_tau_myr:        4        # Myr; thermal decay timescale for slablets (lower = faster fade)
+  slab_thermal_tau_myr:        100      # Myr; thermal decay timescale for slablets (lower = faster fade); open for tuning (was 4: slabs vanished below ~300 km)
   mantle_grid_spacing_deg:     5.0      # degrees; horizontal resolution of 3D mantle temp field
   mantle_depth_interval_km:    100      # km; depth layer thickness
   cmb_heating_rate:            0.02     # heat units added per Myr everywhere (core heating)

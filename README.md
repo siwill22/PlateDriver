@@ -419,7 +419,7 @@ params:
   slab_slowing_factor:     4      # lower-mantle sinking slowdown (Lithgow-Bertelloni & Richards 1998)
   slab_sink_rate_factor:   1.0    # upper-mantle sinking rate = factor × convergence rate
   slab_max_sink_rate:      400    # km/Myr; cap on sinking rate (real Earth max ~100–200 km/Myr)
-  slab_thermal_tau_myr:    4      # Myr; thermal decay timescale (lower = faster fade)
+  slab_thermal_tau_myr:    100    # Myr; thermal decay timescale (lower = faster fade); open for tuning
   mantle_grid_spacing_deg: 5.0    # degrees; horizontal resolution of 3D mantle field
   mantle_depth_interval_km: 100   # km; depth layer thickness
 ```
@@ -428,7 +428,7 @@ Sinking rate: upper mantle (0–670 km) at `slab_sink_rate_factor × |convergenc
 
 > Runs made before the unit fix sank slabs 10× faster: convergence in km/Myr was treated as cm/yr and multiplied by 10. Set `slab_sink_rate_factor: 10` to reproduce them. With the physical factor of 1, you may want a longer `slab_thermal_tau_myr` so slabs stay visible in the lower mantle.
 
-Each slablet has a weight of `delta_time × min(1, |convergence| / 10 km/Myr)`. This keeps the mantle signal independent of the time step and stops near-stalled boundaries from building up slablets. Slablets warm up exponentially with e-folding time `slab_thermal_tau_myr` and are removed when they reach the CMB. Horizontal smoothing uses a spherical Gaussian (great-circle distance, correct across ±180° and the poles). The dVs field has zero area-weighted mean at each depth level, matching the real tomography convention, and can optionally be smoothed to simulate finite-resolution imaging.
+Each slablet has a weight of `delta_time × min(1, |convergence| / 10 km/Myr)`. This keeps the mantle signal independent of the time step and stops near-stalled boundaries from building up slablets. Slablets warm up exponentially with e-folding time `slab_thermal_tau_myr` and are removed when they reach the CMB (`slab_at_cmb: rest` keeps them there until their anomaly has faded). Two options fix known flaws and are off by default so existing runs reproduce: `mantle_bin_area_normalise` (a slab counts the same at every latitude; without it a slab at 60° gets half the area-integrated anomaly of one at the equator) and `cmb_suppression_thermal_decay` (a slablet suppresses CMB heat in proportion to its remaining thermal anomaly, as in the dVs field). Horizontal smoothing uses a spherical Gaussian (great-circle distance, correct across ±180° and the poles). The dVs field has zero area-weighted mean at each depth level, matching the real tomography convention, and can optionally be smoothed to simulate finite-resolution imaging.
 
 ### CMB heat accumulation (LLSVP proxy)
 

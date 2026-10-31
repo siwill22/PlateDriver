@@ -124,7 +124,7 @@ params:
   slab_search_radius_deg: 5
   slab_sink_rate_factor: 1.0
   slab_slowing_factor: 4
-  slab_thermal_tau_myr: 4
+  slab_thermal_tau_myr: 100
   slab_tracers_enabled: true
   speed_scale: null
   spreading_rate_km_per_myr: 50.0
