@@ -411,7 +411,7 @@ Hotspot positions are fixed in the mantle frame (not reconstructed). Seamounts a
 
 Tracks subducted material vertically through the mantle and synthesises a 3D seismic velocity anomaly field.
 
-The code is in the `mantle/` package, which is shared with the real-reconstruction stream and never imports PlateDriver code. Every mantle parameter and its default is in `mantle/params.py` (`MantleParams`); the config keys below are its field names. PlateDriver hands it trench samples through `self_driving_plates.trench_samples`.
+The code is in the `mantle/` package, which is shared with the real-reconstruction stream and never imports PlateDriver code. Every mantle parameter and its default is in `mantle/params.py` (`MantleParams`); the config keys below are its field names. PlateDriver hands it trench samples through `self_driving_plates.trench_samples`. The same model runs on real reconstructions with `conda run -n pygmt17 python reconstructions/run_mantle.py configs/real/muller2019.yaml` (Müller et al. 2019, 250 Ma to present: about 30 s the first time, about 5 s once the trench samples are cached). Its `mantle:` block takes the same keys as here.
 
 ```yaml
 params:
@@ -659,6 +659,7 @@ Runs with the same `random_seed` are repeatable, so `force_model: simple` is che
 |---|---|
 | `self_driving_plates.py` | Library — all simulation logic as importable functions |
 | `mantle/` | The simplified mantle model (slab tracers, CMB heat, dVs field), shared with the real-reconstruction stream. Imports nothing from PlateDriver; `tests/test_mantle.py` checks this and that it reproduces the pre-extraction code |
+| `reconstructions/` | Real-reconstruction stream: `run_mantle.py` drives `mantle/` with a GPlates reconstruction's subduction zones (`trench_samples.py`, cached per Myr under `runs_real/cache/`). Configs in `configs/real/`, outputs in `runs_real/<name>/` (`mantle_temp_<age>Ma.nc`, `steps.csv`). Never imports PlateDriver code |
 | `run_SDP.py` | Driver script — config loading, bootstrapping, main loop, plotting, output |
 | `plate_driver.py` | Torque helpers: segment torque, torque → stage rotation, and the bootstrap torques from the GPlates boundary feature types |
 | `force_modes.py` | Force-model presets (`simple`, `physical`), mode choices and their validation |

@@ -22,3 +22,6 @@ show-me/
 
 # Real-reconstruction mantle runs and their trench-sample cache (local only)
 /runs_real/
+
+# Python bytecode in any folder
+__pycache__/
