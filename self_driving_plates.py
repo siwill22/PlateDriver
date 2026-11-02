@@ -21,9 +21,9 @@ except ImportError:
 from shapely.geometry import Point, Polygon
 from sklearn.neighbors import BallTree
 
-import mantle
-from mantle import slab_depth_near
-from mantle.sphere import lonlat_to_xyz, xyz_to_lonlat, spherical_gaussian_smooth, _spherical_kernel
+import slablet
+from slablet import slab_depth_near
+from slablet.sphere import lonlat_to_xyz, xyz_to_lonlat, spherical_gaussian_smooth, _spherical_kernel
 
 
 # Velocities throughout this module come from pygplates.calculate_velocities (or the
@@ -35,7 +35,7 @@ EARTH_RADIUS_KM = pygplates.Earth.mean_radius_in_kms
 # Small spherical helpers shared by the functions below
 # ---------------------------------------------------------------------------
 
-# lonlat_to_xyz and xyz_to_lonlat live in mantle/sphere.py and are imported above.
+# lonlat_to_xyz and xyz_to_lonlat live in slablet/sphere.py and are imported above.
 
 
 class SphereTree:
@@ -3189,15 +3189,15 @@ def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_di
 
 
 def trench_samples(boundaries_gdf, div_threshold_subduction=-0.0001, sample_deg=1.0):
-    """Trench samples for the mantle model (mantle.core): points every sample_deg along
+    """Trench samples for the mantle model (slablet.core): points every sample_deg along
     the boundaries converging faster than div_threshold_subduction, with
     convergence_km_per_myr = |divergence|.  PlateDriver's grid is the mantle frame."""
     if boundaries_gdf is None or 'divergence' not in boundaries_gdf.columns:
-        return mantle.empty_samples()
+        return slablet.empty_samples()
     sub = (boundaries_gdf['divergence'] < div_threshold_subduction).values
     s_lat, s_lon, s_row, _ = _points_every(boundaries_gdf, sub, sample_deg)
     if not len(s_lat):
-        return mantle.empty_samples()
+        return slablet.empty_samples()
     return {'lon': s_lon, 'lat': s_lat,
             'convergence_km_per_myr': np.abs(boundaries_gdf['divergence'].values[s_row].astype(float))}
 

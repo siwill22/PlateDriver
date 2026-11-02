@@ -18,7 +18,7 @@ from gprm.utils.create_gpml import gpml2gdf
 
 import force_modes
 import plate_driver as pdriver
-import mantle
+import slablet
 import self_driving_plates as sdp
 import step_stats
 
@@ -107,6 +107,7 @@ def _git_commit():
 # Record exactly what this run used (rewritten after step 0 with the speed scale)
 run_info = {'config_file': os.path.abspath(args.config),
             'git_commit': _git_commit(),
+            'slablet': slablet.version_info(),
             'started': time.strftime('%Y-%m-%d %H:%M:%S'),
             'force_model': force_preset,
             'force_modes_resolved': modes,
@@ -191,8 +192,8 @@ _params_step0 = {**params, 'fragmentation_enabled': False}
 
 _slab_enabled = params.get('slab_tracers_enabled', False)   # mantle outputs (CMB heat, mantle_temp)
 _slab_track = _slab_enabled or _needs['slab']                # slab tracers kept (outputs or forces)
-mantle_p = mantle.MantleParams.from_config(params)                # every mantle parameter, with defaults
-slab_tracers = pd.DataFrame(columns=mantle.SLAB_COLUMNS) if _slab_track else None
+mantle_p = slablet.MantleParams.from_config(params)                # every mantle parameter, with defaults
+slab_tracers = pd.DataFrame(columns=slablet.SLAB_COLUMNS) if _slab_track else None
 
 
 def _trench_samples(bdry):
@@ -222,7 +223,7 @@ if _needs['age'] or _needs['slab']:
     _step0_fields = {'tracers': (tracers.geometry.x.values, tracers.geometry.y.values,
                                  tracers.age.values.astype(float), None)}
     if _needs['slab']:
-        slab_tracers = mantle.initial_slab_columns(_trench_samples(_pass1[3]), delta_time, mantle_p)
+        slab_tracers = slablet.initial_slab_columns(_trench_samples(_pass1[3]), delta_time, mantle_p)
         _step0_fields['slab_tracers'] = slab_tracers
         print('  [slab] {} initial slab tracers at the step-0 trenches, to {:.0f} km'.format(
             len(slab_tracers), mantle_p.initial_slab_depth_km))
@@ -285,7 +286,7 @@ _sutures       = pd.DataFrame(columns=['lon', 'lat', 'suture_id', 'time_myr'])  
 _next_suture_id = 1
 _craton_plate_remap     = {}   # {craton_plateid: host_plateid} for absorbed cratons
 if _slab_enabled:
-    llsvp_state = mantle.new_llsvp_state(mantle_p)   # CMB heat, pile thickness or None (mantle_p.llsvp)
+    llsvp_state = slablet.new_llsvp_state(mantle_p)   # CMB heat, pile thickness or None (mantle_p.llsvp)
 
 
 # ---------------------------------------------------------------------------
@@ -488,8 +489,8 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             _out('seamounts_{:04d}.geojson'), driver='GeoJSON'))
 
     if slab_tracers is not None:          # passed only with slab_tracers_enabled
-        _try('mantle_temp', lambda: _save_grid(mantle.dvs_field(slab_tracers, llsvp_state, mantle_p),
-                                               _out('mantle_temp_{:04d}.nc'), params))
+        _try('mantle_temp', lambda: _save_grid(slablet.dvs_field(slab_tracers, llsvp_state, mantle_p),
+                                                _out('mantle_temp_{:04d}.nc'), params))
 
 
 # ---------------------------------------------------------------------------
@@ -932,11 +933,11 @@ try:
         _step_times['tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         if _slab_track:
-            slab_tracers = mantle.seed_slabs(mantle.sink_slabs(slab_tracers, delta_time, mantle_p),
-                                             _trench_samples(boundaries_gdf), delta_time, mantle_p)
+            slab_tracers = slablet.seed_slabs(slablet.sink_slabs(slab_tracers, delta_time, mantle_p),
+                                              _trench_samples(boundaries_gdf), delta_time, mantle_p)
             _step_times['slab_tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
         if _slab_enabled:
-            llsvp_state = mantle.update_llsvp(llsvp_state, slab_tracers, delta_time, mantle_p)
+            llsvp_state = slablet.update_llsvp(llsvp_state, slab_tracers, delta_time, mantle_p)
             _step_times['cmb_heat'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
         if _slab_track and 'divergence' in boundaries_gdf.columns:
             _sub = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
