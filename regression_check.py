@@ -10,6 +10,9 @@ NaN-aware), CSVs, GeoJSONs (attributes and vertex coordinates) and rotation file
 Plots and run_info.yaml are skipped, and so are the wall-clock columns (seconds_*) of
 the statistics CSVs.  Prints one line per file and exits with status 1
 if anything differs by more than --tol (default 0: exact).
+
+Refuses (status 2) a folder whose run_info.yaml records a slablet with uncommitted changes:
+agreement with such a run could not be reproduced from a slablet commit.
 """
 
 import argparse
@@ -22,6 +25,18 @@ import xarray as xr
 import geopandas as gpd
 
 SKIP_EXT = {'.png', '.yaml', '.log'}
+
+
+def dirty_slablet(folder):
+    """The slablet commit a run recorded, if it had uncommitted changes; otherwise None."""
+    path = os.path.join(folder, 'run_info.yaml')
+    if not os.path.exists(path):
+        return None
+    import yaml
+    with open(path) as fh:
+        info = yaml.safe_load(fh) or {}
+    git = (info.get('slablet') or {}).get('git', '') if isinstance(info.get('slablet'), dict) else ''
+    return git if str(git).endswith('-dirty') else None
 
 
 def _max_diff(a, b):
@@ -89,6 +104,14 @@ def main():
     parser.add_argument('new_dir')
     parser.add_argument('--tol', type=float, default=0.0)
     args = parser.parse_args()
+
+    dirty = {d: dirty_slablet(d) for d in (args.reference_dir, args.new_dir)}
+    dirty = {d: g for d, g in dirty.items() if g}
+    if dirty:
+        for d, g in dirty.items():
+            print('refused: {} ran on slablet {} (uncommitted changes)'.format(d, g))
+        print('commit slablet and rerun; see decision 7 of slablet/docs/plans/2026-11-08-cross-repo-reconciliation.md')
+        sys.exit(2)
 
     names_a = {f for f in os.listdir(args.reference_dir) if os.path.splitext(f)[1] not in SKIP_EXT}
     names_b = {f for f in os.listdir(args.new_dir) if os.path.splitext(f)[1] not in SKIP_EXT}

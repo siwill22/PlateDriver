@@ -21,9 +21,18 @@ except ImportError:
 from shapely.geometry import Point, Polygon
 from sklearn.neighbors import BallTree
 
-import slablet
-from slablet import slab_depth_near
-from slablet.sphere import lonlat_to_xyz, xyz_to_lonlat, spherical_gaussian_smooth, _spherical_kernel
+from sphere_geometry import lonlat_to_xyz, xyz_to_lonlat, spherical_kernel
+try:
+    import slablet          # the mantle model: needed only for slab tracking and mantle outputs
+except ImportError:        # slablet is private; PlateDriver runs without it when no mantle option is on
+    slablet = None
+
+
+def require_slablet(what):
+    """Stop with a clear message when an option needs slablet and it is not installed."""
+    if slablet is None:
+        raise ImportError('{} needs the slablet mantle model, which is not installed '
+                          '(~/GIT/slablet, private); turn that option off or install slablet'.format(what))
 
 
 # Velocities throughout this module come from pygplates.calculate_velocities (or the
@@ -35,7 +44,7 @@ EARTH_RADIUS_KM = pygplates.Earth.mean_radius_in_kms
 # Small spherical helpers shared by the functions below
 # ---------------------------------------------------------------------------
 
-# lonlat_to_xyz and xyz_to_lonlat live in slablet/sphere.py and are imported above.
+# lonlat_to_xyz and xyz_to_lonlat live in sphere_geometry.py (copies of slablet's) and are imported above.
 
 
 class SphereTree:
@@ -796,7 +805,7 @@ def ridge_push_body_torques(age_grid, plate_id_raster, weight, cutoff_myr=80.0, 
     key = np.where(ocean, pid, -1.0)
     plates = np.unique(key[ocean])
     if smooth_deg and smooth_deg > 0 and len(plates):
-        K = _spherical_kernel(tuple(np.round(lats, 6)), tuple(np.round(lons, 6)), float(smooth_deg))
+        K = spherical_kernel(tuple(np.round(lats, 6)), tuple(np.round(lons, 6)), float(smooth_deg))
         masks = np.stack([(key == p).ravel() for p in plates], axis=1).astype(float)
         num = K @ (masks * a.ravel()[:, None])
         den = K @ masks
@@ -1135,7 +1144,8 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                 and slab_tracers is not None and subduct.any():
             # the slab lies on the overriding side: outward from the downgoing plate
             side = np.where(is_down[:, None], outward, -outward)
-            slab_depth[subduct] = slab_depth_near(
+            require_slablet('slab_pull: slab_length / slab_suction: depth_split')
+            slab_depth[subduct] = slablet.slab_depth_near(
                 mid_lon[subduct], mid_lat[subduct], side[subduct],
                 slab_tracers['lon'].values, slab_tracers['lat'].values,
                 slab_tracers['depth_km'].values,
@@ -3188,16 +3198,21 @@ def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_di
     return tracers
 
 
+def _empty_samples():
+    """No trench samples (the same as slablet.empty_samples())."""
+    return {'lon': np.zeros(0), 'lat': np.zeros(0), 'convergence_km_per_myr': np.zeros(0)}
+
+
 def trench_samples(boundaries_gdf, div_threshold_subduction=-0.0001, sample_deg=1.0):
     """Trench samples for the mantle model (slablet.core): points every sample_deg along
     the boundaries converging faster than div_threshold_subduction, with
     convergence_km_per_myr = |divergence|.  PlateDriver's grid is the mantle frame."""
     if boundaries_gdf is None or 'divergence' not in boundaries_gdf.columns:
-        return slablet.empty_samples()
+        return _empty_samples()
     sub = (boundaries_gdf['divergence'] < div_threshold_subduction).values
     s_lat, s_lon, s_row, _ = _points_every(boundaries_gdf, sub, sample_deg)
     if not len(s_lat):
-        return slablet.empty_samples()
+        return _empty_samples()
     return {'lon': s_lon, 'lat': s_lat,
             'convergence_km_per_myr': np.abs(boundaries_gdf['divergence'].values[s_row].astype(float))}
 

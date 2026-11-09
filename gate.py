@@ -27,6 +27,9 @@ Measures (whole-run values are over all steps; area shares are of the sphere):
                                               oldest, and the share that already existed at
                                               t = 0 (older than the elapsed time)
   step time                                   mean seconds per step
+The gate stops if slablet has uncommitted changes (before running), or if any seed's run_info.yaml
+records such a slablet (with --no-run): a gate result must be reproducible from commits.
+
 Everything is from the run's own outputs (step_stats.csv, plate_stats.csv, rift_events.csv,
 welds.csv, seafloor_age_NNNN.nc, craton_NNNN.nc); ocean areas are cos(lat)-weighted.
 """
@@ -218,6 +221,22 @@ def export(runs_dir, name, seeds, label, replace):
         print('exported tb%d to the viewer' % s)
 
 
+def check_slablet_committed(runs_dir, name, seeds, no_run):
+    """Stop the gate when its results would rest on uncommitted slablet code."""
+    from regression_check import dirty_slablet
+    if not no_run:
+        try:
+            import slablet
+        except ImportError:
+            return                       # PlateDriver without the mantle model: nothing to check
+        git = str(slablet.version_info().get('git', ''))
+        if git.endswith('-dirty'):
+            raise SystemExit('gate stopped: slablet has uncommitted changes ({}); commit them first'.format(git))
+    bad = [s for s in seeds if dirty_slablet(os.path.join(runs_dir, name, 'tb{}'.format(s)))]
+    if bad:
+        raise SystemExit('gate stopped: seeds {} ran on a slablet with uncommitted changes; rerun them'.format(bad))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('config')
@@ -235,6 +254,7 @@ def main():
     a = ap.parse_args()
     name = a.name or os.path.splitext(os.path.basename(a.config))[0]
     runs_dir = os.path.abspath(a.runs_dir)
+    check_slablet_committed(runs_dir, name, a.seeds, a.no_run)
     if not a.no_run:
         run_seeds(os.path.abspath(a.config), runs_dir, name, a.seeds, a.until, a.rerun)
     df, path = gate_table(runs_dir, name, a.seeds, a.until, a.period)
