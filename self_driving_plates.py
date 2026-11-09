@@ -3262,6 +3262,118 @@ def seed_hotspot_seamounts(hotspot_locs, prob=0.3, rng=None):
     return gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
 
 
+def _offset(lon, lat, normal_xyz, distance_deg):
+    """Points moved distance_deg along the great circle in the direction of the unit tangent
+    normal_xyz (N, 3); negative distances go the other way."""
+    p = lonlat_to_xyz(lon, lat)
+    d = np.radians(distance_deg)
+    return xyz_to_lonlat(p * np.cos(d) + normal_xyz * np.sin(d))
+
+
+def _azimuth_deg(lon, lat, tangent_xyz):
+    """Azimuth (clockwise from north) of unit tangent vectors (N, 3) at lon/lat."""
+    lo, la = np.radians(lon), np.radians(lat)
+    east = np.column_stack([-np.sin(lo), np.cos(lo), np.zeros_like(lo)])
+    north = np.column_stack([-np.sin(la) * np.cos(lo), -np.sin(la) * np.sin(lo), np.cos(la)])
+    return np.degrees(np.arctan2((tangent_xyz * east).sum(1), (tangent_xyz * north).sum(1))) % 360.0
+
+
+def plate_step(t, delta_time, plate_id_raster, stage_pole_dict, boundaries_gdf, params,
+               polarity_dict=None, craton_counts=None, craton_raster=None, age_grid=None,
+               trench_sample_deg=1.0, ridge_sample_deg=0.5, probe_deg=0.5, age_probe_km=100.0):
+    """This world's state at model time t as a slablet PlateStep (the plate-history contract in
+    slablet/plate_history.py), over the step [t, t + delta_time] that stage_pole_dict covers.
+
+    plate identity   the nearest cell of the plate-ID raster (it is this world's state, not a cache)
+    omega            each stage rotation's axis x angle / delta_time (rad/Myr), as plate_velocity_ne uses
+    trench samples   positions and convergence exactly as trench_samples makes them, plus polarity from
+                     resolve_downgoing_plate (as the boundary outputs record it): the down-dip azimuth
+                     points to the side, probe_deg along the boundary normal, whose cell is the
+                     overriding plate (NaN if neither or both are); the trench moves with the
+                     overriding plate; the subducting seafloor age is age_grid at age_probe_km on the
+                     downgoing side (NaN without age_grid)
+    ridge samples    every ridge_sample_deg along boundaries diverging faster than div_threshold_ridge
+    seafloor age     age_grid (the 1-degree physics grid, which is cell-centred), else NaN
+    continent        craton_raster > 0 (this world's continents); craton: the same, as this world has no
+                     separate craton (keel) polygons
+    trench lines     the 2-vertex arcs of the converging boundaries
+    """
+    from slablet import plate_history as PH
+    require_slablet('the plate-history contract (plate_step)')
+    R = PH.RADIUS_KM
+
+    def plate_id_at(lon, lat):
+        v = np.asarray(raster_lookup(plate_id_raster, np.asarray(lon, float), np.asarray(lat, float)), float)
+        return np.where(np.isfinite(v), v, 0).astype(int)
+
+    omega = {}
+    for pid, rot in stage_pole_dict.items():
+        if rot is None or rot.represents_identity_rotation():
+            omega[int(pid)] = np.zeros(3)
+        else:
+            pole, angle = rot.get_euler_pole_and_angle()
+            omega[int(pid)] = np.array(pole.to_xyz()) * angle / delta_time
+
+    def velocity_ne(pid, lon, lat):
+        om = np.array([omega.get(int(q), np.full(3, np.nan)) for q in pid]).reshape(-1, 3)
+        v = np.cross(om, lonlat_to_xyz(lon, lat)) * R
+        az_e = np.column_stack([-np.sin(np.radians(lon)), np.cos(np.radians(lon)), np.zeros(len(lon))])
+        az_n = np.column_stack([-np.sin(np.radians(lat)) * np.cos(np.radians(lon)),
+                                -np.sin(np.radians(lat)) * np.sin(np.radians(lon)), np.cos(np.radians(lat))])
+        return (v * az_e).sum(1), (v * az_n).sum(1)
+
+    trench = PH.empty_trench()
+    ridge = PH.empty_ridge()
+    lines = []
+    if boundaries_gdf is not None and len(boundaries_gdf) and 'divergence' in boundaries_gdf.columns:
+        div = boundaries_gdf['divergence'].values.astype(float)
+        sub = div < params['div_threshold_subduction']
+        lat_s, lon_s, row, normal = _points_every(boundaries_gdf, sub, trench_sample_deg)
+        if len(lat_s):
+            p1 = np.nan_to_num(boundaries_gdf['plateid1_poly1'].values.astype(float)[row]).astype(int)
+            p2 = np.nan_to_num(boundaries_gdf['plateid1_poly2'].values.astype(float)[row]).astype(int)
+            down = np.array([resolve_downgoing_plate(a, b, polarity_dict or {}, craton_counts)
+                             for a, b in zip(p1, p2)])
+            over = np.where(down == p1, p2, p1)
+            side_pid = [plate_id_at(*_offset(lon_s, lat_s, sg * normal, probe_deg)) for sg in (1.0, -1.0)]
+            plus, minus = side_pid[0] == over, side_pid[1] == over
+            toward = np.where(plus & ~minus, 1.0, np.where(minus & ~plus, -1.0, np.nan))
+            ok = np.isfinite(toward) & (over > 0)
+            azimuth = np.full(len(lat_s), np.nan)
+            azimuth[ok] = _azimuth_deg(lon_s[ok], lat_s[ok], toward[ok, None] * normal[ok])
+            te, tn = velocity_ne(over, lon_s, lat_s)
+            age = np.full(len(lat_s), np.nan)
+            if age_grid is not None and ok.any():
+                a_lon, a_lat = _offset(lon_s[ok], lat_s[ok], -toward[ok, None] * normal[ok], np.degrees(age_probe_km / R))
+                age[ok] = np.asarray(raster_lookup(age_grid, a_lon, a_lat), float)
+            trench = {'lon': lon_s, 'lat': lat_s, 'convergence_km_per_myr': np.abs(div[row]),
+                      'downdip_azimuth_deg': azimuth, 'trench_east_km_per_myr': np.where(over > 0, te, np.nan),
+                      'trench_north_km_per_myr': np.where(over > 0, tn, np.nan), 'seafloor_age_myr': age}
+        rid = div > params['div_threshold_ridge']
+        lat_r, lon_r, row_r, _ = _points_every(boundaries_gdf, rid, ridge_sample_deg)
+        if len(lat_r):
+            ridge = {'lon': lon_r, 'lat': lat_r, 'divergence_km_per_myr': div[row_r],
+                     'length_km': np.full(len(lat_r), np.radians(ridge_sample_deg) * R)}
+        lines = [np.asarray(g.coords)[:, :2] for g in boundaries_gdf.geometry.values[sub] if g is not None]
+
+    lons, lats = PH.cell_centred_grid(1.0)
+    if age_grid is not None:
+        seafloor_age = age_grid.rename({d: n for d, n in zip(age_grid.dims, ('lat', 'lon'))}).astype(float)
+    else:
+        seafloor_age = xr.DataArray(np.full((len(lats), len(lons)), np.nan), dims=('lat', 'lon'),
+                                    coords={'lat': lats, 'lon': lons})
+
+    def continent_at(lon, lat):
+        if craton_raster is None:
+            return np.zeros(np.shape(lon), bool)
+        v = np.asarray(raster_lookup(craton_raster, np.asarray(lon, float), np.asarray(lat, float)), float)
+        return np.nan_to_num(v) > 0
+
+    return PH.check(PH.PlateStep(time=float(t), delta_time=float(delta_time), plate_id_at=plate_id_at,
+                                 omega=omega, trench=trench, ridge=ridge, seafloor_age=seafloor_age,
+                                 continent_at=continent_at, craton_at=continent_at, trench_lines=lines))
+
+
 def craton_counts_from_raster(craton_raster):
     """Return {plate_id: pixel_count} from a craton xarray DataArray.  Only counts pixels > 0."""
     if craton_raster is None:
