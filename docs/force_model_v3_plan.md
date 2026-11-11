@@ -1,7 +1,9 @@
 # Force model v3 — plan: new trenches, and recycling old ocean
 
 Draft prepared with Claude Code, 2026-10-04. Status: **agreed scope** (decisions D1–D5 below);
-stages still start plain and are gated one at a time.
+stages still start plain and are gated one at a time. **Paused since 2026-10-05**, after S0 and
+the first step of S1 (below); the work moved to the mantle model (now slablet) and the
+cross-repo reconciliation. Where that stands: `~/GIT/slablet/docs/status.md`.
 
 ## Where v2 left the model
 
@@ -56,6 +58,11 @@ closes with one three-seed 1000-Myr check.
 **S0 done (2026-10-05):** `gate.py configs/current_model.yaml --name current_model` reran the
 three seeds to 500 Myr; `step_stats`, `plate_stats`, `rift_trials` and `welds` are identical to
 the reference runs. Figures and table in `show-me/2026-10-05-current_model/`.
+
+**S1 step 1 done (2026-10-05, `7a1cdb3`):** `subduction_init: log` tests passive margins the way
+rift cuts are tested and writes them to `init_trials.csv`, logging only; a 198-Myr check run is
+identical to the gate run. Gate run in `show-me/2026-10-05-s1_margin_log/`. Next in S1: the
+compression trial that decides which logged margins fail (D1), not built.
 
 **Then the teaching outputs (D4)**, each its own small stage:
 
