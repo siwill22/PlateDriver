@@ -896,14 +896,15 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
 
 - **Overlap priority**: until November 2026 (`overlap: plate_id`) the lower PLATEID kept the cells where moved plates overlap, so at many trenches the overriding plate was consumed instead of the downgoing one. `physical` now uses `overlap: polarity`, which reduces the largest plate but not the share of old ocean. `simple` keeps the original rule: with `polarity` its speeds ran away (`docs/public_release_plan.md`, stage A).
 - **`simple` is for runs of up to about 200 Myr.** It has no drag and no speed calibration, so its RMS speed starts at about 140 mm/yr and reaches 300–490 mm/yr, and the fastest plates swallow their neighbours. In 3 of 6 runs of 500 Myr (both `overlap` rules) the world ended as one plate, at 254–429 Myr; a run then stops at that step with a message.
-- **Plate counts depend on the time step and the plate grid.** The layout rules (rifting, merging,
-  neck splitting, rebuilding plates from the grid) were tuned at `delta_time: 1`,
-  `raster_spacing: 0.25` and `physics_grid_deg: 1`. In 300-Myr runs of the current model (November
-  2026), a 0.5-Myr step or a 0.5° plate grid left 24–27 plates at 300 Myr and twice as many
-  slivers, against 13–23 plates over eleven seeds at the defaults; the old ocean and the speeds
-  stayed within that spread. The force grid is converged at 1°: 0.5° changed nothing beyond the
-  spread, while 2° added plates and rifts. Keep the defaults unless the change is what is being
-  studied.
+- **Results depend on the time step and the plate grid.** The layout rules (rifting, merging,
+  neck splitting, rebuilding plates from the grid, settling overlaps) were tuned at
+  `delta_time: 1`, `raster_spacing: 0.25` and `physics_grid_deg: 1`. In runs of the current model
+  (November 2026, `show-me/2026-11-17-numerical_sensitivity/`), a 0.5- or 0.25-Myr step or a
+  0.125° plate grid left 10–11% of the ocean at 200 Myr as starting ocean that never subducted,
+  against 0.5–9.6% over eleven seeds at the defaults, so part of the defaults' consumption of old
+  ocean is numerical. A 0.5-Myr step or a 0.5° plate grid also left more plates by 300 Myr (24–27
+  against 13–23) and twice as many slivers. The force grid is converged at 1°: 0.5° changed
+  nothing beyond the spread of seeds. Keep the defaults unless the change is what is being studied.
 - **Boundaries snap to meridians and parallels** with `plate_rebuild: lonlat` (`simple`); see `plate_rebuild`.
 - **Ridge push points mostly exactly N–S or E–W** (`ridge_push: body`): the age grid is piecewise constant (nearest tracer) and its gradient is taken along lon and lat. The effect on plate motion is not measured.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.
