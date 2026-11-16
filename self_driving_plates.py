@@ -1288,6 +1288,21 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
     return new_stage_pole_dict, collision_pairs, torques, edge_tensors
 
 
+def _lstsq(M, rhs):
+    """Least-squares solution of M w = rhs by SVD (numpy). Some LAPACK builds fail to
+    converge on well-conditioned drag systems (OpenBLAS 0.3.34, conda-forge, Nov 2026: a
+    symmetric 60 x 60 system with condition number 1.5e4); those fall back to QR with
+    column pivoting (LAPACK gelsy), which agrees to rounding."""
+    try:
+        w = np.linalg.lstsq(M, rhs, rcond=1e-12)[0]
+        if np.all(np.isfinite(w)):
+            return w
+    except np.linalg.LinAlgError:
+        pass
+    import scipy.linalg
+    return scipy.linalg.lstsq(M, rhs, cond=1e-12, lapack_driver='gelsy')[0]
+
+
 def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, params,
                         drag_mode, speed_mode, speed_state, delta_time, contact_tensors=None):
     """Angular velocities from net torques with basal and boundary resistance, scaled to a
@@ -1370,7 +1385,7 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
                 M[ib:ib + 3, ib:ib + 3] += cG
                 M[ia:ia + 3, ib:ib + 3] -= cG
                 M[ib:ib + 3, ia:ia + 3] -= cG
-            w_all = np.linalg.lstsq(M, rhs, rcond=1e-12)[0]
+            w_all = _lstsq(M, rhs)
             omega = {pid: w_all[where[pid]:where[pid] + 3] for pid in order}
         else:
             for pid, t in torques.items():
@@ -1378,7 +1393,7 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
                 if not np.any(Dp):
                     omega[pid] = np.zeros(3)
                     continue
-                omega[pid] = np.linalg.lstsq(Dp, t, rcond=1e-12)[0]
+                omega[pid] = _lstsq(Dp, t)
 
     total_area = sum(area_of.get(pid, 0.0) for pid in omega)
     msq = sum(w @ J_of[pid] @ w for pid, w in omega.items() if pid in J_of)
