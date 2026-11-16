@@ -112,6 +112,18 @@ if modes['collision_contact'] == 'stiff' and not (modes['collision'] == 'viscous
                      'or breakoff with breakoff_contact: viscous')
 if modes['sutures'] == 'tracers' and modes['collision_weld'] != 'on':
     raise SystemExit('sutures: tracers are dropped at welds, so they need collision_weld: on')
+# Modes that act only through another one: allowed (a comparison may switch the other off), but said
+_inert = []
+if modes['rifting'] != 'trial':
+    if modes['rift_path'] != 'straight':
+        _inert.append('rift_path: {} acts only through rifting: trial'.format(modes['rift_path']))
+    if modes['continent_strength'] != 'uniform':
+        _inert.append('continent_strength: {} acts only through rifting: trial (its cores are still '
+                      'written)'.format(modes['continent_strength']))
+if modes['collision_weld'] != 'on' and modes['collision_weld_giver'] != 'smaller':
+    _inert.append('collision_weld_giver: {} acts only with collision_weld: on'.format(modes['collision_weld_giver']))
+for _why in _inert:
+    print('note: {}, so it has no effect in this run'.format(_why))
 _needs = sdp.force_fields_needed(params)     # per-step fields the force modes read
 
 
