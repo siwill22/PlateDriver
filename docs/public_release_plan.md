@@ -17,12 +17,24 @@ PlateDriver).
   that the overlap rule also causes the old ocean, is not supported, and v3's case stands.
 - **Defaults:** `physical` and `simple` still use `plate_id` until Simon decides (decision 1).
 
-**A3, running:** the current model with `overlap: polarity` and no neck splitting.
+**A2, done:** the `physical` preset now rebuilds plates in tiles, so the dateline seam is no longer a boundary
+(`c15aeb6`).
 
-**C, done:**
+**A3, done:**
+- **Gate:** `show-me/2026-11-16-no_neck_split/`.
+- **How often:** neck splitting fires rarely, 4–9 times per 500 Myr.
+- **Without it:** the largest plate stays larger for longer in two of three seeds, peaking at 36–38 % against
+  32–34 %. Plate counts and old ocean are alike.
+- **Decision:** the rift test does not replace neck splitting, so it stays on, as a shape rule.
+
+**Defaults after A:** `overlap` waits on decision 1. Every other default is as the plan says.
+
+**C, done (C1–C3; C4, pruning, waits on decision 5):**
 - rotation files count time back from the saved step (`42a14ed`);
 - the README states the purpose, which plate-map changes are force-driven and which are rules, and how Earth values
-  are used (`ad800a0`).
+  are used (`ad800a0`);
+- the names users see say "continents", not "cratons", and old names are still read (`407a908`);
+- the v1 plan's claim about flat geometry is corrected (`c31d640`).
 
 **B3, done:** smoke tests and a test of the drag tensor on a spherical cap (`2b412ba`, `0bfb67a`).
 
