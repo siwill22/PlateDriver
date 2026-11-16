@@ -337,13 +337,13 @@ listed is `simple`'s):
     the plate's edge. The cut is the stretch's best-fit great circle across the whole plate,
     and the traction across it is worked out as in the rift test (negative: compression).
 - **`overlap`** (not a force; which plate keeps the cells where moved plates overlap):
-  - `plate_id` (both presets): the lower plate ID, whatever the polarity. Where the
-    downgoing plate has the lower ID, it keeps the overlap, the trench moves with it, and the
-    overriding plate's edge is consumed instead. In the three current-model gate runs this
+  - `plate_id` (both presets before November 2026): the lower plate ID, whatever the polarity.
+    Where the downgoing plate has the lower ID, it keeps the overlap, the trench moves with it,
+    and the overriding plate's edge is consumed instead. In the three current-model gate runs this
     held for 32–41% of the subduction flux at trenches away from continents, rising to 62% by
     500 Myr, and the lowest-ID plate (111) became the largest plate in every seed
     (`docs/public_release_plan.md`).
-  - `polarity`: each overlapping cell goes to the overriding plate of the two plates that
+  - `polarity` (both presets): each overlapping cell goes to the overriding plate of the two plates that
     overlap there (drawing the plates in both ID orders shows which two), so at a trench the
     overriding plate keeps the overlap; a pair with no polarity yet leaves it to the lower ID.
     `step_stats.csv` records the overlapping area (`overlap_area_frac`) and the share of it
@@ -898,7 +898,7 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
 
 ## Known issues and TODO
 
-- **Overlap priority**: with `overlap: plate_id` (both presets), where moved plates overlap the lower PLATEID wins, so at many trenches the overriding plate is consumed instead of the downgoing one. `overlap: polarity` lets the overriding plate win; it is on trial (`docs/public_release_plan.md`, stage A).
+- **Overlap priority**: until November 2026 (`overlap: plate_id`) the lower PLATEID kept the cells where moved plates overlap, so at many trenches the overriding plate was consumed instead of the downgoing one. Both presets now use `overlap: polarity`; the change reduces the largest plate but not the share of old ocean (`docs/public_release_plan.md`, stage A).
 - **Boundaries snap to meridians and parallels** with `plate_rebuild: lonlat` (`simple`); see `plate_rebuild`.
 - **Ridge push points mostly exactly N–S or E–W** (`ridge_push: body`): the age grid is piecewise constant (nearest tracer) and its gradient is taken along lon and lat. The effect on plate motion is not measured.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.
