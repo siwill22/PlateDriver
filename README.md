@@ -4,7 +4,7 @@
 
 The core approach — computing forces on plate boundaries and integrating them forward to derive stage rotations — is inspired by the [Tectonic Explorer](https://github.com/concord-consortium/tectonic-explorer) project by the Concord Consortium. PlateDriver extends that idea into a full simulation pipeline built on [GPlates](https://www.gplates.org) / pygplates, with raster-based plate tracking, tracer advection, mantle structure synthesis, and output compatible with GPlates workflows.
 
-PlateDriver was written for teaching. It makes the synthetic datasets of Earth-like planets used in the Southern Ocean Marine Geosciences course at OUC Qingdao, and it shows how the forces on plates shape their motions. Teaching remains its purpose, so it is kept simple, cheap to run (about 3 s per 1-Myr step) and readable. Its synthetic plate histories also serve research, through [slablet](https://github.com/siwill22/slablet), which models the mantle and the asthenosphere beneath any plate history, synthetic or reconstructed. Where the work is going is in `docs/public_release_plan.md`.
+PlateDriver was written for teaching. It makes the synthetic datasets of Earth-like planets used in the Southern Ocean Marine Geosciences course at OUC Qingdao, and it shows how the forces on plates shape their motions. Teaching remains its purpose, so it is kept simple, cheap to run (about 3 s per 1-Myr step) and readable. Its synthetic plate histories also serve research, through [slablet](https://github.com/siwill22/slablet), which models the mantle and the asthenosphere beneath any plate history, synthetic or reconstructed. Where the work is going is in `docs/public_release_plan.md`; the tests behind the README's statements are recorded in `docs/evidence.md`.
 
 ## What this is
 
@@ -248,7 +248,7 @@ listed is `simple`'s):
     and simplify it (`topo_simplify_tolerance`, degrees). Repeated every step, this snaps
     boundaries that run close to a meridian or parallel onto it exactly: in 500-Myr
     `physical` runs about 7× more boundary length lies within 1° of N–S or E–W than for
-    random orientations (see `show-me/2026-09-28-boundary-orientation/`).
+    random orientations (`docs/evidence.md`, E1).
   - `midpoint` (`physical`): before simplifying, every staircase vertex is moved to the midpoint
     of its edge. The midpoints of successive steps lie along a boundary's true direction, so
     nothing snaps, and it costs the same as `lonlat`.
@@ -258,7 +258,7 @@ listed is `simple`'s):
     get their plate ID back. A plate that touches both edges of the lon/lat map and a pole (one
     reaching from pole to pole) is otherwise turned inside out by the dateline wrap: it is
     replaced by its complement and its cells go to its neighbours, with no error
-    (`show-me/2026-10-01-giant-plate-breakup/`). The pieces' shared edges are not plate
+    (`docs/evidence.md`, E2). The pieces' shared edges are not plate
     boundaries, and they are left out of the force sum, so they carry no edge drag. The same
     applies to the dateline seam inside a plate that crosses it; with `off` that seam (about
     17% of all polygon outline length at 240 Myr in one run) is counted in the edge drag.
@@ -277,7 +277,7 @@ listed is `simple`'s):
     candidate that is under tension. It runs on the 1° grid, with cost = great-circle length ×
     strength, and the test is rerun on the path. It adds about 0.5 s per step. On atlantis66 it
     gives 1.7× as many rifts, mostly along young ocean, and continents break up less (see
-    `show-me/2026-09-29-r4-least-cost-path/`).
+    `docs/evidence.md`, E4).
 - **`continent_strength`** (how strong continents are for the rift test):
   - `uniform`: σc everywhere on continent.
   - `cores`: at step 0, random terranes `core_spacing_km` apart are generated in every
@@ -579,7 +579,7 @@ params:
 ```
 
 **How σc behaves** (500-Myr `physical` runs on atlantis66, one run each; see
-`show-me/2026-09-28-r2-trial-split/`):
+`docs/evidence.md`, E3):
 
 | σc | rifts | result |
 |---|---|---|
@@ -627,7 +627,7 @@ conda run -n pygmt17 python gate.py configs/current_model.yaml --name current_mo
   rifts, continental rifts, welds, accretions, hidden continent, trench and ridge length, step
   time, and the ocean-age distribution at the period's end (median; shares older than 100, 150
   and 200 Myr; oldest; the share left from t = 0).
-- `show-me/<date>-<name>/`: `diagnose_run.py`'s map sequence (one column per seed), time series
+- `show-me/<date>-<name>/` (local, ignored by git): `diagnose_run.py`'s map sequence (one column per seed), time series
   and Forsyth–Uyeda plots, the table and a README.
 - `--export` adds the runs to the viewer (`--replace-viewer` removes every other run first).
 
@@ -906,7 +906,7 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
 - **Results depend on the time step and the plate grid.** The layout rules (rifting, merging,
   neck splitting, rebuilding plates from the grid, settling overlaps) were tuned at
   `delta_time: 1`, `raster_spacing: 0.25` and `physics_grid_deg: 1`. In runs of the current model
-  (November 2026, `show-me/2026-11-17-numerical_sensitivity/`), a 0.5- or 0.25-Myr step left about
+  (November 2026, `docs/evidence.md`, E5), a 0.5- or 0.25-Myr step left about
   11% of the ocean at 200 Myr as starting ocean that never subducted, against 4.9% (0.5–9.6%, eleven
   seeds) at the default 1 Myr and 3% at 2 Myr. The trenches consume the right area at every step
   (98–99% of convergence × length); what changes is which ocean they consume. A 0.125° or a 0.5°

@@ -1,5 +1,8 @@
 # Force model v3 — plan: new trenches, and recycling old ocean
 
+`show-me/` and `runs/` paths in this document are local working folders and are not in the repository; the
+results they held are stated in the text here, and those behind README statements in `docs/evidence.md`.
+
 Draft prepared with Claude Code, 2026-10-04. Status: **agreed scope** (decisions D1–D5 below);
 stages still start plain and are gated one at a time. **Paused since 2026-10-05**, after S0 and
 the first step of S1 (below); the work moved to the mantle model (now slablet) and the

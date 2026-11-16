@@ -1,5 +1,8 @@
 # Public release plan: triage of the framing problems
 
+`show-me/` and `runs/` paths in this document are local working folders and are not in the repository; the
+results they held are stated in the text here, and those behind README statements in `docs/evidence.md`.
+
 Draft prepared with Claude Code, 2026-11-16. Status: **in progress** (below). Revised the same day: slablet can be
 made public too (Simon). That replaces decision 8 of the cross-repo register (slablet private, and optional in
 PlateDriver).
@@ -92,9 +95,6 @@ paths are relative to the PlateDriver folder.
   (`741e72b`), and the least-cost rift cut now scales with the force grid (`a815951`).
 
 **Still open:**
-- **`show-me/` references.** The README cites six `show-me/` folders as evidence, and `show-me/` is not in the
-  repository. Before the release, either publish the folders it cites (for example under `docs/results/`) or drop
-  the references.
 - **B1:** PlateDriver requires a tagged slablet, once slablet is public.
 - **Release:** tag slablet; merge `mantle-extract` into PlateDriver's `master`; rename the GitHub repository. Each
   outward step waits for Simon.
@@ -405,6 +405,9 @@ subduction initiation is no longer the priority; otherwise v3 resumes at S1.
     `config.yaml`); F3 fixes it after the release (Simon, 17 Nov).
 11. **slablet's seafloor cache:** each tracking start has its own seafloor and lithosphere caches (slablet
     `310e58d`, Simon, 17 Nov); the existing caches were renamed to their starts.
+12. **Evidence for README statements:** the README no longer cites `show-me/` folders; the five tests it relied
+    on are written out as text in `docs/evidence.md` (E1–E5), for LLM readers more than human ones, and the plans
+    say their `show-me/` paths are local (Simon, 17 Nov).
 
 ## Budgets
 

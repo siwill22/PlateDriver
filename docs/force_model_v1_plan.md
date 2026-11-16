@@ -1,5 +1,8 @@
 # Force model v1 — plan
 
+`show-me/` and `runs/` paths in this document are local working folders and are not in the repository; the
+results they held are stated in the text here, and those behind README statements in `docs/evidence.md`.
+
 Draft prepared with Claude Code. Decisions come from a design interview (Q1–Q18); the
 question number is given in brackets.
 
