@@ -1,6 +1,6 @@
 """Smoke tests: 20 steps of each preset from config.yaml's starting map run to the end and
 write their outputs. Skipped where the starting map's files are missing; the physical preset
-is skipped without slablet. About 2 min in all."""
+is skipped without slablet, and simple then runs without the mantle outputs. About 2 min in all."""
 import os
 import subprocess
 import sys
@@ -22,6 +22,10 @@ def _config(tmp_path, preset):
     if missing:
         pytest.skip('starting map not found: {}'.format(', '.join(missing)))
     cfg['force_model'] = preset
+    try:
+        import slablet  # noqa: F401
+    except ImportError:
+        cfg['params']['slab_tracers_enabled'] = False    # simple runs without the mantle model
     cfg['output_dir'] = str(tmp_path / preset)
     cfg['run']['total_time'] = float(STEPS)
     cfg['params']['plot_interval'] = None
