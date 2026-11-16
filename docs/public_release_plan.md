@@ -94,8 +94,17 @@ paths are relative to the PlateDriver folder.
   default (0.25 deg) also leaves less than 0.125 or 0.5 deg. Two gate-tool faults with time steps other than 1 Myr are fixed
   (`741e72b`), and the least-cost rift cut now scales with the force grid (`a815951`).
 
+**B1, done locally (2026-11-17, `732eef8`):** slablet is required, installed from GitHub at `v0.1.0`; the optional
+imports and the copied sphere helpers are gone (slablet's `spherical_kernel` is public, `1bd1373`). A 30-step
+current-model run is bit-identical before and after. slablet is tagged `v0.1.0` locally (not pushed).
+
+**Release checks (2026-11-17):** slablet's full history (748 kB, one author email, no file over 1 MB) and the 53
+unpublished PlateDriver commits hold no credentials, keys or large files. In a fresh environment from
+`environment.yml` (numpy 2.5, pandas 3.1, pygplates 1.0) with slablet installed from the tag, clean clones pass
+PlateDriver's tests (18) and slablet's (152). Six notebooks in `archived/` still have absolute paths (B2); they have
+been public on `master` all along.
+
 **Still open:**
-- **B1:** PlateDriver requires a tagged slablet, once slablet is public.
 - **Release:** tag slablet; merge `mantle-extract` into PlateDriver's `master`; rename the GitHub repository. Each
   outward step waits for Simon.
 
