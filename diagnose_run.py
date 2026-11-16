@@ -247,7 +247,9 @@ def sequence(paths, runs, labels, out, seq_steps, ncols=3):
     with pygmt.config(FONT_TITLE='10p', FONT_HEADING='14p', MAP_HEADING_OFFSET='1.2c'):
         with fig.subplot(nrows=nrows, ncols=cols, figsize=('{}c'.format(width), '{}c'.format(5.3 * nrows)),
                          margins=['0.15c', '0.35c'],
-                         title='Plate configuration through time: ' + ' | '.join(labels)):
+                         # more than three runs: each panel title names its run, and a long heading
+                         # would run over the first row's titles
+                         title=None if n_runs > 3 else 'Plate configuration through time: ' + ' | '.join(labels)):
             for panel, step, run in cells:
                 path, (steps, plates) = paths[run], runs[run]
                 t = steps.loc[steps.step == step, 'time_myr']
