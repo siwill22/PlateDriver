@@ -77,7 +77,11 @@ paths are relative to the PlateDriver folder.
 - **1000 Myr** (`show-me/2026-11-17-long_current/`): the current model on four seeds to its full length. All finish,
   and the first 500 Myr of seeds 0-2 are bit-identical to the earlier runs. But in three of four seeds the
   continents shatter from about 400 Myr (35-51 plates over 750-1000 Myr, 13-23 of them slivers): merging holds
-  the small-plate rifting for 500 Myr, not for 1000. This belongs with v3's questions about plate size.
+  the small-plate rifting for 500 Myr, not for 1000. The plain `physical` preset (`config.yaml` as shipped, 1000 Myr)
+  shatters too. `min_child_area_deg2: 400` holds the plate count but cuts rifting throughout, so a giant plate
+  (37-48%) and old ocean return; `merge_max_area_frac: 0.05` does not hold it. This belongs with v3's questions
+  about plate size. Over 1000 Myr the invariants still hold, but continent area falls 2-5% (hidden continent lost)
+  and seafloor ages agree with the same crust 100 Myr earlier for only 73-84% of cells, against 95% early on.
 - **Numerical sensitivity** (`show-me/2026-11-17-numerical_sensitivity/`): the force grid is converged at 1 deg. The time
   step is not: at 0.5 or 0.25 Myr about twice as much starting ocean survives to 200 Myr as at 1 Myr (11% against
   5%). The trenches consume the right area at every step; which ocean they consume changes. So the share of old
