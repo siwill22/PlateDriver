@@ -1,8 +1,39 @@
 # Public release plan: triage of the framing problems
 
-Draft prepared with Claude Code, 2026-11-16. Status: **proposed**, nothing started. Revised the same day: slablet
-can be made public too (Simon). That replaces decision 8 of the cross-repo register (slablet private, and optional in
+Draft prepared with Claude Code, 2026-11-16. Status: **in progress** (below). Revised the same day: slablet can be
+made public too (Simon). That replaces decision 8 of the cross-repo register (slablet private, and optional in
 PlateDriver).
+
+## Progress
+
+**A1, done (2026-11-16):**
+- **Code:** `overlap: plate_id | polarity` (`f114119`, `0bfb67a`). The first version used one drawing order and
+  failed on real cycles of polarity (777 beneath 666 beneath 555 beneath 777). The version kept settles each overlap
+  by its own pair.
+- **Gate:** `show-me/2026-11-16-overlap_polarity/`. Today's code with `plate_id` reproduces the 5 Oct runs bit for
+  bit.
+- **Largest plate:** with `polarity` it peaks at 32–34 % against 35–37 %, and breaks up sooner.
+- **Old ocean:** not reduced. Ocean older than 200 Myr is 9–21 % at 500 Myr, against 9–30 %. So the guess below,
+  that the overlap rule also causes the old ocean, is not supported, and v3's case stands.
+- **Defaults:** `physical` and `simple` still use `plate_id` until Simon decides (decision 1).
+
+**A3, running:** the current model with `overlap: polarity` and no neck splitting.
+
+**C, done:**
+- rotation files count time back from the saved step (`42a14ed`);
+- the README states the purpose, which plate-map changes are force-driven and which are rules, and how Earth values
+  are used (`ad800a0`).
+
+**B3, done:** smoke tests and a test of the drag tensor on a spherical cap (`2b412ba`, `0bfb67a`).
+
+**S, partly done:**
+- **Done:** slablet has an MIT licence (`16dcc83`), and its contract test passes on a fresh clone (`2ce084f`).
+  From a clean clone with no local data, 148 tests pass and 2 are skipped.
+
+**Waiting on Simon:**
+- **B2:** whether the Atlantis starting map may be published. It is untracked in octopus, so it is not public now.
+- **S1 and S3:** what to do with the other session's uncommitted S40RTS stage-0 work in slablet. Most configs are
+  among those 33 files.
 
 ## Why
 
@@ -51,7 +82,7 @@ Plate 111, the lowest ID, shows the consequence.
 This is a plausible cause of the two symptoms that motivated force model v3: a giant ocean plate (37–49 % at
 1000 Myr) and much ocean older than 200 Myr. Those may come from this rule rather than from the lack of subduction
 initiation. The scripts for these numbers are not in the repository yet; stage A puts the measure into the gate
-table.
+table. (The A1 gate supports this for the giant plate but not for the old ocean; see Progress.)
 
 ### Other measurements
 
