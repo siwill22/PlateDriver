@@ -176,7 +176,11 @@ def draw_map_panel(fig, path, steps, plates, step, title, arrow_spacing=6.0,
     age_file = os.path.join(path, 'seafloor_age_{:04d}.nc'.format(step))
     if os.path.exists(age_file):
         pygmt.makecpt(cmap='batlow', series=[0, 150], reverse=True)
-        fig.grdimage(age_file, cmap=True, nan_transparent=True)
+        # the grid, not its path: GMT reads '=' or '+' in a file name as format flags (pygmt
+        # passes the path of a grid opened from a file unless its encoding is cleared)
+        age = xr.open_dataarray(age_file).load()
+        age.encoding = {}
+        fig.grdimage(age, cmap=True, nan_transparent=True)
     pid_file = os.path.join(path, 'plate_id_{:04d}.nc'.format(step))
     plate_id = xr.open_dataarray(pid_file) if os.path.exists(pid_file) else None
     bfile = os.path.join(path, 'boundaries_{:04d}.geojson'.format(step))
