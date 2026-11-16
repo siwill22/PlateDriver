@@ -31,7 +31,7 @@ The gate stops if slablet has uncommitted changes (before running), or if any se
 records such a slablet (with --no-run): a gate result must be reproducible from commits.
 
 Everything is from the run's own outputs (step_stats.csv, plate_stats.csv, rift_events.csv,
-welds.csv, seafloor_age_NNNN.nc, craton_NNNN.nc); ocean areas are cos(lat)-weighted.
+welds.csv, seafloor_age_NNNN.nc, continent_NNNN.nc or, before Nov 2026, craton_NNNN.nc); ocean areas are cos(lat)-weighted.
 """
 import argparse
 import datetime
@@ -95,11 +95,13 @@ def run_seeds(cfg_path, runs_dir, name, seeds, until, rerun):
 
 def ocean_age(d, step, t):
     """Ocean-age measures at a saved step at model time t (None if the grids are missing)."""
-    fa, fc = os.path.join(d, 'seafloor_age_%04d.nc' % step), os.path.join(d, 'craton_%04d.nc' % step)
-    if not (os.path.exists(fa) and os.path.exists(fc)):
+    fa = os.path.join(d, 'seafloor_age_%04d.nc' % step)
+    fc = [os.path.join(d, '%s_%04d.nc' % (n, step)) for n in ('continent', 'craton')]
+    fc = [(f, n) for f, n in zip(fc, ('continent', 'craton')) if os.path.exists(f)]
+    if not (os.path.exists(fa) and fc):
         return None
     a = xr.open_dataset(fa).z.values.astype(float)
-    c = np.nan_to_num(xr.open_dataset(fc).craton.values.astype(float)) > 0
+    c = np.nan_to_num(xr.open_dataset(fc[0][0])[fc[0][1]].values.astype(float)) > 0
     lat = np.linspace(-90, 90, a.shape[0])
     w = np.cos(np.radians(lat))[:, None] * np.ones(a.shape)
     oc = ~c & np.isfinite(a)

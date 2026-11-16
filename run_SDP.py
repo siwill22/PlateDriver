@@ -42,6 +42,16 @@ run_cfg     = cfg['run']
 forces      = cfg['forces']
 params      = cfg['params']
 
+# Names used before November 2026 are still read: input_files.cratons held all continental
+# lithosphere, not only cratons, and params.craton_core_* set the strong continental cores.
+if 'continents' not in files and 'cratons' in files:
+    files['continents'] = files.pop('cratons')
+    print('note: input_files.cratons is now called input_files.continents')
+for _old, _new in sdp.RENAMED_PARAMS.items():
+    if _old in params and _new not in params:
+        params[_new] = params.pop(_old)
+        print('note: params.{} is now called params.{}'.format(_old, _new))
+
 reconstruction_time = run_cfg['reconstruction_time']
 delta_time          = run_cfg['delta_time']
 total_time          = run_cfg['total_time']
@@ -144,7 +154,7 @@ for _f in (_step_stats_csv, _plate_stats_csv, _out('rift_trials.csv'), _out('ini
 rng = np.random.default_rng(params.get('random_seed'))
 topo_noise_seed = int(rng.integers(2**31 - 1))   # same noise pattern for every saved frame
 
-_missing = [f for f in [files['rotation_model'], files['cratons'], *files['dynamic_polygons']]
+_missing = [f for f in [files['rotation_model'], files['continents'], *files['dynamic_polygons']]
             if not os.path.exists(f)]
 if _missing:
     raise SystemExit('Input file(s) listed in {} not found:\n  {}'.format(
@@ -159,7 +169,7 @@ reconstruction_model = ReconstructionModel('')
 reconstruction_model.add_rotation_model(files['rotation_model'])
 for poly_file in files['dynamic_polygons']:
     reconstruction_model.add_dynamic_polygons(poly_file)
-cratons = pygplates.FeatureCollection(files['cratons'])
+cratons = pygplates.FeatureCollection(files['continents'])
 if reconstruction_time != 0:
     # Cratons are stored at present-day positions; move them to the starting snapshot
     _rotation_model = pygplates.RotationModel(files['rotation_model'])
@@ -261,13 +271,13 @@ force_diag = {}
 # changes.
 _cores = None
 if params['continent_strength_mode'] in ('cores', 'cores_random'):
-    _cores = sdp.generate_craton_cores(rasters['craton'], params.get('craton_core_spacing_km', 2500.0),
-                                       params.get('craton_belt_width_km', 400.0),
-                                       seed=params.get('random_seed') if params.get('craton_core_seed') is None
-                                       else params['craton_core_seed'],
+    _cores = sdp.generate_craton_cores(rasters['craton'], params.get('core_spacing_km', 2500.0),
+                                       params.get('belt_width_km', 400.0),
+                                       seed=params.get('random_seed') if params.get('core_seed') is None
+                                       else params['core_seed'],
                                        spread=params.get('strength_spread', 0.5)
                                        if params['continent_strength_mode'] == 'cores_random' else None,
-                                       core_factor=params.get('craton_core_factor', 3.0),
+                                       core_factor=params.get('core_factor', 3.0),
                                        belt_factor=params.get('belt_strength_factor', 0.5))
     print('  [cores] {} terranes; belts {:.0%} of continental points'.format(
         _cores['terrane'].nunique(), _cores['belt'].mean()))
@@ -351,7 +361,7 @@ def _do_plot(i, active_tracers, new_plate_polygons, boundaries_gdf,
     fig.savefig(os.path.join(output_dir, 'plot_{:04d}.png'.format(i)))
 
 
-ID_GRIDS = {'plate_id', 'craton'}     # grids of whole-number plate IDs
+ID_GRIDS = {'plate_id', 'craton', 'continent'}     # grids of whole-number plate IDs
 
 
 def _save_grid(obj, path, params):
@@ -418,7 +428,8 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
     _try('divergence', lambda: _save_grid(rasters['divergence'], _out('divergence_{:04d}.nc'), params))
     _try('plate_id', lambda: _save_grid(rasters['plate_id'], _out('plate_id_{:04d}.nc'), params))
     if 'craton' in rasters:
-        _try('craton', lambda: _save_grid(rasters['craton'], _out('craton_{:04d}.nc'), params))
+        _try('continent', lambda: _save_grid(rasters['craton'].rename('continent'), _out('continent_{:04d}.nc'),
+                                             params))
 
     craton_counts = sdp.craton_counts_from_raster(
         rasters['craton'] if 'craton' in rasters else None)
@@ -588,7 +599,7 @@ def _enqueue_outputs(i, force_save=False):
         if params['sutures_mode'] == 'tracers':
             _sutures.to_csv(_out('sutures_{:04d}.csv'.format(i)), index=False)
         if _cores is not None:
-            _cores.to_csv(_out('craton_cores_{:04d}.csv'.format(i)), index=False, float_format='%.3f')
+            _cores.to_csv(_out('cores_{:04d}.csv'.format(i)), index=False, float_format='%.3f')
         return True
     return False
 

@@ -43,7 +43,7 @@ forces:
   slab_suction: 6
   slab_suction_deep: 3
 input_files:
-  cratons: /Users/simon/GIT/octopus/Atlantis3/atlantis66_cratons.geojson
+  continents: /Users/simon/GIT/octopus/Atlantis3/atlantis66_cratons.geojson
   dynamic_polygons:
   - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topologies.gpml
   - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topological_polygons.gpml
@@ -65,10 +65,10 @@ params:
   collision_coupling_timescale: 30
   collision_drag_factor: 10
   continent_drag_factor: 3.0
-  craton_belt_width_km: 400
-  craton_core_factor: 3
-  craton_core_seed: null
-  craton_core_spacing_km: 2500
+  belt_width_km: 400
+  core_factor: 3
+  core_seed: null
+  core_spacing_km: 2500
   csv_save_interval: 10
   div_threshold_ridge: 0.2
   div_threshold_subduction: -0.0001

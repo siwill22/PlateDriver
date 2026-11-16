@@ -203,7 +203,7 @@ def velocities_en(lon, lat, plate_id, rows):
 CONTINENT_CLASSES = [
     {'value': 0, 'name': 'ocean'},
     {'value': 1, 'name': 'continent'},
-    {'value': 2, 'name': 'craton core'},
+    {'value': 2, 'name': 'strong core'},
     {'value': 3, 'name': 'belt'},
 ]
 
@@ -347,11 +347,10 @@ def main():
         with open(os.path.join(out, 'plates', tag + '.json'), 'w') as f:
             json.dump({'step': step, 'time': t, 'plates': plates}, f, separators=(',', ':'))
 
-        cfile = os.path.join(run_dir, 'craton_{}.nc'.format(tag))
-        if os.path.exists(cfile):
-            craton = xr.open_dataset(cfile).craton
-            core_file = os.path.join(run_dir, 'craton_cores_{}.csv'.format(tag))
-            cores = pd.read_csv(core_file) if os.path.exists(core_file) else None
+        craton = sdp.continent_grid(run_dir, tag)
+        if craton is not None:
+            core_file = sdp.cores_file(run_dir, tag)
+            cores = pd.read_csv(core_file) if core_file else None
             has_cores = has_cores or cores is not None
             cls = continent_classes(craton, cores, glons, glats)
             cls.tofile(os.path.join(out, 'grids', 'continents', tag + '.bin'))

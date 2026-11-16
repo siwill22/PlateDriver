@@ -1,3 +1,4 @@
+import os
 import time
 import zlib
 
@@ -2485,7 +2486,8 @@ def _continent_factor(cores, xyz, params, tree=None):
     if 'factor' in cores.columns:                  # continent_strength: cores_random
         return cores['factor'].values.astype(float)[near]
     belt = cores['belt'].values.astype(bool)[near]
-    return np.where(belt, params.get('belt_strength_factor', 0.5), params.get('craton_core_factor', 3.0))
+    return np.where(belt, params.get('belt_strength_factor', 0.5),
+                    params.get('core_factor', params.get('craton_core_factor', 3.0)))
 
 
 def suture_points(samples, suture_id, time_myr):
@@ -3926,6 +3928,32 @@ def generate_topo_bathy_grid(seafloor_age_grid, topography_raster=None,
                         dims=seafloor_age_grid.dims,
                         coords=seafloor_age_grid.coords,
                         attrs={'units': 'meters', 'long_name': 'topography-bathymetry'})
+
+
+# Names used before November 2026 and their replacements. "Craton" meant all continental
+# lithosphere in the input, and the strong cores of continent_strength: cores in the params.
+RENAMED_PARAMS = {'craton_core_spacing_km': 'core_spacing_km', 'craton_belt_width_km': 'belt_width_km',
+                  'craton_core_factor': 'core_factor', 'craton_core_seed': 'core_seed'}
+
+
+def continent_grid(run_dir, tag):
+    """A run's saved continent mask for one step (DataArray, > 0 on continent), or None:
+    continent_<tag>.nc, or craton_<tag>.nc from runs made before November 2026."""
+    for name in ('continent', 'craton'):
+        path = os.path.join(run_dir, '{}_{}.nc'.format(name, tag))
+        if os.path.exists(path):
+            return xr.open_dataset(path)[name]
+    return None
+
+
+def cores_file(run_dir, tag):
+    """A run's strong-core points for one step (cores_<tag>.csv, or craton_cores_<tag>.csv
+    from runs made before November 2026), or None."""
+    for name in ('cores', 'craton_cores'):
+        path = os.path.join(run_dir, '{}_{}.csv'.format(name, tag))
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def write_rotation_file(rotation_records, path, fixed_plate_id=0, present_time=None):

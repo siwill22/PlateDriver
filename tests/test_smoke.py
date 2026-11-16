@@ -17,7 +17,7 @@ def _config(tmp_path, preset):
     with open(os.path.join(REPO, 'config.yaml')) as fh:
         cfg = yaml.safe_load(fh)
     files = cfg['input_files']
-    needed = [files['rotation_model'], files['cratons'], *files['dynamic_polygons']]
+    needed = [files['rotation_model'], files.get('continents', files.get('cratons')), *files['dynamic_polygons']]
     missing = [f for f in needed if not os.path.exists(os.path.join(REPO, os.path.expanduser(f)))]
     if missing:
         pytest.skip('starting map not found: {}'.format(', '.join(missing)))

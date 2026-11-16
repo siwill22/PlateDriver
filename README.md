@@ -51,7 +51,7 @@ Input files are in GPlates format, specified in `config.yaml`:
 |---|---|
 | `rotation_model` | Rotation model for the initial plate snapshot (`.rot`) |
 | `dynamic_polygons` | Topological plate polygon files (`.gpml`), one or more |
-| `cratons` | Craton (continental block) polygons (`.geojson`), used for collision detection and subduction polarity |
+| `continents` | Continent polygons (`.geojson`): all continental lithosphere, not only cratons. They set collisions, subduction polarity, basal drag and rift strength. The old key `cratons` is still read |
 
 ## How to run
 
@@ -86,21 +86,21 @@ Python ≥ 3.10 with pygplates (≥ 0.36; developed with 1.0), [gprm](https://gi
 
 - **Velocities and boundary divergence** are in **km/Myr**, which is numerically the same as **mm/yr** (1 cm/yr = 10 km/Myr).
 - **Time**: step `i` is the state `t = i × delta_time` Myr after the starting snapshot. Step 0 is the starting configuration itself and is saved and plotted like any other step. The final step is always saved.
-- **Each step** moves the plates, cratons, seafloor tracers and seamounts together, using the stage rotations computed at the previous step. It then rebuilds the plate configuration and computes the stage rotations for the next move.
+- **Each step** moves the plates, continents, seafloor tracers and seamounts together, using the stage rotations computed at the previous step. It then rebuilds the plate configuration and computes the stage rotations for the next move.
 
 ## Outputs
 
 All outputs go to the directory specified by `output_dir` in `config.yaml`.
 
 Grids (`*.nc`) are written as NetCDF-4 with `grid_output: compact` (the default): floats as
-float32, the plate-ID grids (`plate_id`, `craton`) as int32 with −1 for no data, all
+float32, the plate-ID grids (`plate_id`, `continent`) as int32 with −1 for no data, all
 zlib-compressed. That is about 5× smaller than `grid_output: full` (float64, uncompressed,
 the format before October 2026); xarray, GMT and PyGMT read both. The model never reads its
 grids back, so the format does not change a run.
 
 | File pattern | Interval | Contents |
 |---|---|---|
-| `plot_NNNN.png` | Every `plot_interval` steps | Map: plate polygons, boundary types, velocity vectors, cratons, seafloor tracers coloured by age, seamounts (red triangles) |
+| `plot_NNNN.png` | Every `plot_interval` steps | Map: plate polygons, boundary types, velocity vectors, continents, seafloor tracers coloured by age, seamounts (red triangles) |
 | `tracers_NNNN.csv` | Every `csv_save_interval` steps | Active seafloor tracer lon/lat/age |
 | `boundaries_NNNN.geojson` | Every `csv_save_interval` steps | Boundary arc segments with divergence (km/Myr = mm/yr), boundary type, plate IDs, and downgoing/overriding plates for subduction zones |
 | `earthquakes_NNNN.geojson` | Every `csv_save_interval` steps | Synthetic earthquake locations with depth, boundary type, plate IDs |
@@ -110,7 +110,7 @@ grids back, so the format does not change a run.
 | `topo_bathy_NNNN.nc` | Every `csv_save_interval` steps | Combined topography-bathymetry (m); GDH1 ocean depths merged with continental topography |
 | `mantle_temp_NNNN.nc` | Every `csv_save_interval` steps | 3D dVs/Vs anomaly field (depth × lat × lon); positive = cold fast slab, negative = warm slow region. Also contains `cmb_heat` 2D layer. Only written when `slab_tracers_enabled: true` |
 | `plate_id_NNNN.nc` | Every `csv_save_interval` steps | Plate ID raster (lon/lat) |
-| `craton_NNNN.nc` | Every `csv_save_interval` steps | Craton ID raster (lon/lat) |
+| `continent_NNNN.nc` | Every `csv_save_interval` steps | Continent raster (lon/lat): the plate ID of each continent's cell, 0 on ocean (`craton_NNNN.nc` in runs made before November 2026) |
 | `divergence_NNNN.nc` | Every `csv_save_interval` steps | Horizontal divergence of the plate velocity field (1/Myr); ≈0 inside rigid plates, positive at spreading and negative at converging boundaries |
 | `seamounts_final.geojson` | End of run | All active seamounts at final timestep |
 | `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, slab-force totals and mean trench slab depth (slab modes), continental area and the continent hidden by overlapping continents (`continent_area_km2`, `continent_hidden_km2`), seconds per step by phase |
@@ -272,16 +272,18 @@ listed is `simple`'s):
     `show-me/2026-09-29-r4-least-cost-path/`).
 - **`continent_strength`** (how strong continents are for the rift test):
   - `uniform`: σc everywhere on continent.
-  - `cores`: at step 0, random terranes `craton_core_spacing_km` apart are generated in every
-    continent. The belts between them are `craton_belt_width_km` wide. Rift strength is ×
-    `craton_core_factor` on cores and × `belt_strength_factor` on belts. The cores and belts are
-    points that move with their plates (`craton_cores_NNNN.csv`). The seed is
-    `craton_core_seed`, or `random_seed` if that is null, so plate motions then depend on the
-    seed.
+  - `cores`: at step 0, random terranes `core_spacing_km` apart are generated in every
+    continent. The belts between them are `belt_width_km` wide. Rift strength is ×
+    `core_factor` on the terranes' strong cores and × `belt_strength_factor` on belts. The cores
+    and belts are points that move with their plates (`cores_NNNN.csv`). The seed is
+    `core_seed`, or `random_seed` if that is null, so plate motions then depend on the seed.
+    Before November 2026 these were `craton_core_spacing_km`, `craton_belt_width_km`,
+    `craton_core_factor`, `craton_core_seed` and `craton_cores_NNNN.csv`; the old names are
+    still read.
   - `cores_random`: as `cores` (the same terranes and belts), but each terrane's core and each
     belt (one per pair of neighbouring terranes) has its own factor, lognormal about
-    `craton_core_factor` and `belt_strength_factor`: median × exp(`strength_spread` × N(0, 1)).
-    Some belts are then much weaker than others. The factors are in `craton_cores_NNNN.csv`
+    `core_factor` and `belt_strength_factor`: median × exp(`strength_spread` × N(0, 1)).
+    Some belts are then much weaker than others. The factors are in `cores_NNNN.csv`
     (`factor`).
 - **`collision_weld`** (joining plates after a long continental collision):
   - `off`: collided plates stay separate for good.
@@ -514,7 +516,7 @@ Areas are spherical, given in equatorial-equivalent deg².
 1. **Screening.** Concavity and aspect ratio are measured in an equal-area projection centred on the plate. Only plates that fail either test are examined further.
 2. **Neck search.** The plate is eroded by increasing great-circle distances from its edge. The first distance at which the eroded core breaks into two substantial pieces gives the neck half-width. Each plate pixel is then assigned to the nearer piece, which places the cut through the neck.
 3. **Split rule.** A U- or C-shaped plate of uniform width, or any convex plate, has no neck and is never cut.
-4. **Cratons.** Cratons stay with the parent plate ID. A cut that would separate cratons of the same plate is skipped.
+4. **Continents.** Continents stay with the parent plate ID. A cut that would separate continents of the same plate is skipped.
 5. **New plates.** The child plate gets a new, never-reused PLATEID. It inherits the parent's stage pole and full rotation history, then diverges naturally as its new boundary is classified.
 
 Disconnected pieces of one plate ID (for example, after overlaps are resolved) are handled the same way at every step:
@@ -552,7 +554,7 @@ either side.
   has passed for `rift_persist_myr` steps.
 - The split is applied at the start of the next step. The smaller side becomes a new plate
   that inherits the parent's stage pole and rotation history.
-- The cratons on each side are rebuilt from the split craton raster.
+- The continents on each side are rebuilt from the split continent raster.
 - Both halves are then left untested for `rift_cooldown_myr`.
 - Each split is written to `rift_events.csv`.
 
@@ -687,6 +689,10 @@ Runs with the same `random_seed` are repeatable, so `force_model: simple` is che
 ---
 
 ## Codebase reference
+
+In the code, `craton` (`craton_raster`, `craton_counts`, `cratons`) still names the continent mask, which covers
+all continental lithosphere; the internal names follow in the planned code reorganisation (`docs/public_release_plan.md`,
+stage D).
 
 ### File structure
 
