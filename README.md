@@ -304,7 +304,9 @@ listed is `simple`'s):
     absorb the whole smaller plate instead; it collapsed the world to 1–3 plates within
     300–500 Myr and was removed.)
 - **`collision_weld_giver`** (which plate gives its continent; needs `collision_weld: on`):
-  - `smaller`: the smaller plate's colliding continent passes to the larger plate.
+  - `smaller`: the smaller plate's colliding continent passes to the larger plate. Large plates
+    therefore keep growing: with `collision_weld: on` added to the `physical` preset, one plate
+    covered 60% of the sphere by 300 Myr (tie seed 0, November 2026).
   - `downgoing`: the continent that arrived on the subducting plate is accreted to the
     overriding plate, as a terrane is, if it is no larger than `weld_accrete_max_frac` of the
     sphere; a larger one is not welded and the collision goes on. The overriding plate's new
