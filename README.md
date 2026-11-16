@@ -265,7 +265,9 @@ listed is `simple`'s):
   - `none`: plates split only at thin necks (fragmentation) or when disconnected.
   - `trial` (`physical`): each step every plate is tested against a set of straight
     great-circle cuts, and a cut splits the plate when the tension across it beats the
-    strength along it. It costs about 0.2 s per step.
+    strength along it. It costs about 0.2 s per step. It needs solved plate motions (`drag:
+    area` or `area_edge`, or speed normalisation), so `simple` cannot use it, and a run that
+    asks for it there stops with a message.
 - **`rift_path`** (the line a trial-split cut follows; `rifting: trial`):
   - `straight`: the candidate great circle.
   - `least_cost`: the cheapest path across the plate within `rift_path_corridor_deg` of each
@@ -538,6 +540,13 @@ great circles through its centroid, all on the sphere.
 - The continents on each side are rebuilt from the split continent raster.
 - Both halves are then left untested for `rift_cooldown_myr`.
 - Each split is written to `rift_events.csv`.
+
+**The strengths are set for the `physical` forces.** Tension scales with the driving forces and
+the drag, so the same strengths split plates far more often under other force modes. In 100-Myr
+runs from the bundled map (tie seed 0; November 2026), the `physical` preset had 10 plates at
+100 Myr, while changing only `drag` to `area` or `none`, or `slab_suction` to `ratio`, gave 62–81
+plates, most of them smaller than 0.5% of the sphere. Changing those modes therefore needs new
+strengths too.
 
 ```yaml
 params:

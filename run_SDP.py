@@ -97,6 +97,11 @@ params['continent_strength_mode'] = modes['continent_strength']
 params['rebuild_tiles_mode'] = modes['rebuild_tiles']
 params['subduction_init_mode'] = modes['subduction_init']
 params['overlap_mode'] = modes['overlap']
+if modes['rifting'] == 'trial' and modes['drag'] == 'none' and modes['speed_normalisation'] == 'none' \
+        and params.get('speed_scale') is None:
+    raise SystemExit('rifting: trial measures tension from the solved plate motions, so it needs drag: area or '
+                     'area_edge, or speed_normalisation: calibrate_once or per_step (with drag: none and no speed '
+                     'scaling, as in simple, it would never run)')
 if modes['subduction_init'] != 'off' and modes['rifting'] != 'trial':
     raise SystemExit('subduction_init tests passive margins inside the rifting trial split, so it needs rifting: trial')
 if modes['collision_weld'] == 'on' and modes['collision'] not in ('coupling', 'breakoff'):
