@@ -132,6 +132,11 @@ run_info = {'config_file': os.path.abspath(args.config),
             'force_modes_resolved': modes,
             'config': cfg}
 
+# With random_seed: null a seed is drawn here and recorded, so the run can be repeated by setting
+# random_seed to run_info.yaml's random_seed_used.
+run_info['random_seed_used'] = (int(np.random.SeedSequence().entropy) if params.get('random_seed') is None
+                                else params['random_seed'])
+
 
 # A run on a slablet with uncommitted changes cannot be reproduced from a slablet commit: say so
 # (gate.py and regression_check.py refuse such runs outright).
@@ -157,8 +162,8 @@ for _f in (_step_stats_csv, _plate_stats_csv, _out('rift_trials.csv'), _out('ini
 
 
 # All randomness (hotspots, seamounts, earthquakes, topography noise)
-# comes from one generator, so a run is repeatable when random_seed is set.
-rng = np.random.default_rng(params.get('random_seed'))
+# comes from one generator, seeded with random_seed (or the seed drawn for it above).
+rng = np.random.default_rng(run_info['random_seed_used'])
 topo_noise_seed = int(rng.integers(2**31 - 1))   # same noise pattern for every saved frame
 
 _missing = [f for f in [files['rotation_model'], files['continents'], *files['dynamic_polygons']]
@@ -280,7 +285,7 @@ _cores = None
 if params['continent_strength_mode'] in ('cores', 'cores_random'):
     _cores = sdp.generate_craton_cores(rasters['craton'], params.get('core_spacing_km', 2500.0),
                                        params.get('belt_width_km', 400.0),
-                                       seed=params.get('random_seed') if params.get('core_seed') is None
+                                       seed=run_info['random_seed_used'] if params.get('core_seed') is None
                                        else params['core_seed'],
                                        spread=params.get('strength_spread', 0.5)
                                        if params['continent_strength_mode'] == 'cores_random' else None,

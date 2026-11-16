@@ -130,7 +130,7 @@ grids back, so the format does not change a run.
 | `rift_trials.csv` | Every step (`rifting: trial`) | One row per plate tested: area, candidate cuts reaching each test (`cuts`, `one_piece`, `under_tension`), the largest tension of any cut, the best tension / strength with its tension and strength, and whether a cut passed |
 | `init_trials.csv` | Every step (`subduction_init: log`) | One row per passive-margin stretch tested: plate, stretch size and centre, ocean age along it (median, min, max), plate share on the ocean side, whether the cut crosses the plate once, traction across the cut (negative: compression), strength along the cut and of the stretch, and the share of the cut along which the free halves would converge |
 | `rift_events.csv` | Each rift (`rifting: trial`) | Time, parent plate, new plate and kind of cut (`sweep` or `suture`) of every rift split |
-| `run_info.yaml` | Start of run | The config used, the resolved force modes and the git commit |
+| `run_info.yaml` | Start of run | The config used, the resolved force modes, the git commit and `random_seed_used` (the seed drawn when `random_seed` is null; set `random_seed` to it to repeat the run) |
 | `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file for the plates of step NNNN, with step NNNN as present day and time counted back from it (see [Rotation file format](#rotation-file-format)) |
 
 ## Key parameters (`config.yaml`)
@@ -390,7 +390,7 @@ params:
 
   csv_save_interval:           5       # save outputs every N timesteps
   plot_interval:               1       # make plots every N timesteps; set to null to disable
-  random_seed:                 null    # integer → repeatable run (hotspots, seamounts, earthquakes, terrain noise)
+  random_seed:                 null    # hotspots, seamounts, earthquakes, terrain noise; null: drawn, in run_info.yaml
 ```
 
 Simplification works in lon/lat, but pygplates reads every edge as a great-circle arc. So polygon edges are densified to ≤ 1° wherever polygons are handed to pygplates, and the extracted boundary lines get the same treatment. Without this, long edges would bow toward the pole. Boundaries are extracted from the undensified polygons, so shared edges are always recognised.
@@ -641,7 +641,8 @@ only in `tie_break_seed` diverge visibly, while their statistics stay alike. In 
 atlantis66 runs, `simple` runs are different worlds by about 150 Myr. `physical` runs still
 share about 80% of their plate IDs at 200 Myr, but only because their plates move about 3×
 slower: per 1000 km travelled they drift apart at least as fast. `random_seed` changes only
-hotspots, seamounts, earthquakes and terrain noise, not the plate motions, so ensembles vary
+hotspots, seamounts, earthquakes and terrain noise, not the plate motions (except with
+`continent_strength: cores` or `cores_random`, whose terranes it places), so ensembles vary
 `tie_break_seed`.
 
 ### `diagnose_run.py`
