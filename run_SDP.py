@@ -627,9 +627,11 @@ def _record_step_stats(i, step_times=None, previous_poles=None):
         # continents are rigid polygons; where two overlap the grids show only one
         step_row['continent_area_km2'] = _ov['continent_area_km2']
         step_row['continent_hidden_km2'] = _ov['continent_hidden_km2']
-    if 'overlap_conflicts' in force_diag:
-        # overlap: polarity -- pairs whose overriding plate was drawn before its downgoing plate
-        step_row['overlap_conflicts'] = force_diag['overlap_conflicts']
+    if 'overlap_area_frac' in force_diag:
+        # overlap: polarity -- the area where moved plates overlapped (share of the sphere),
+        # and the share of it given to a pair's overriding plate (the rest: the lower ID)
+        step_row['overlap_area_frac'] = force_diag['overlap_area_frac']
+        step_row['overlap_by_polarity_frac'] = force_diag['overlap_by_polarity_frac']
     step_row['speed_scale_k'] = last.get('k_used', np.nan)
     step_row['rms_speed_unscaled_km_per_myr'] = last.get('rms_unscaled', np.nan)
     step_row['speed_capped'] = bool(last.get('capped', False))

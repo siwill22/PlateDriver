@@ -321,10 +321,12 @@ listed is `simple`'s):
     held for 32–41% of the subduction flux at trenches away from continents, rising to 62% by
     500 Myr, and the lowest-ID plate (111) became the largest plate in every seed
     (`docs/public_release_plan.md`).
-  - `polarity`: each pair's downgoing plate is drawn into the raster before its overriding
-    plate, so the overriding plate keeps the overlap. Where polarities form a cycle, the
-    highest plate ID is drawn first, and `step_stats.csv` counts the pairs drawn the wrong
-    way round (`overlap_conflicts`).
+  - `polarity`: each overlapping cell goes to the overriding plate of the two plates that
+    overlap there (drawing the plates in both ID orders shows which two), so at a trench the
+    overriding plate keeps the overlap; a pair with no polarity yet leaves it to the lower ID.
+    `step_stats.csv` records the overlapping area (`overlap_area_frac`) and the share of it
+    settled by a polarity (`overlap_by_polarity_frac`). It costs one more rasterisation per
+    step.
 
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
