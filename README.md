@@ -1,14 +1,14 @@
-# OldDriver — Self-Driving Plate Tectonics Simulation
+# PlateDriver: self-driving plate tectonics
 
 ## Inspiration
 
-The core approach — computing forces on plate boundaries and integrating them forward to derive stage rotations — is inspired by the [Tectonic Explorer](https://github.com/concord-consortium/tectonic-explorer) project by the Concord Consortium. OldDriver extends that idea into a full simulation pipeline built on [GPlates](https://www.gplates.org) / pygplates, with raster-based plate tracking, tracer advection, mantle structure synthesis, and output compatible with GPlates workflows.
+The core approach — computing forces on plate boundaries and integrating them forward to derive stage rotations — is inspired by the [Tectonic Explorer](https://github.com/concord-consortium/tectonic-explorer) project by the Concord Consortium. PlateDriver extends that idea into a full simulation pipeline built on [GPlates](https://www.gplates.org) / pygplates, with raster-based plate tracking, tracer advection, mantle structure synthesis, and output compatible with GPlates workflows.
 
-The code is only intended for teaching, specifically to generate learning materials (synthetic datasets for Earth-like planets) used during the 'Southern Ocean Marine Geosciences' course at OUC Qingdao.
+PlateDriver was written for teaching. It makes the synthetic datasets of Earth-like planets used in the Southern Ocean Marine Geosciences course at OUC Qingdao, and it shows how the forces on plates shape their motions. Teaching remains its purpose, so it is kept simple, cheap to run (about 3 s per 1-Myr step) and readable. Its synthetic plate histories also serve research, through [slablet](https://github.com/siwill22/slablet), which models the mantle and the asthenosphere beneath any plate history, synthetic or reconstructed. Where the work is going is in `docs/public_release_plan.md`; the tests behind the README's statements are recorded in `docs/evidence.md`.
 
 ## What this is
 
-OldDriver is a forward model of plate tectonic evolution. Starting from an initial set of tectonic plates (defined in GPlates format), the model computes the forces acting on each plate at every timestep, derives stage rotations, and evolves the plate geometry forward in time. The plates "drive themselves" — no prescribed rotation model is needed after the initial snapshot.
+PlateDriver is a forward model of plate tectonic evolution. Starting from an initial set of tectonic plates (defined in GPlates format), the model computes the forces acting on each plate at every timestep, derives stage rotations, and evolves the plate geometry forward in time. The plates "drive themselves" — no prescribed rotation model is needed after the initial snapshot.
 
 The model tracks:
 - **Plate polygons** — boundaries evolve through each timestep driven by slab pull, ridge push, and collision forces
@@ -23,15 +23,37 @@ The model tracks:
 - **Plate fragmentation** — plates with a thin neck can be split at their narrowest point; off unless `fragmentation_enabled: true` (the shipped `config.yaml` turns it on)
 - **Plate merging** — plates with persistently near-zero relative motion can be absorbed into their neighbour; disabled by default
 
+### What the forces decide, and what rules decide
+
+The forces decide how fast each plate moves and about which pole it turns. The plate map itself changes by rules, each with its own trigger, and only the rift test reads the forces:
+
+| Change to the plate map | Trigger | From the forces? |
+|---|---|---|
+| A plate splits along a cut (`rifting: trial`) | the tension across the cut beats the strength along it for `rift_persist_myr` | yes |
+| A plate splits at a thin neck (`fragmentation_enabled`) | the plate's shape | no |
+| Which plate of a converging pair subducts (`polarity`) | older ocean, continents overriding; decided when the pair first converges | no |
+| Which plate keeps the cells where moved plates overlap (`overlap`) | the lower plate ID, or the pair's polarity | no |
+| A slab detaches (`collision: breakoff`) | `breakoff_delay_myr` of continental collision | no |
+| Colliding continents join (`collision_weld`) | `weld_after_myr` of continental collision | no |
+| Two plates merge (`merging_enabled`) | near-zero relative motion for `merge_min_steps` | no |
+| A plate enclosed by one other is absorbed | the plate map | no |
+| Gaps between moved plates are filled | the nearest plate, ties by `tie_break` | no |
+
+### Earth values
+
+Present-day Earth (oldest ocean about 180 Myr, the Pacific about 20% of the sphere, median ocean age about 60 Myr) is a reference for PlateDriver's outcomes, not a target to tune towards: Earth today is one snapshot, and other times may have been quite different. The model is calibrated to Earth in two places, though. With `speed_normalisation: calibrate_once` (the `physical` preset) the common scale of the forces is set at step 0 so that the RMS plate speed is `target_rms_speed` (50 mm/yr), and that is what makes a model Myr a Myr. And several time constants are Earth's: slab pull, ridge push and oceanic strength saturate at an ocean age of 80 Myr, and bathymetry follows GDH1.
+
 ## Inputs
 
-Input files are in GPlates format, specified in `config.yaml`:
+Input files are in GPlates format, specified in `config.yaml`. Relative paths are read from the PlateDriver
+folder. The repository includes one starting map, Atlantis (`examples/atlantis/`), which `config.yaml` and
+`configs/current_model.yaml` use; any GPlates topological model can be used instead.
 
 | Key | Purpose |
 |---|---|
 | `rotation_model` | Rotation model for the initial plate snapshot (`.rot`) |
 | `dynamic_polygons` | Topological plate polygon files (`.gpml`), one or more |
-| `cratons` | Craton (continental block) polygons (`.geojson`), used for collision detection and subduction polarity |
+| `continents` | Continent polygons (`.geojson`): all continental lithosphere, not only cratons. They set collisions, subduction polarity, basal drag and rift strength. The old key `cratons` is still read |
 
 ## How to run
 
@@ -42,23 +64,51 @@ python run_SDP.py --config config.yaml
 
 All configuration is in the YAML file given by `--config` (default `config.yaml`). Missing input files are reported before the run starts.
 
+### The current model
+
+`config.yaml` runs the plain `physical` preset (no `force_modes` overrides), with neck fragmentation on.
+The model used for teaching material (October 2026) is `configs/current_model.yaml`: the
+`physical` preset with continental rifting along random-strength belts, accretion of colliding
+continents with a stiff collision contact, tiled plate rebuild, and merging of small plates;
+its header lists every setting that differs from `config.yaml`. It runs to 1000 Myr on
+atlantis66, at about 2.5–3.5 s per step:
+
+```bash
+conda run -n pygmt17 python run_SDP.py --config configs/current_model.yaml
+```
+
+The three runs in the viewer differ only in `tie_break_seed` (0, 1, 2). How each option was
+chosen is in `docs/force_model_v2_plan.md` (stages R0–R10).
+
 ### Requirements
 
-Python ≥ 3.10 with pygplates (≥ 0.36; developed with 1.0), [gprm](https://github.com/siwill22/GPlatesReconstructionModel), PyGMT, geopandas, shapely ≥ 2, xarray, numpy, scipy, scikit-learn, scikit-image, pyproj, topojson, xarray-spatial, pyshtools and PyYAML. The `pygmt17` conda environment has all of these.
+Python ≥ 3.10 with pygplates (≥ 0.36; developed with 1.0), [gprm](https://github.com/siwill22/GPlatesReconstructionModel), PyGMT, geopandas, shapely ≥ 2, xarray, numpy, scipy, scikit-learn, scikit-image, pyproj, topojson, xarray-spatial, pyshtools, PyYAML and [slablet](https://github.com/siwill22/slablet). `environment.yml` builds an environment with all of these from conda-forge and GitHub:
+
+    conda env create -f environment.yml
+    conda activate platedriver
+    python -m pytest tests
+
+The tests pass in it (Python 3.12, pandas 3, numpy 2.5; November 2026) and in the `pygmt17` environment the model was developed in (pandas 2.3, numpy 1.26). Build it with `PYTHONPATH` unset if that points at other copies of gprm or PlateTectonicTools, or pip takes those as installed.
 
 ### Units and time
 
 - **Velocities and boundary divergence** are in **km/Myr**, which is numerically the same as **mm/yr** (1 cm/yr = 10 km/Myr).
 - **Time**: step `i` is the state `t = i × delta_time` Myr after the starting snapshot. Step 0 is the starting configuration itself and is saved and plotted like any other step. The final step is always saved.
-- **Each step** moves the plates, cratons, seafloor tracers and seamounts together, using the stage rotations computed at the previous step. It then rebuilds the plate configuration and computes the stage rotations for the next move.
+- **Each step** moves the plates, continents, seafloor tracers and seamounts together, using the stage rotations computed at the previous step. It then rebuilds the plate configuration and computes the stage rotations for the next move.
 
 ## Outputs
 
 All outputs go to the directory specified by `output_dir` in `config.yaml`.
 
+Grids (`*.nc`) are written as NetCDF-4 with `grid_output: compact` (the default): floats as
+float32, the plate-ID grids (`plate_id`, `continent`) as int32 with −1 for no data, all
+zlib-compressed. That is about 5× smaller than `grid_output: full` (float64, uncompressed,
+the format before October 2026); xarray, GMT and PyGMT read both. The model never reads its
+grids back, so the format does not change a run.
+
 | File pattern | Interval | Contents |
 |---|---|---|
-| `plot_NNNN.png` | Every `plot_interval` steps | Map: plate polygons, boundary types, velocity vectors, cratons, seafloor tracers coloured by age, seamounts (red triangles) |
+| `plot_NNNN.png` | Every `plot_interval` steps (none by default) | Map: plate polygons, boundary types, velocity vectors, continents, seafloor tracers coloured by age, seamounts (red triangles) |
 | `tracers_NNNN.csv` | Every `csv_save_interval` steps | Active seafloor tracer lon/lat/age |
 | `boundaries_NNNN.geojson` | Every `csv_save_interval` steps | Boundary arc segments with divergence (km/Myr = mm/yr), boundary type, plate IDs, and downgoing/overriding plates for subduction zones |
 | `earthquakes_NNNN.geojson` | Every `csv_save_interval` steps | Synthetic earthquake locations with depth, boundary type, plate IDs |
@@ -68,14 +118,19 @@ All outputs go to the directory specified by `output_dir` in `config.yaml`.
 | `topo_bathy_NNNN.nc` | Every `csv_save_interval` steps | Combined topography-bathymetry (m); GDH1 ocean depths merged with continental topography |
 | `mantle_temp_NNNN.nc` | Every `csv_save_interval` steps | 3D dVs/Vs anomaly field (depth × lat × lon); positive = cold fast slab, negative = warm slow region. Also contains `cmb_heat` 2D layer. Only written when `slab_tracers_enabled: true` |
 | `plate_id_NNNN.nc` | Every `csv_save_interval` steps | Plate ID raster (lon/lat) |
-| `craton_NNNN.nc` | Every `csv_save_interval` steps | Craton ID raster (lon/lat) |
+| `continent_NNNN.nc` | Every `csv_save_interval` steps | Continent raster (lon/lat): the plate ID of each continent's cell, 0 on ocean (`craton_NNNN.nc` in runs made before November 2026) |
 | `divergence_NNNN.nc` | Every `csv_save_interval` steps | Horizontal divergence of the plate velocity field (1/Myr); ≈0 inside rigid plates, positive at spreading and negative at converging boundaries |
 | `seamounts_final.geojson` | End of run | All active seamounts at final timestep |
-| `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, slab-force totals and mean trench slab depth (slab modes), seconds per step by phase |
-| `trench_forces_NNNN.csv` | Every `csv_save_interval` steps | One row per trench segment of each plate: position, plates, downgoing or not, convergence, slab depth, seafloor age, pull and suction weights. Only with `slab_pull: ramp/slab_length`, `slab_suction: depth_split` or `polarity: age` |
+| `step_stats.csv` | Every step | One row per step: global RMS plate speed, fastest plate, net rotation of the lithosphere (rate and pole), trench and ridge length, tracer counts, slab-force totals and mean trench slab depth (slab modes), continental area and the continent hidden by overlapping continents (`continent_area_km2`, `continent_hidden_km2`), seconds per step by phase |
+| `trench_forces_NNNN.csv` | Every `csv_save_interval` steps | One row per trench segment of each plate: position, plates, downgoing or not, convergence, slab depth, seafloor age, pull and suction weights. Only with `slab_pull: slab_length`, `slab_suction: depth_split` or `polarity: age` |
 | `plate_stats.csv` | Every step | One row per plate per step: angular velocity (pole, rate), RMS speed, area, continental fraction, perimeter and trench (downgoing/overriding), ridge and conservative lengths |
-| `run_info.yaml` | Start of run | The config used, the resolved force modes and the git commit |
-| `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file with finite rotations for all plates up to step NNNN. The time column is elapsed model time (see [Rotation file format](#rotation-file-format)) |
+| `welds.csv` | Each weld (`collision_weld: on`) | Time, host plate, absorbed (or giving) plate, collision length, suture ID, scope, whether it was an accretion, welded area and host area after the weld (shares of the sphere) of every weld |
+| `sutures_NNNN.csv` | Every `csv_save_interval` steps (`sutures: tracers`) | Suture tracer lon/lat, suture ID and time formed |
+| `rift_trials.csv` | Every step (`rifting: trial`) | One row per plate tested: area, candidate cuts reaching each test (`cuts`, `one_piece`, `under_tension`), the largest tension of any cut, the best tension / strength with its tension and strength, and whether a cut passed |
+| `init_trials.csv` | Every step (`subduction_init: log`) | One row per passive-margin stretch tested: plate, stretch size and centre, ocean age along it (median, min, max), plate share on the ocean side, whether the cut crosses the plate once, traction across the cut (negative: compression), strength along the cut and of the stretch, and the share of the cut along which the free halves would converge |
+| `rift_events.csv` | Each rift (`rifting: trial`) | Time, parent plate, new plate and kind of cut (`sweep` or `suture`) of every rift split |
+| `run_info.yaml` | Start of run | The config used, the resolved force modes, the git commit and `random_seed_used` (the seed drawn when `random_seed` is null; set `random_seed` to it to repeat the run) |
+| `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file for the plates of step NNNN, with step NNNN as present day and time counted back from it (see [Rotation file format](#rotation-file-format)) |
 
 ## Key parameters (`config.yaml`)
 
@@ -87,6 +142,9 @@ run:
   delta_time: 1.0             # timestep size (Myr)
   total_time: 200.0           # run duration (Myr)
 ```
+
+The starting map must have ridges and trenches at `reconstruction_time`, since they set the first
+plate motions; a run that finds none stops at once. The bundled Atlantis map is drawn for 0 Ma only.
 
 ### Force model
 
@@ -101,7 +159,7 @@ force_modes: {}          # per-component overrides, e.g. {collision: coupling}
 and useful for teaching. `physical` is the v1 force model (basal and edge
 drag, slab pull from slab length and seafloor age, suction from the deep slab, ridge
 push as a body force over young seafloor, polarity by age, slab breakoff after
-collision, calibrated speed); see `force_model_v1_plan.md` for the design. The resolved
+collision, calibrated speed); see `docs/force_model_v1_plan.md` for the design. The resolved
 modes are printed at the start of the run and written to `run_info.yaml`. The older
 `params.collision_mode` is still read as `force_modes.collision`.
 
@@ -128,7 +186,6 @@ listed is `simple`'s):
 - **`slab_pull`:**
   - `hard`: `forces.slab_pull` on every convergent segment of the downgoing plate, as
     in the original model.
-  - `ramp`: the same, × min(1, convergence / `pull_ramp_km_per_myr`).
   - `slab_length` (`physical`): × √(min(age, A)/A) × min(1, z / `slab_ref_depth_km`).
     Here age is the seafloor age 1° inside the downgoing plate, A =
     `slab_age_saturation_myr`, and z is the depth of the deepest slab tracer within
@@ -176,6 +233,124 @@ listed is `simple`'s):
     default) or as `coupling` (`breakoff_contact: coupling`). Coupling ignores contact
     length, so a small continent on a large plate can weld it to a supercontinent.
 
+- **`tracer_thinning`** (not a force; it keeps long runs affordable):
+  - `none`: tracers are never thinned. Ridges seed a pair every `tracer_spacing_deg` of ridge
+    every step whatever the spreading rate, so slow plates pile tracers up (200k after
+    500 Myr of `physical`).
+  - `cell` (`physical`): every `tracer_thin_interval` steps, each plate keeps at most one
+    seafloor tracer per `tracer_thin_cell_deg` lon/lat cell, the one nearest the cell centre
+    (about 70k after 500 Myr). On the 1° physics grid this changes the mean age by under
+    1 Myr, but where young and old seafloor meet on one plate the step moves by up to one
+    cell.
+- **`plate_rebuild`** (not a force; how the plates are rebuilt from the raster every step):
+  - `lonlat`: polygonise the 0.25° plate-ID raster (a staircase of meridians and parallels)
+    and simplify it (`topo_simplify_tolerance`, degrees). Repeated every step, this snaps
+    boundaries that run close to a meridian or parallel onto it exactly: in 500-Myr
+    `physical` runs about 7× more boundary length lies within 1° of N–S or E–W than for
+    random orientations (`docs/evidence.md`, E1).
+  - `midpoint` (`physical`): before simplifying, every staircase vertex is moved to the midpoint
+    of its edge. The midpoints of successive steps lie along a boundary's true direction, so
+    nothing snaps, and it costs the same as `lonlat`.
+- **`rebuild_tiles`** (not a force; how plates are turned into polygons each step):
+  - `off`: each plate is polygonised whole on the lon/lat grid.
+  - `on` (`physical` since November 2026): each plate is polygonised in pieces of at most 90° longitude × 45° latitude, which then
+    get their plate ID back. A plate that touches both edges of the lon/lat map and a pole (one
+    reaching from pole to pole) is otherwise turned inside out by the dateline wrap: it is
+    replaced by its complement and its cells go to its neighbours, with no error
+    (`docs/evidence.md`, E2). The pieces' shared edges are not plate
+    boundaries, and they are left out of the force sum, so they carry no edge drag. The same
+    applies to the dateline seam inside a plate that crosses it; with `off` that seam (about
+    17% of all polygon outline length at 240 Myr in one run) is counted in the edge drag.
+    Plate boundaries and plate areas are otherwise the same as `off` (within about 0.1% of
+    cells per rebuild).
+- **`rifting`** (splitting a plate under tension; see [Rifting](#rifting-trial-split)):
+  - `none`: plates split only at thin necks (fragmentation) or when disconnected.
+  - `trial` (`physical`): each step every plate is tested against a set of straight
+    great-circle cuts, and a cut splits the plate when the tension across it beats the
+    strength along it. It costs about 0.2 s per step. It needs solved plate motions (`drag:
+    area` or `area_edge`, or speed normalisation), so `simple` cannot use it, and a run that
+    asks for it there stops with a message.
+- **`rift_path`** (the line a trial-split cut follows; `rifting: trial`):
+  - `straight`: the candidate great circle.
+  - `least_cost`: the cheapest path across the plate within `rift_path_corridor_deg` of each
+    candidate that is under tension. It runs on the 1° grid, with cost = great-circle length ×
+    strength, and the test is rerun on the path. It adds about 0.5 s per step. On atlantis66 it
+    gives 1.7× as many rifts, mostly along young ocean, and continents break up less (see
+    `docs/evidence.md`, E4).
+- **`continent_strength`** (how strong continents are for the rift test):
+  - `uniform`: σc everywhere on continent.
+  - `cores`: at step 0, random terranes `core_spacing_km` apart are generated in every
+    continent. The belts between them are `belt_width_km` wide. Rift strength is ×
+    `core_factor` on the terranes' strong cores and × `belt_strength_factor` on belts. The cores
+    and belts are points that move with their plates (`cores_NNNN.csv`). The seed is
+    `core_seed`, or `random_seed` if that is null, so plate motions then depend on the seed.
+    Before November 2026 these were `craton_core_spacing_km`, `craton_belt_width_km`,
+    `craton_core_factor`, `craton_core_seed` and `craton_cores_NNNN.csv`; the old names are
+    still read.
+  - `cores_random`: as `cores` (the same terranes and belts), but each terrane's core and each
+    belt (one per pair of neighbouring terranes) has its own factor, lognormal about
+    `core_factor` and `belt_strength_factor`: median × exp(`strength_spread` × N(0, 1)).
+    Some belts are then much weaker than others. The factors are in `cores_NNNN.csv`
+    (`factor`).
+- **`collision_weld`** (joining plates after a long continental collision):
+  - `off`: collided plates stay separate for good.
+  - `on`: after `weld_after_myr` of continuous continent–continent collision, the smaller plate's
+    continent at the contact (each connected piece within `weld_contact_reach_deg` of a contact
+    point) passes to the larger plate. The rest of the smaller plate, its ocean and any continent
+    elsewhere, stays a plate of its own. It needs `collision: coupling` or `breakoff`, which time
+    the collisions. The plate that gains is not tested for rifting for `rift_cooldown_myr`. Each
+    weld is written to `welds.csv`. (Until November 2026 `collision_weld_scope: plate` could
+    absorb the whole smaller plate instead; it collapsed the world to 1–3 plates within
+    300–500 Myr and was removed.)
+- **`collision_weld_giver`** (which plate gives its continent; needs `collision_weld: on`):
+  - `smaller`: the smaller plate's colliding continent passes to the larger plate. Large plates
+    therefore keep growing: with `collision_weld: on` added to the `physical` preset, one plate
+    covered 60% of the sphere by 300 Myr (tie seed 0, November 2026).
+  - `downgoing`: the continent that arrived on the subducting plate is accreted to the
+    overriding plate, as a terrane is, if it is no larger than `weld_accrete_max_frac` of the
+    sphere; a larger one is not welded and the collision goes on. The overriding plate's new
+    edge is the far side of the accreted continent, where the subducting plate's ocean meets
+    it, so subduction steps out behind it. Without a known polarity the smaller plate gives.
+- **`collision_contact`** (how hard a continental contact resists; viscous contact drag only):
+  - `length`: the drag grows with the contact length (`collision_drag_factor`), so a short
+    contact resists little and the continents keep converging into each other.
+  - `stiff`: every contact resists with the same drag (`collision_stiff_factor`), whatever its
+    length, so convergence stops at the contact. Rotation about the contact and slip along it
+    stay free: a short contact acts as a pivot.
+- **`collision_radius_deg`** (param): two plates are in collision where both have continent
+  within this distance of their boundary (null: `boundary_search_radius_deg`, 2°). Slab forces
+  stop, and contact drag, breakoff and the weld timer start, at that distance. With
+  `collision_contact: stiff` and the 2° default the convergence stops while up to about 200 km
+  of ocean is left between the continents; 0.5° lets them close.
+- **`sutures`** (weak zones left by welds; needs `collision_weld: on`):
+  - `none`: no sutures.
+  - `tracers`: at each weld, points are dropped every 0.5° along the contact. They move with
+    their plate and are never deleted. Within `suture_width_deg`, continental rift strength is
+    × `suture_strength_factor`. Each suture with at least 5 points on a plate adds its
+    best-fit great circle as an extra candidate cut. Saved steps write `sutures_NNNN.csv`.
+- **`subduction_init`** (new trenches at passive margins; needs `rifting: trial`; force model v3,
+  stage S1):
+  - `off`: no test.
+  - `log`: each step, every passive margin inside a plate is tested like a rift cut, and the
+    result goes to `init_trials.csv`; nothing is split, so the run is otherwise the same as
+    `off`. A passive margin is a stretch of at least `init_min_cells` ocean cells (physics
+    grid) next to the plate's own continent and at least `init_boundary_gap_cells` cells from
+    the plate's edge. The cut is the stretch's best-fit great circle across the whole plate,
+    and the traction across it is worked out as in the rift test (negative: compression).
+- **`overlap`** (not a force; which plate keeps the cells where moved plates overlap):
+  - `plate_id` (`simple`; both presets before November 2026): the lower plate ID, whatever the polarity.
+    Where the downgoing plate has the lower ID, it keeps the overlap, the trench moves with it,
+    and the overriding plate's edge is consumed instead. In the three current-model gate runs this
+    held for 32–41% of the subduction flux at trenches away from continents, rising to 62% by
+    500 Myr, and the lowest-ID plate (111) became the largest plate in every seed
+    (`docs/public_release_plan.md`).
+  - `polarity` (`physical`): each overlapping cell goes to the overriding plate of the two plates that
+    overlap there (drawing the plates in both ID orders shows which two), so at a trench the
+    overriding plate keeps the overlap; a pair with no polarity yet leaves it to the lower ID.
+    `step_stats.csv` records the overlapping area (`overlap_area_frac`) and the share of it
+    settled by a polarity (`overlap_by_polarity_frac`). It costs one more rasterisation per
+    step.
+
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
 tracer on its own plate, moved one step ahead. With `slab_length` or `depth_split`,
@@ -214,12 +389,14 @@ params:
 
   tracer_spacing_deg:          1.0     # along-ridge spacing for newly seeded tracer pairs
   tracer_offset_deg:           0.6     # perpendicular offset from ridge axis when seeding
+  tracer_thin_cell_deg:        0.5     # [tracer_thinning: cell] one tracer per cell this size per plate
+  tracer_thin_interval:        10      # [tracer_thinning: cell] thin every this many steps
   seafloor_spacing_deg:        1.0     # grid spacing for initial seafloor age tracers
   spreading_rate_km_per_myr:   50.0    # assumed spreading rate for initial age estimation
 
   csv_save_interval:           5       # save outputs every N timesteps
-  plot_interval:               1       # make plots every N timesteps; set to null to disable
-  random_seed:                 null    # integer → repeatable run (hotspots, seamounts, earthquakes, terrain noise)
+  plot_interval:               null    # draw plot_NNNN.png every N timesteps (~8 s each, slower than a step); null: none (draw saved steps later with diagnose_run.py)
+  random_seed:                 null    # hotspots, seamounts, earthquakes, terrain noise; null: drawn, in run_info.yaml
 ```
 
 Simplification works in lon/lat, but pygplates reads every edge as a great-circle arc. So polygon edges are densified to ≤ 1° wherever polygons are handed to pygplates, and the extracted boundary lines get the same treatment. Without this, long edges would bow toward the pole. Boundaries are extracted from the undensified polygons, so shared edges are always recognised.
@@ -270,13 +447,17 @@ Hotspot positions are fixed in the mantle frame (not reconstructed). Seamounts a
 
 Tracks subducted material vertically through the mantle and synthesises a 3D seismic velocity anomaly field.
 
+The code is in the separate package **slablet** ([github.com/siwill22/slablet](https://github.com/siwill22/slablet); `environment.yml` installs release v0.1.0, and for development `pip install -e` a clone of it), which never imports PlateDriver code. Every mantle parameter and its default is in `slablet/params.py` (`MantleParams`); the config keys below are its field names. PlateDriver hands it trench samples through `self_driving_plates.trench_samples`, and records slablet's version and commit in each run's `run_info.yaml`. The same model runs on real reconstructions from slablet (`python -m slablet.gplates.run_mantle <config>`, configs in slablet's `configs/`), with the same `mantle:` keys. Where the shared work stands across PlateDriver, slablet, IPV and defamation (what exists, what is uncommitted, what is planned, known issues) is in slablet's `docs/status.md`.
+
+slablet is required. PlateDriver uses it for the mantle model (`slab_tracers_enabled`, `slab_pull: slab_length`, `slab_suction: depth_split` and the mantle outputs) and for its sphere helpers (`slablet.sphere`); `simple` runs with no mantle option on cost nothing extra. `gate.py` and `regression_check.py` refuse runs made on a slablet with uncommitted changes; an ordinary run on one gets a warning in its `run_info.yaml`.
+
 ```yaml
 params:
   slab_tracers_enabled:    true   # enable slab tracking; produces mantle_temp_NNNN.nc
   slab_slowing_factor:     4      # lower-mantle sinking slowdown (Lithgow-Bertelloni & Richards 1998)
   slab_sink_rate_factor:   1.0    # upper-mantle sinking rate = factor × convergence rate
   slab_max_sink_rate:      400    # km/Myr; cap on sinking rate (real Earth max ~100–200 km/Myr)
-  slab_thermal_tau_myr:    4      # Myr; thermal decay timescale (lower = faster fade)
+  slab_thermal_tau_myr:    100    # Myr; thermal decay timescale (lower = faster fade); open for tuning
   mantle_grid_spacing_deg: 5.0    # degrees; horizontal resolution of 3D mantle field
   mantle_depth_interval_km: 100   # km; depth layer thickness
 ```
@@ -285,7 +466,7 @@ Sinking rate: upper mantle (0–670 km) at `slab_sink_rate_factor × |convergenc
 
 > Runs made before the unit fix sank slabs 10× faster: convergence in km/Myr was treated as cm/yr and multiplied by 10. Set `slab_sink_rate_factor: 10` to reproduce them. With the physical factor of 1, you may want a longer `slab_thermal_tau_myr` so slabs stay visible in the lower mantle.
 
-Each slablet has a weight of `delta_time × min(1, |convergence| / 10 km/Myr)`. This keeps the mantle signal independent of the time step and stops near-stalled boundaries from building up slablets. Slablets warm up exponentially with e-folding time `slab_thermal_tau_myr` and are removed when they reach the CMB. Horizontal smoothing uses a spherical Gaussian (great-circle distance, correct across ±180° and the poles). The dVs field has zero area-weighted mean at each depth level, matching the real tomography convention, and can optionally be smoothed to simulate finite-resolution imaging.
+Each slablet has a weight of `delta_time × min(1, |convergence| / 10 km/Myr)`. This keeps the mantle signal independent of the time step and stops near-stalled boundaries from building up slablets. Slablets warm up exponentially with e-folding time `slab_thermal_tau_myr` and are removed when they reach the CMB (`slab_at_cmb: rest` keeps them there until their anomaly has faded). Two options fix known flaws and are off by default so existing runs reproduce: `mantle_bin_area_normalise` (a slab counts the same at every latitude; without it a slab at 60° gets half the area-integrated anomaly of one at the equator) and `cmb_suppression_thermal_decay` (a slablet suppresses CMB heat in proportion to its remaining thermal anomaly, as in the dVs field). Horizontal smoothing uses a spherical Gaussian (great-circle distance, correct across ±180° and the poles). The dVs field has zero area-weighted mean at each depth level, matching the real tomography convention. It is not blurred to imitate tomography (that blur was removed in November 2026; slablet plans to filter it with the resolution operator of S40RTS instead).
 
 ### CMB heat accumulation (LLSVP proxy)
 
@@ -303,18 +484,6 @@ params:
 ```
 
 The `cmb_surface_coupling` parameter implements an instantaneous dynamic pressure coupling: surface slablets suppress CMB heat with weight `surface_coupling`, deep slablets with weight up to 1.0 (linearly interpolated with depth). This allows the CMB field to respond to surface subduction from the first timestep, without waiting for material to physically reach the base of the mantle.
-
-### Tomographic smoothing
-
-Blurs the final dVs field to simulate the resolution limits of real seismic tomography.
-
-```yaml
-params:
-  tomo_smooth_horiz_deg:  5.0    # horizontal Gaussian sigma (degrees; 0 = off)
-  tomo_smooth_depth_km:   150.0  # vertical Gaussian sigma (km; 0 = off)
-```
-
-Typical global tomography models have horizontal resolution ~500 km (~5°) and vertical resolution ~150 km.
 
 ### Plate fragmentation
 
@@ -336,12 +505,89 @@ Areas are spherical, given in equatorial-equivalent deg².
 1. **Screening.** Concavity and aspect ratio are measured in an equal-area projection centred on the plate. Only plates that fail either test are examined further.
 2. **Neck search.** The plate is eroded by increasing great-circle distances from its edge. The first distance at which the eroded core breaks into two substantial pieces gives the neck half-width. Each plate pixel is then assigned to the nearer piece, which places the cut through the neck.
 3. **Split rule.** A U- or C-shaped plate of uniform width, or any convex plate, has no neck and is never cut.
-4. **Cratons.** Cratons stay with the parent plate ID. A cut that would separate cratons of the same plate is skipped.
+4. **Continents.** Continents stay with the parent plate ID. A cut that would separate continents of the same plate is skipped.
 5. **New plates.** The child plate gets a new, never-reused PLATEID. It inherits the parent's stage pole and full rotation history, then diverges naturally as its new boundary is classified.
 
 Disconnected pieces of one plate ID (for example, after overlaps are resolved) are handled the same way at every step:
-- Pieces smaller than `min_peninsula_area_deg2` are absorbed by their neighbour.
+- Pieces smaller than `min_peninsula_area_deg2` are absorbed by their neighbour. Disconnected
+  pieces of a plate use `min_piece_area_deg2` instead, if it is set.
 - Larger pieces become child plates.
+
+### Rifting (trial split)
+
+With `rifting: trial` (`physical`), plates can split under tension.
+
+**Tension across a cut.**
+- For a plate with solved rotation ω, the torque the plate would need in order to move as one
+  piece is τh = D₁ω − τ₁. Here τ₁ is the driving torque on one half and D₁ that half's drag,
+  including the drag of its collision contacts.
+- The cut's moment is M = ∫ r × n̂ ds along the cut.
+- The tension is τh·M / |M|², per unit length. It is expressed in units of full slab pull,
+  like the strength.
+
+**The candidate cuts.** Each plate has 12 azimuths × 3 offsets (`rift_sweep_offsets_deg`) of
+great circles through its centroid, all on the sphere.
+
+**When a cut passes.** A cut is kept when all of the following hold:
+1. The tension is greater than the mean strength along the cut:
+   - continent: `rift_strength_continent` (σc);
+   - ocean: `oceanic_strength_ratio` × σc × max(`oceanic_strength_floor`, √(min(age, 80)/80)).
+2. The two halves, solved free of each other, would open along at least half of the cut.
+3. Both halves are at least `min_child_area_deg2`.
+4. The circle crosses the plate only once.
+
+**How a split happens.**
+- The plate splits when a similar cut, with its normal carried with the plate and within 15°,
+  has passed for `rift_persist_myr` steps.
+- The split is applied at the start of the next step. The smaller side becomes a new plate
+  that inherits the parent's stage pole and rotation history.
+- The continents on each side are rebuilt from the split continent raster.
+- Both halves are then left untested for `rift_cooldown_myr`.
+- Each split is written to `rift_events.csv`.
+
+**The strengths are set for the `physical` forces.** Tension scales with the driving forces and
+the drag, so the same strengths split plates far more often under other force modes. In 100-Myr
+runs from the bundled map (tie seed 0; November 2026), the `physical` preset had 10 plates at
+100 Myr, while changing only `drag` to `area` or `none`, or `slab_suction` to `ratio`, gave 62–81
+plates, most of them smaller than 0.5% of the sphere. Changing those modes therefore needs new
+strengths too.
+
+```yaml
+params:
+  rift_strength_continent:     0.5      # σc, full slab pull per unit length
+  oceanic_strength_ratio:      3        # oceanic strength at >= 80 Myr, x σc
+  oceanic_strength_floor:      0.2      # oceanic strength ~ sqrt(min(age, 80)/80), not below this
+  rift_persist_myr:            3        # the cut must pass for this long before the plate splits
+  rift_cooldown_myr:           10       # both halves are not tested again for this long
+  rift_sweep_azimuths:         12       # candidate great circles through the plate centroid
+  rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
+```
+
+```yaml
+params:
+  weld_after_myr:              30       # continuous continental collision before the smaller plate is absorbed
+  weld_contact_reach_deg:      1        # [collision_weld: on] continent pieces within this of the contact are welded
+  weld_accrete_max_frac:       0.03     # [collision_weld_giver: downgoing] largest continent accreted to the overriding plate (share of the sphere)
+  weld_accrete_min_frac:       0        # [collision_weld_giver: downgoing] smaller continent pieces are not accreted
+  min_piece_area_deg2:         null     # disconnected pieces of a plate smaller than this join a neighbour (null: min_peninsula_area_deg2)
+  collision_stiff_factor:      100      # [collision_contact: stiff] contact drag per collision, independent of the contact length
+  collision_radius_deg:        null     # continents of two plates this close to a boundary are in collision (null: boundary_search_radius_deg)
+  strength_spread:             0.5      # [continent_strength: cores_random] each core / belt factor = median x exp(spread x N(0,1))
+  suture_strength_factor:      0.5      # continental rift strength x this near a suture
+  suture_width_deg:            2        # ... within this great-circle distance of a suture point
+```
+
+**How σc behaves** (500-Myr `physical` runs on atlantis66, one run each; see
+`docs/evidence.md`, E3):
+
+| σc | rifts | result |
+|---|---|---|
+| 1.0 | 1 | practically no rifting |
+| 0.5 | 24 | the large continent 222 rifts twice; continents disperse |
+| 0.25 | 530 | runaway, 182 plates at 500 Myr |
+
+**Weak young ocean.** Ocean younger than about 9 Myr is weaker than continent, so at σc 0.5
+most cuts split off small oceanic pieces near ridges, and they last 25–50 Myr.
 
 ### Plate merging
 
@@ -354,13 +600,35 @@ params:
   merge_min_steps:              5      # consecutive near-zero steps before merge fires
   merge_require_no_driver:      true   # only merge if smaller plate has no ridge/subduction
   merge_cooldown_myr:           10.0   # Myr before merged plate is eligible again
+  merge_max_area_frac:          null   # only absorb plates smaller than this share of the sphere (null: any size)
 ```
 
-A `_conservative_contact` counter is maintained across timesteps for each plate pair. When the mean absolute divergence stays below `merge_conservative_threshold` for `merge_min_steps` consecutive steps, the smaller plate's raster pixels are relabelled with the larger plate's ID. Plate size is spherical area. With `merge_require_no_driver`, a merge only happens if the smaller plate has no ridge or subduction boundary. Cratons of an absorbed plate move with the host from then on. The merged polygon is re-derived from the updated raster; no special stage-pole initialisation is needed. A cooldown suppresses re-merging or re-fragmentation shortly after an event.
+A `_conservative_contact` counter is maintained across timesteps for each plate pair. When the mean absolute divergence stays below `merge_conservative_threshold` for `merge_min_steps` consecutive steps, the smaller plate's raster pixels are relabelled with the larger plate's ID. Plate size is spherical area. With `merge_require_no_driver`, a merge only happens if the smaller plate has no ridge or subduction boundary. Cratons of an absorbed plate move with the host from then on. The merged polygon is re-derived from the updated raster; no special stage-pole initialisation is needed. A cooldown suppresses re-merging or re-fragmentation shortly after an event. With `merge_max_area_frac`, only a plate smaller than that share of the sphere is absorbed. In the physical model, boundary divergence is in km/Myr and only about 10% of plate pairs move apart or together at less than about 8 km/Myr on average, so the default threshold (0.05) never fires there; a few km/Myr is needed.
 
 ---
 
 ## Analysis scripts
+
+### `gate.py`
+
+Runs one gate: a config over several tie seeds, then the standard table, the map sequence and,
+optionally, the viewer export:
+
+```bash
+conda run -n pygmt17 python gate.py configs/current_model.yaml --name current_model \
+    [--seeds 0 1 2] [--until 500] [--period 250] [--export [--replace-viewer]] [--no-run]
+```
+
+- Runs go to `runs/<name>/tbN/` (gitignored), all seeds in parallel; a seed that already
+  reached `--until` is not run again (`--rerun` forces it).
+- `runs/<name>/gate_table.csv`: one row per seed and period and one per whole run. Columns:
+  plates, slivers (< 0.5% of the sphere), plates > 2%, largest plate (mean, max), RMS speed,
+  rifts, continental rifts, welds, accretions, hidden continent, trench and ridge length, step
+  time, and the ocean-age distribution at the period's end (median; shares older than 100, 150
+  and 200 Myr; oldest; the share left from t = 0).
+- `show-me/<date>-<name>/` (local, ignored by git): `diagnose_run.py`'s map sequence (one column per seed), time series
+  and Forsyth–Uyeda plots, the table and a README.
+- `--export` adds the runs to the viewer (`--replace-viewer` removes every other run first).
 
 ### `analyse_boundaries.py`
 
@@ -386,7 +654,8 @@ only in `tie_break_seed` diverge visibly, while their statistics stay alike. In 
 atlantis66 runs, `simple` runs are different worlds by about 150 Myr. `physical` runs still
 share about 80% of their plate IDs at 200 Myr, but only because their plates move about 3×
 slower: per 1000 km travelled they drift apart at least as fast. `random_seed` changes only
-hotspots, seamounts, earthquakes and terrain noise, not the plate motions, so ensembles vary
+hotspots, seamounts, earthquakes and terrain noise, not the plate motions (except with
+`continent_strength: cores` or `cores_random`, whose terranes it places), so ensembles vary
 `tie_break_seed`.
 
 ### `diagnose_run.py`
@@ -400,6 +669,8 @@ python diagnose_run.py ./output_a ./output_b --labels simple physical [--out fig
 - `fu_plot.png`: plate RMS speed against trench fraction and against continental fraction (Forsyth & Uyeda 1975 found speed rises with the first and falls with the second).
 - `timeseries.png`: RMS speed and fastest plate, net rotation, number of plates, seconds per step.
 - `maps_NNNN.png`: seafloor age, boundaries by type and plate velocity arrows.
+
+This draws a map of any saved step after the run, in about 3 s, from the saved grids and tables. A map drawn during the run (`plot_interval`) takes about 8 s, longer than a model step of the `physical` preset (about 3 s), so the run waits for it: with a map at every step, a 1000-Myr run of `config.yaml` spent 77% of its time waiting. `config.yaml` therefore draws no maps during the run.
 
 ### `regression_check.py`
 
@@ -415,11 +686,23 @@ Runs with the same `random_seed` are repeatable, so `force_model: simple` is che
 
 ## Codebase reference
 
+Four modes were removed in November 2026, because no preset used them and their gates had failed or they were kept
+only for comparison: `slab_pull: ramp`, `plate_rebuild: rotated`, `collision_weld_scope: plate` (welds now always pass
+only the continent at the contact) and `collision_tear` (its cuts passed the rift test in 3 plate-steps of 500 Myr).
+A config may still say `collision_weld_scope: continent` or `collision_tear: off`; the removed settings stop the run
+with a message.
+
+In the code, `craton` (`craton_raster`, `craton_counts`, `cratons`) still names the continent mask, which covers
+all continental lithosphere; the internal names follow in the planned code reorganisation (`docs/public_release_plan.md`,
+stage D).
+
 ### File structure
 
 | File | Role |
 |---|---|
 | `self_driving_plates.py` | Library — all simulation logic as importable functions |
+| `tests/` | `test_slablet_adapter.py`: PlateDriver's trench-sample adapter still makes the samples of slablet's golden test (`tests/data/golden_samples.npz`) |
+| `runs_real/` | Outputs and caches of slablet's real-reconstruction runs (gitignored; slablet's `runs_real` links here) |
 | `run_SDP.py` | Driver script — config loading, bootstrapping, main loop, plotting, output |
 | `plate_driver.py` | Torque helpers: segment torque, torque → stage rotation, and the bootstrap torques from the GPlates boundary feature types |
 | `force_modes.py` | Force-model presets (`simple`, `physical`), mode choices and their validation |
@@ -434,11 +717,11 @@ Runs with the same `random_seed` are repeatable, so `force_model: simple` is che
 
 ### Async output worker
 
-Plotting and file I/O are handled by a background daemon thread so the main simulation loop is never blocked waiting for a PNG to render or a NetCDF to be written. The worker (`_output_worker` in `run_SDP.py`) consumes from `_output_queue` (a `queue.Queue(maxsize=3)`). At plot intervals the main loop enqueues a `('plot', payload)` task and at save intervals a `('save', payload)` task, then immediately proceeds to the next timestep.
+Plotting and file I/O are handled by a background daemon thread, so the main simulation loop does not wait for a PNG to render or a NetCDF to be written unless the worker falls behind (see below). The worker (`_output_worker` in `run_SDP.py`) consumes from `_output_queue` (a `queue.Queue(maxsize=3)`). At plot intervals the main loop enqueues a `('plot', payload)` task and at save intervals a `('save', payload)` task, then immediately proceeds to the next timestep.
 
 Each output file is written independently: if one fails (for example the seafloor age grid), the error is printed with a full traceback and the other outputs for that step are still written. The run ends with a list of failed outputs and a non-zero exit code. The queue is drained even if the main loop stops with an error or Ctrl-C.
 
-The `maxsize=3` limit applies backpressure: if the worker falls more than 3 tasks behind (e.g. when saving very large mantle temperature grids) the main loop pauses briefly rather than accumulating unbounded state. At the end of the run, `_output_queue.join()` ensures all queued tasks are fully written before the process exits.
+The `maxsize=3` limit applies backpressure: if the worker falls more than 3 tasks behind, the main loop waits rather than accumulating unbounded state. Whenever the outputs take longer than the steps, the run goes at the worker's pace: a map at every step (about 8 s each) made the default run wait 77% of its time. `seconds_outputs_enqueue` in `step_stats.csv` records the wait. At the end of the run, `_output_queue.join()` ensures all queued tasks are fully written before the process exits.
 
 Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_records` are shallow-copied; `cmb_heat` and `slab_tracers` are copied with `.copy()`; cratons are converted from pygplates FeatureCollection to GeoDataFrame in the main thread before being passed to the worker.
 
@@ -450,7 +733,7 @@ Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_re
                                                     (only used to classify the initial boundaries)
     [if a force mode reads seafloor age or slab depth]
         compute_timestep(..., simple modes)       → the step-0 boundaries only
-        generate_seafloor_age_tracers; seed_initial_slabs (columns to initial_slab_depth_km)
+        generate_seafloor_age_tracers; mantle.initial_slab_columns (columns to initial_slab_depth_km)
     compute_timestep(initial polygons, seed poles, ..., force_fields) → configuration at t = 0, stage poles S0
     [else] generate_seafloor_age_tracers
     generate_hotspot_locations; outputs for step 0
@@ -478,8 +761,8 @@ Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_re
     deactivate_subducted_tracers(tracers, boundaries_gdf, ...)        → only on the downgoing plate
     seed_ridge_tracers(boundaries_gdf, ...)                           → new crust, age 0
     [same for seamounts; then seed_hotspot_seamounts]
-    [if slab_tracers_enabled or a slab mode] update_slab_tracers
-    [if slab_tracers_enabled] update_cmb_heat
+    [if slab_tracers_enabled or a slab mode] mantle.sink_slabs, then mantle.seed_slabs(trench_samples)
+    [if slab_tracers_enabled] mantle.update_cmb_heat
 
     [at plot_interval / csv_save_interval steps, and always at the last step]
         plot_NNNN.png, tracers, seafloor age, boundaries, earthquakes, topography,
@@ -491,13 +774,15 @@ Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_re
 ```
 tessellate_polygons           densify polygon edges to tessellation_deg (great circles)
 plate_polygons_to_wrapped_gdf wrap at dateline, keeping interior rings (holes)
-resolve_overlaps              clip overlapping polygons by PLATEID1 priority
-update_plate_id_raster        rasterize to plate_id grid; fill gaps with the nearest plate (SphereTree),
-                              ties by tie_break
+update_plate_id_raster        rasterize to plate_id grid, highest PLATEID1 first so the lowest ID keeps
+                              any overlap; fill gaps with the nearest plate (SphereTree), ties by tie_break
 [apply_plate_merges]          merge_pairs from the caller (merging_enabled only)
 [craton raster]               rasterize cratons (with remap of absorbed plates), overwrite plate_id
+[apply_rift_split]            rift splits planned last step, cut along the carried great circle
+                              (rifting: trial)
 split_disconnected_plates     disconnected pieces of one ID → new plates (or absorbed if tiny)
-update_plate_polygons         polygonize raster → toposimplify → clip → densify edges to ≤ 1°
+update_plate_polygons         polygonize raster → [staircase midpoints (plate_rebuild: midpoint)] →
+                              toposimplify → clip
 [detect_and_split_plates]     shape screening → spherical erosion neck search → cut
                               (fragmentation_enabled only)
 detect_enclosed_plates        absorb plates enclosed by one larger plate
@@ -513,6 +798,7 @@ polygons_to_stage_poles       boundary and body forces → torque per plate; pol
                               (any drag or speed mode; simple: ω = torque)
 [apply_collision_coupling]    collision: coupling (and breakoff on coupling)
 [detach_colliding_slabs]      collision: breakoff
+[rift_trial_splits]           tension against strength on candidate cuts (rifting: trial)
 ```
 
 ### Key data structures
@@ -530,7 +816,7 @@ Maps plate ID → craton raster pixel count. Used by `resolve_downgoing_plate`.
 
 **`slab_tracers`**: `DataFrame` with columns `lon`, `lat`, `depth_km`, `age` (Myr since subduction), `active` (bool), `sink_rate_km_per_myr`, `weight`, and `attached` (bool; `collision: breakoff` sets it False for a detached slab, which stops pulling).
 
-**`cmb_heat`**: `ndarray` (nlat × nlon) of heat accumulation units. Built up over time by `update_cmb_heat`; injected into the deep mantle by `generate_mantle_temp_field`.
+**`cmb_heat`**: `ndarray` (nlat × nlon) of heat accumulation units. Built up over time by `mantle.update_cmb_heat`; injected into the deep mantle by `mantle.dvs_field`.
 
 **`rasters`**: `xr.Dataset` with variables `plate_id`, `velocity_east`, `velocity_north`, `divergence`, and optionally `craton`. All on a regular lon/lat grid at `raster_spacing` degree resolution.
 
@@ -559,7 +845,7 @@ This is spherically correct and has no polar singularity.
 - **Sinking**: upper mantle (0–670 km): rate = `min(slab_sink_rate_factor × |divergence|, max_sink_rate)` km/Myr; lower mantle: rate / `slab_slowing_factor`. Slablets are removed on reaching the CMB (~2890 km)
 - **Thermal fading**: `dT = T₀ × weight × exp(-age / slab_thermal_tau_myr)` where `T₀ = -500 K`
 - **dVs conversion**: `dVs = dT × dVs_per_K` (-0.001 %/K) → cold slab = positive dVs (fast waves)
-- **Final field**: spherical Gaussian horizontally, Gaussian in depth. Each depth level has zero area-weighted mean. It can optionally be blurred by `tomo_smooth_horiz_deg` / `tomo_smooth_depth_km`
+- **Final field**: spherical Gaussian horizontally, Gaussian in depth. Each depth level has zero area-weighted mean
 
 ### Synthetic earthquake generation
 
@@ -604,19 +890,76 @@ GPlates `.rot` format:
 ```
 plate_id   time   euler_lat   euler_lon   angle_deg   000
 ```
-Fixed plate is `000` (absolute frame). Each plate gets a `t=0` identity line. Sorted by plate ID then time.
+Fixed plate is `000` (absolute frame: the model's fixed mantle grid). Each plate gets a zero-age identity line. Sorted by plate ID then time.
 
-The `time` column is **elapsed model time** in Myr since the starting snapshot, not "Ma before present". The finite rotation at time `t` moves the step-0 plate geometry to its position at step `t / delta_time`. To use the file in GPlates, treat the starting configuration as "present day" (0 Ma) and the simulated future as increasing "age". Plates created by fragmentation carry their parent's rotations up to the split.
+By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` treats step NNNN as **present day** (0 Ma) and counts time back from it, as GPlates does: the rotation at age `a` moves a plate from its position at step NNNN to its position `a` Myr earlier. Load it with that step's outputs (plate polygons, boundaries, seafloor age, all in present-day positions) and GPlates reconstructs them back through the run; seafloor of age `a` formed at reconstruction time `a`. Plates that no longer exist at step NNNN are left out, and plates created by a split carry their parent's rotations from before the split.
+
+`rotation_time: elapsed` writes the form used before November 2026: the time column is elapsed model time since the starting snapshot and the rotation at time `t` moves the step-0 geometry forward to step `t / delta_time`, so GPlates plays the run backwards.
 
 ---
 
 ## Known issues and TODO
 
-- **Overlap priority**: where moved plates overlap, the lower PLATEID wins (`resolve_overlaps`). A physically based rule, for example letting the overriding plate win at trenches, is not implemented.
+- **Overlap priority**: until November 2026 (`overlap: plate_id`) the lower PLATEID kept the cells where moved plates overlap, so at many trenches the overriding plate was consumed instead of the downgoing one. `physical` now uses `overlap: polarity`, which reduces the largest plate but not the share of old ocean. `simple` keeps the original rule: with `polarity` its speeds ran away (`docs/public_release_plan.md`, stage A).
+- **`simple` is for runs of up to about 200 Myr.** It has no drag and no speed calibration, so its RMS speed starts at about 140 mm/yr and reaches 300–490 mm/yr, and the fastest plates swallow their neighbours. In 3 of 6 runs of 500 Myr (both `overlap` rules) the world ended as one plate, at 254–429 Myr; a run then stops at that step with a message.
+- **Results depend on the time step and the plate grid.** The layout rules (rifting, merging,
+  neck splitting, rebuilding plates from the grid, settling overlaps) were tuned at
+  `delta_time: 1`, `raster_spacing: 0.25` and `physics_grid_deg: 1`. In runs of the current model
+  (November 2026, `docs/evidence.md`, E5), a 0.5- or 0.25-Myr step left about
+  11% of the ocean at 200 Myr as starting ocean that never subducted, against 4.9% (0.5–9.6%, eleven
+  seeds) at the default 1 Myr and 3% at 2 Myr. The trenches consume the right area at every step
+  (98–99% of convergence × length); what changes is which ocean they consume. A 0.125° or a 0.5°
+  plate grid also left more (10–12%). The effect is transient: by 500 Myr the starting ocean is
+  gone at both steps and the old-ocean shares agree within the spread of seeds. A 0.5-Myr step or a 0.5° plate grid also left more plates by 300 Myr (24–27
+  against 13–23) and twice as many slivers. The force grid is converged at 1°: 0.5° changed
+  nothing beyond the spread of seeds. Keep the defaults unless the change is what is being studied.
+- **Boundaries snap to meridians and parallels** with `plate_rebuild: lonlat` (`simple`); see `plate_rebuild`.
+- **Ridge push points mostly exactly N–S or E–W** (`ridge_push: body`): the age grid is piecewise constant (nearest tracer) and its gradient is taken along lon and lat. The effect on plate motion is not measured.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.
+- **Continents can overlap** without `collision_contact: stiff`. Continents are rigid polygons
+  carried by their plates, and the length-scaled contact drag only slows a collision, so
+  converging continents slide over each other and the grids show only one of them
+  (`continent_hidden_km2` in `step_stats.csv`). With the stiff contact and
+  `collision_radius_deg: 0.5` (the current model) at most 0.4% of continent is hidden, but
+  colliding continents stop with up to about 100 km of ocean still between them.
+- **Hidden continent is lost at a rift.** After a rift, the parent's continents are rebuilt
+  from the raster, which only holds the visible continent, so any continent hidden under
+  another is deleted. Without the stiff contact this adds up: `config.yaml` run to 1000 Myr
+  (the `physical` preset, with up to 4% of continent hidden) lost 10.8% of its continent, 10.6%
+  of it in six rift steps and one other step, up to 3.3% at once. The current model (stiff
+  contact) loses 2–5% in 1000 Myr (November 2026).
 - **Terrain noise is fixed to the grid**: continents move over a stationary noise pattern rather than carrying their texture with them.
-- **No continental rifting** (physical): nothing in the v1 force model breaks a continent, so a supercontinent stays together; in 200-Myr atlantis66 runs (all three members of a tie-seed ensemble) the continents barely rearrange and RMS speed drifts down from 50 to 33–35 km/Myr.
-- **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is a v2 item.
+- **Rifting** (`rifting: trial`):
+  - With the default straight cuts and one continental strength, most rifts split off
+    short-lived oceanic slivers; `rift_path: least_cost` and `continent_strength: cores` or
+    `cores_random` make continents rift along their belts.
+  - **Large ocean plates never rift.** Old ocean is the strongest material (1.5, against
+    tensions of about 0.2–0.4 across a cut) and the tension across a cut does not grow with
+    plate size. Nothing else starts a new boundary inside a plate: there is no subduction
+    initiation and no back-arc rifting. A large ocean plate therefore only shrinks at its own
+    trenches; in one of the three current-model runs one reaches 49% of the sphere by 1000 Myr.
+  - **Small plates rift more easily than large ones**, so without merging the slivers multiply:
+    current-model settings without merging reach 50–90 plates by 500–750 Myr in two of three
+    seeds. `merging_enabled` with `merge_max_area_frac` holds it for about 500 Myr, but not to
+    the current model's full 1000 Myr: in three of four seeds the continents shatter from about
+    400 Myr, and the mean plate count over 750–1000 Myr is 35–51, with 13–23 plates smaller than
+    0.5% of the sphere (November 2026). The plain `physical` preset does the same (13 plates at 500
+    Myr, 37 at 700 Myr), so `config.yaml` stops at 500 Myr. `min_child_area_deg2: 400` stops most of it but brings back a giant plate
+    (37–48% of the sphere) and old ocean; `merge_max_area_frac: 0.05` does not stop it.
+  - With `rifting: none`, nothing breaks a continent.
+- **Collision settings are not calibrated.** `collision_stiff_factor` (100) and
+  `weld_accrete_max_frac` (3% of the sphere) are order-of-magnitude choices; the convergence
+  left at a stiff contact has not been measured.
+- **Edge drag along the dateline** with `rebuild_tiles: off` (`simple`): a plate crossing ±180° is split into
+  two polygons there, and the seam between them counts as plate boundary in the edge drag
+  (`drag: area_edge`). `rebuild_tiles: on` drops it, which changes the calibrated speed scale by
+  about 5% (k 1.68 → 1.60).
+- **A plate reaching from pole to pole** can't be represented by whole lon/lat plate polygons
+  (`rebuild_tiles: off`). In one form the run stops with an error; in others the dateline wrap
+  turns the plate inside out and the plates are scrambled with no error (seen when welds made one
+  plate 70–85% of the sphere). `rebuild_tiles: on` avoids it.
+- **Polarity is decided per plate pair** (`polarity: age`), at first convergence. Ages vary along a contact and change later, so the older side is subducting on only about half the ocean–ocean trench length after 50 Myr. Per-segment polarity is not implemented.
 - **Ridges sit close to trenches** in places (a thin strip of young plate made and consumed side by side), in both presets.
 - **Ridges are not split into spreading segments and transforms**; boundaries are continuous lines of varying obliquity. A post-processing step could add this for appearance.
-- **Seafloor tracers accumulate** where plates are slow (146k–150k after 200 Myr in physical, against 45k–58k in simple, over three members each).
+- **Seafloor tracers accumulate** where plates are slow with `tracer_thinning: none` (146k–150k after 200 Myr in physical, against 45k–58k in simple, over three members each). `physical` thins them (`cell`).
+- **Mixed seafloor ages on one plate:** in places (e.g. near the south pole in long physical runs) tracers of 20–190 Myr lie within 1° of each other on the same plate, so the age there is poorly defined.

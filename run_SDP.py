@@ -21,6 +21,8 @@ import plate_driver as pdriver
 import self_driving_plates as sdp
 import step_stats
 
+slablet = sdp.slablet          # the mantle model
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -39,6 +41,29 @@ output_dir  = cfg.get('output_dir', './output')
 run_cfg     = cfg['run']
 forces      = cfg['forces']
 params      = cfg['params']
+
+# Names used before November 2026 are still read: input_files.cratons held all continental
+# lithosphere, not only cratons, and params.craton_core_* set the strong continental cores.
+if 'continents' not in files and 'cratons' in files:
+    files['continents'] = files.pop('cratons')
+    print('note: input_files.cratons is now called input_files.continents')
+for _old, _new in sdp.RENAMED_PARAMS.items():
+    if _old in params and _new not in params:
+        params[_new] = params.pop(_old)
+        print('note: params.{} is now called params.{}'.format(_old, _new))
+
+# Relative input paths are read from the PlateDriver folder, so a config works from any working
+# directory and wherever a copy of it is written (gate.py writes one per seed).
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _input_path(path):
+    path = os.path.expanduser(path)
+    return path if os.path.isabs(path) else os.path.join(REPO_DIR, path)
+
+
+files = {key: [_input_path(f) for f in value] if isinstance(value, list) else _input_path(value)
+         for key, value in files.items()}
 
 reconstruction_time = run_cfg['reconstruction_time']
 delta_time          = run_cfg['delta_time']
@@ -60,6 +85,45 @@ params['slab_pull_mode'] = modes['slab_pull']
 params['slab_suction_mode'] = modes['slab_suction']
 params['polarity_mode'] = modes['polarity']
 params['ridge_push_mode'] = modes['ridge_push']
+params['tracer_thinning_mode'] = modes['tracer_thinning']
+params['plate_rebuild_mode'] = modes['plate_rebuild']
+params['rifting_mode'] = modes['rifting']
+params['collision_weld_mode'] = modes['collision_weld']
+params['collision_weld_giver_mode'] = modes['collision_weld_giver']
+params['collision_contact_mode'] = modes['collision_contact']
+params['sutures_mode'] = modes['sutures']
+params['rift_path_mode'] = modes['rift_path']
+params['continent_strength_mode'] = modes['continent_strength']
+params['rebuild_tiles_mode'] = modes['rebuild_tiles']
+params['subduction_init_mode'] = modes['subduction_init']
+params['overlap_mode'] = modes['overlap']
+if modes['rifting'] == 'trial' and modes['drag'] == 'none' and modes['speed_normalisation'] == 'none' \
+        and params.get('speed_scale') is None:
+    raise SystemExit('rifting: trial measures tension from the solved plate motions, so it needs drag: area or '
+                     'area_edge, or speed_normalisation: calibrate_once or per_step (with drag: none and no speed '
+                     'scaling, as in simple, it would never run)')
+if modes['subduction_init'] != 'off' and modes['rifting'] != 'trial':
+    raise SystemExit('subduction_init tests passive margins inside the rifting trial split, so it needs rifting: trial')
+if modes['collision_weld'] == 'on' and modes['collision'] not in ('coupling', 'breakoff'):
+    raise SystemExit('collision_weld: on needs collision: coupling or breakoff (they time the collisions)')
+if modes['collision_contact'] == 'stiff' and not (modes['collision'] == 'viscous' or (
+        modes['collision'] == 'breakoff' and params.get('breakoff_contact', 'viscous') == 'viscous')):
+    raise SystemExit('collision_contact: stiff changes the viscous contact drag, so it needs collision: viscous '
+                     'or breakoff with breakoff_contact: viscous')
+if modes['sutures'] == 'tracers' and modes['collision_weld'] != 'on':
+    raise SystemExit('sutures: tracers are dropped at welds, so they need collision_weld: on')
+# Modes that act only through another one: allowed (a comparison may switch the other off), but said
+_inert = []
+if modes['rifting'] != 'trial':
+    if modes['rift_path'] != 'straight':
+        _inert.append('rift_path: {} acts only through rifting: trial'.format(modes['rift_path']))
+    if modes['continent_strength'] != 'uniform':
+        _inert.append('continent_strength: {} acts only through rifting: trial (its cores are still '
+                      'written)'.format(modes['continent_strength']))
+if modes['collision_weld'] != 'on' and modes['collision_weld_giver'] != 'smaller':
+    _inert.append('collision_weld_giver: {} acts only with collision_weld: on'.format(modes['collision_weld_giver']))
+for _why in _inert:
+    print('note: {}, so it has no effect in this run'.format(_why))
 _needs = sdp.force_fields_needed(params)     # per-step fields the force modes read
 
 
@@ -79,10 +143,24 @@ def _git_commit():
 # Record exactly what this run used (rewritten after step 0 with the speed scale)
 run_info = {'config_file': os.path.abspath(args.config),
             'git_commit': _git_commit(),
+            'slablet': slablet.version_info(),
             'started': time.strftime('%Y-%m-%d %H:%M:%S'),
             'force_model': force_preset,
             'force_modes_resolved': modes,
             'config': cfg}
+
+# With random_seed: null a seed is drawn here and recorded, so the run can be repeated by setting
+# random_seed to run_info.yaml's random_seed_used.
+run_info['random_seed_used'] = (int(np.random.SeedSequence().entropy) if params.get('random_seed') is None
+                                else params['random_seed'])
+
+
+# A run on a slablet with uncommitted changes cannot be reproduced from a slablet commit: say so
+# (gate.py and regression_check.py refuse such runs outright).
+if str(run_info['slablet'].get('git', '')).endswith('-dirty'):
+    run_info['warnings'] = ['slablet has uncommitted changes ({}); this run cannot be reproduced from a '
+                            'slablet commit'.format(run_info['slablet']['git'])]
+    print('WARNING: ' + run_info['warnings'][0])
 
 
 def _write_run_info():
@@ -95,17 +173,17 @@ _write_run_info()
 # Per-step statistics are appended every step; start them afresh
 _step_stats_csv  = _out('step_stats.csv')
 _plate_stats_csv = _out('plate_stats.csv')
-for _f in (_step_stats_csv, _plate_stats_csv):
+for _f in (_step_stats_csv, _plate_stats_csv, _out('rift_trials.csv'), _out('init_trials.csv')):
     if os.path.exists(_f):
         os.remove(_f)
 
 
 # All randomness (hotspots, seamounts, earthquakes, topography noise)
-# comes from one generator, so a run is repeatable when random_seed is set.
-rng = np.random.default_rng(params.get('random_seed'))
+# comes from one generator, seeded with random_seed (or the seed drawn for it above).
+rng = np.random.default_rng(run_info['random_seed_used'])
 topo_noise_seed = int(rng.integers(2**31 - 1))   # same noise pattern for every saved frame
 
-_missing = [f for f in [files['rotation_model'], files['cratons'], *files['dynamic_polygons']]
+_missing = [f for f in [files['rotation_model'], files['continents'], *files['dynamic_polygons']]
             if not os.path.exists(f)]
 if _missing:
     raise SystemExit('Input file(s) listed in {} not found:\n  {}'.format(
@@ -120,7 +198,7 @@ reconstruction_model = ReconstructionModel('')
 reconstruction_model.add_rotation_model(files['rotation_model'])
 for poly_file in files['dynamic_polygons']:
     reconstruction_model.add_dynamic_polygons(poly_file)
-cratons = pygplates.FeatureCollection(files['cratons'])
+cratons = pygplates.FeatureCollection(files['continents'])
 if reconstruction_time != 0:
     # Cratons are stored at present-day positions; move them to the starting snapshot
     _rotation_model = pygplates.RotationModel(files['rotation_model'])
@@ -163,8 +241,12 @@ _params_step0 = {**params, 'fragmentation_enabled': False}
 
 _slab_enabled = params.get('slab_tracers_enabled', False)   # mantle outputs (CMB heat, mantle_temp)
 _slab_track = _slab_enabled or _needs['slab']                # slab tracers kept (outputs or forces)
-_slab_columns = ['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight']
-slab_tracers = pd.DataFrame(columns=_slab_columns) if _slab_track else None
+mantle_p = slablet.MantleParams.from_config(params)   # every mantle parameter
+slab_tracers = pd.DataFrame(columns=slablet.SLAB_COLUMNS) if _slab_track else None
+
+
+def _trench_samples(bdry):
+    return sdp.trench_samples(bdry, params['div_threshold_subduction'], mantle_p.slab_sample_deg)
 
 
 def _new_seafloor_tracers(plate_polygons, bdry):
@@ -190,15 +272,10 @@ if _needs['age'] or _needs['slab']:
     _step0_fields = {'tracers': (tracers.geometry.x.values, tracers.geometry.y.values,
                                  tracers.age.values.astype(float), None)}
     if _needs['slab']:
-        slab_tracers = sdp.seed_initial_slabs(
-            _pass1[3], params.get('initial_slab_depth_km', 1320.0), delta_time,
-            div_threshold_subduction=params['div_threshold_subduction'],
-            slowing_factor=params.get('slab_slowing_factor', 4),
-            max_sink_rate_km_per_myr=params.get('slab_max_sink_rate', 200.0),
-            sink_rate_factor=params.get('slab_sink_rate_factor', 1.0))
+        slab_tracers = slablet.initial_slab_columns(_trench_samples(_pass1[3]), delta_time, mantle_p)
         _step0_fields['slab_tracers'] = slab_tracers
         print('  [slab] {} initial slab tracers at the step-0 trenches, to {:.0f} km'.format(
-            len(slab_tracers), params.get('initial_slab_depth_km', 1320.0)))
+            len(slab_tracers), mantle_p.initial_slab_depth_km))
     del _pass1
 
 force_diag = {}
@@ -215,6 +292,28 @@ force_diag = {}
                                        speed_state=speed_state,
                                        force_fields=_step0_fields,
                                        force_diag=force_diag)
+if all(r.represents_identity_rotation() for r in stage_pole_dict.values()):
+    # e.g. a starting map drawn for one time, started at another: its ridges and trenches are
+    # not valid there, so no force acts and the run would only repeat the starting map
+    raise SystemExit('No plate moves at the start: the starting map has no ridge or trench at '
+                     'reconstruction_time = {} Ma, so no force acts. Start at a time at which its ridges '
+                     'and trenches are valid (the bundled Atlantis map is drawn for 0 Ma only).'.format(
+                         reconstruction_time))
+# Craton cores and belts (continent_strength: cores), from the step-0 continents; they move
+# with their plates like the suture tracers.  Their own generator, so no other random draw
+# changes.
+_cores = None
+if params['continent_strength_mode'] in ('cores', 'cores_random'):
+    _cores = sdp.generate_craton_cores(rasters['craton'], params.get('core_spacing_km', 2500.0),
+                                       params.get('belt_width_km', 400.0),
+                                       seed=run_info['random_seed_used'] if params.get('core_seed') is None
+                                       else params['core_seed'],
+                                       spread=params.get('strength_spread', 0.5)
+                                       if params['continent_strength_mode'] == 'cores_random' else None,
+                                       core_factor=params.get('core_factor', 3.0),
+                                       belt_factor=params.get('belt_strength_factor', 0.5))
+    print('  [cores] {} terranes; belts {:.0%} of continental points'.format(
+        _cores['terrane'].nunique(), _cores['belt'].mean()))
 if 'last' in speed_state:
     run_info['speed_scale_k'] = float(speed_state['last']['k_used'])
     run_info['rms_speed_unscaled_step0_km_per_myr'] = float(speed_state['last']['rms_unscaled'])
@@ -233,12 +332,17 @@ _conservative_contact   = {}   # {(min_pid, max_pid): int consecutive near-zero 
 _plate_cooldown         = {}   # {pid: float remaining_myr before eligible again}
 _merge_pairs            = []   # [(pid_large, pid_small)] passed to next compute_timestep
 _fragmentation_cooldown_pids = set()
+_rift_state    = {}   # {pid: {'count', 'normal'}} plates whose best cut has passed the trial split
+_rift_planned  = []   # [(pid, plane normal)] splits to make next step
+_rift_cooldown = {}   # {pid: remaining_myr} plates just split, not tested again yet
+_rift_events   = []
+_rift_kind     = {}   # {pid: cut kind (sweep | suture)} of a planned rift, for rift_events.csv
+_welds         = []   # collision_weld: on, one row per weld
+_sutures       = pd.DataFrame(columns=['lon', 'lat', 'suture_id', 'time_myr'])   # sutures: tracers
+_next_suture_id = 1
 _craton_plate_remap     = {}   # {craton_plateid: host_plateid} for absorbed cratons
 if _slab_enabled:
-    _mantle_spacing = params.get('mantle_grid_spacing_deg', 5.0)
-    _cmb_nlat = len(np.arange(-90  + _mantle_spacing / 2, 90,  _mantle_spacing))
-    _cmb_nlon = len(np.arange(-180 + _mantle_spacing / 2, 180, _mantle_spacing))
-    cmb_heat = np.zeros((_cmb_nlat, _cmb_nlon))
+    llsvp_state = slablet.new_llsvp_state(mantle_p)   # CMB heat, pile thickness or None (mantle_p.llsvp)
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +394,38 @@ def _do_plot(i, active_tracers, new_plate_polygons, boundaries_gdf,
     fig.savefig(os.path.join(output_dir, 'plot_{:04d}.png'.format(i)))
 
 
+ID_GRIDS = {'plate_id', 'craton', 'continent'}     # grids of whole-number plate IDs
+
+
+def _save_grid(obj, path, params):
+    """Write a grid (DataArray or Dataset) to NetCDF.  grid_output: compact (default) stores
+    floats as float32 and the plate-ID grids as int32 (NaN as -1), zlib-compressed (level 4),
+    about 5x smaller than full; full keeps the arrays as they are (float64), uncompressed.
+    The model never reads these files back, so the choice does not change a run."""
+    if params.get('grid_output', 'compact') == 'full':
+        obj.to_netcdf(path)
+        return
+    import xarray as xr
+    if isinstance(obj, xr.DataArray):
+        names = {obj.name if obj.name is not None else '__xarray_dataarray_variable__': obj}
+    else:
+        names = dict(obj.data_vars)
+    enc = {}
+    for name, v in names.items():
+        e = dict(zlib=True, complevel=4)
+        if np.issubdtype(v.dtype, np.integer):
+            e['dtype'] = 'int32'
+        elif name in ID_GRIDS:
+            e.update(dtype='int32', _FillValue=-1)
+        elif np.issubdtype(v.dtype, np.floating):
+            e['dtype'] = 'float32'
+        enc[name] = e
+    obj.to_netcdf(path, encoding=enc)
+
+
 def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
              new_plate_polygons, seamounts, rotation_records, params, output_dir,
-             slab_tracers=None, cmb_heat=None, noise_seed=None):
+             slab_tracers=None, llsvp_state=None, noise_seed=None):
     """Write all outputs for step i.  Each output is written independently, so one
     failure does not prevent the others; failures are reported with a traceback."""
     def _out(filename):
@@ -317,7 +450,7 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             _out('tracers_{:04d}.csv'),
             craton_raster=rasters.get('craton'),
             spacing=params['raster_spacing'])
-        grid.to_netcdf(_out('seafloor_age_{:04d}.nc'))
+        _save_grid(grid, _out('seafloor_age_{:04d}.nc'), params)
         return grid
 
     wrote_tracers = _try('tracers', _tracers)
@@ -325,10 +458,11 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
     if wrote_tracers and len(active_tracers):
         age_grid = _try('seafloor age grid', _age_grid)
 
-    _try('divergence', lambda: rasters['divergence'].to_netcdf(_out('divergence_{:04d}.nc')))
-    _try('plate_id', lambda: rasters['plate_id'].to_netcdf(_out('plate_id_{:04d}.nc')))
+    _try('divergence', lambda: _save_grid(rasters['divergence'], _out('divergence_{:04d}.nc'), params))
+    _try('plate_id', lambda: _save_grid(rasters['plate_id'], _out('plate_id_{:04d}.nc'), params))
     if 'craton' in rasters:
-        _try('craton', lambda: rasters['craton'].to_netcdf(_out('craton_{:04d}.nc')))
+        _try('continent', lambda: _save_grid(rasters['craton'].rename('continent'), _out('continent_{:04d}.nc'),
+                                             params))
 
     craton_counts = sdp.craton_counts_from_raster(
         rasters['craton'] if 'craton' in rasters else None)
@@ -395,34 +529,29 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
             himalayan_peak_m=params['topo_himalayan_peak_m'],
             div_threshold_subduction=params['div_threshold_subduction'],
             noise_seed=noise_seed)
-        grid.to_netcdf(_out('topography_{:04d}.nc'))
+        _save_grid(grid, _out('topography_{:04d}.nc'), params)
         return grid
 
     topo = _try('topography', _topography) if 'craton' in rasters else None
 
     if age_grid is not None:
-        _try('topo_bathy', lambda: sdp.generate_topo_bathy_grid(
-            age_grid, topography_raster=topo).to_netcdf(_out('topo_bathy_{:04d}.nc')))
+        _try('topo_bathy', lambda: _save_grid(sdp.generate_topo_bathy_grid(
+            age_grid, topography_raster=topo), _out('topo_bathy_{:04d}.nc'), params))
 
-    _try('rotations', lambda: sdp.write_rotation_file(rotation_records, _out('rotations_{:04d}.rot')))
+    # rotation_time: before_snapshot (default) counts time back from this step, which is then
+    # "present day" in GPlates; elapsed writes elapsed model time (the form before Nov 2026)
+    _present = None if params.get('rotation_time', 'before_snapshot') == 'elapsed' else i * delta_time
+    _try('rotations', lambda: sdp.write_rotation_file(rotation_records, _out('rotations_{:04d}.rot'),
+                                                      present_time=_present))
 
     _active_seamounts = seamounts[seamounts.active.astype(bool)]
     if len(_active_seamounts):
         _try('seamounts', lambda: _active_seamounts[['geometry', 'hotspot_id', 'age']].to_file(
             _out('seamounts_{:04d}.geojson'), driver='GeoJSON'))
 
-    if slab_tracers is not None and cmb_heat is not None:
-        _try('mantle_temp', lambda: sdp.generate_mantle_temp_field(
-            slab_tracers,
-            spacing_deg=params.get('mantle_grid_spacing_deg', 5.0),
-            depth_interval_km=params.get('mantle_depth_interval_km', 100.0),
-            thermal_tau_myr=params.get('slab_thermal_tau_myr', 200.0),
-            cmb_heat=cmb_heat,
-            cmb_dVs_scale=params.get('cmb_dVs_scale', -0.5),
-            cmb_decay_km=params.get('cmb_decay_km', 400.0),
-            tomo_smooth_horiz_deg=params.get('tomo_smooth_horiz_deg', 0.0),
-            tomo_smooth_depth_km=params.get('tomo_smooth_depth_km', 0.0)
-        ).to_netcdf(_out('mantle_temp_{:04d}.nc')))
+    if slab_tracers is not None:          # passed only with slab_tracers_enabled
+        _try('mantle_temp', lambda: _save_grid(slablet.dvs_field(slab_tracers, llsvp_state, mantle_p),
+                                                _out('mantle_temp_{:04d}.nc'), params))
 
 
 # ---------------------------------------------------------------------------
@@ -494,12 +623,16 @@ def _enqueue_outputs(i, force_save=False):
         )
         if _slab_enabled:
             _save_payload['slab_tracers'] = slab_tracers.copy()
-            _save_payload['cmb_heat']     = cmb_heat.copy()
+            _save_payload['llsvp_state']  = None if llsvp_state is None else llsvp_state.copy()
         _output_queue.put(('save', _save_payload))
         if force_diag.get('segments') is not None:
             force_diag['segments'].to_csv(_out('trench_forces_{:04d}.csv'.format(i)), index=False)
         if force_diag.get('ridge_push') is not None:
             force_diag['ridge_push'].to_csv(_out('ridge_push_torques_{:04d}.csv'.format(i)), index=False)
+        if params['sutures_mode'] == 'tracers':
+            _sutures.to_csv(_out('sutures_{:04d}.csv'.format(i)), index=False)
+        if _cores is not None:
+            _cores.to_csv(_out('cores_{:04d}.csv'.format(i)), index=False, float_format='%.3f')
         return True
     return False
 
@@ -537,6 +670,16 @@ def _record_step_stats(i, step_times=None, previous_poles=None):
     _plate_id_history.append(pid_now.copy())
     del _plate_id_history[:-2]
     last = speed_state.get('last', {})
+    _ov = force_diag.get('continent_overlap')
+    if _ov is not None:
+        # continents are rigid polygons; where two overlap the grids show only one
+        step_row['continent_area_km2'] = _ov['continent_area_km2']
+        step_row['continent_hidden_km2'] = _ov['continent_hidden_km2']
+    if 'overlap_area_frac' in force_diag:
+        # overlap: polarity -- the area where moved plates overlapped (share of the sphere),
+        # and the share of it given to a pair's overriding plate (the rest: the lower ID)
+        step_row['overlap_area_frac'] = force_diag['overlap_area_frac']
+        step_row['overlap_by_polarity_frac'] = force_diag['overlap_by_polarity_frac']
     step_row['speed_scale_k'] = last.get('k_used', np.nan)
     step_row['rms_speed_unscaled_km_per_myr'] = last.get('rms_unscaled', np.nan)
     step_row['speed_capped'] = bool(last.get('capped', False))
@@ -596,6 +739,9 @@ try:
             if _new_pid in moving_poles:
                 _craton_stage_poles[_old_pid] = moving_poles[_new_pid]
         cratons = sdp.nudge_polygons(cratons, _craton_stage_poles)
+        _sutures = sdp.advect_sutures(_sutures, previous_plate_id, moving_poles)
+        if _cores is not None:
+            _cores = sdp.advect_sutures(_cores, previous_plate_id, moving_poles)
 
         # Accumulate finite rotations: F(t) = S * F(t - dt), for the move just made
         for pid, stage_rot in moving_poles.items():
@@ -607,6 +753,12 @@ try:
         # ------------------------------------------------------------------
         # Rebuild the plate configuration and compute the next stage rotations
         # ------------------------------------------------------------------
+        # Rift splits decided last step, their cuts moved with the plate
+        _rift_now = [(pid, sdp.rotate_vector(moving_poles.get(pid), n),
+                      None if c is None else dict(xyz=sdp.rotate_xyz(moving_poles.get(pid), c['xyz']), side1=c['side1']))
+                     for pid, n, c in _rift_planned]
+        _rift_planned = []
+
         (new_plate_polygons,
          stage_pole_dict,
          rasters,
@@ -624,8 +776,53 @@ try:
                                                speed_state=speed_state,
                                                previous_plate_id=previous_plate_id,
                                                force_fields=_fields,
-                                               force_diag=force_diag)
+                                               force_diag=force_diag,
+                                               rift_splits=_rift_now,
+                                               rift_skip=set(_rift_cooldown),
+                                               sutures=_sutures if len(_sutures) else None,
+                                               cores=_cores)
         _step_times['compute_timestep'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
+
+        # Rifting (rifting: trial): a plate splits once its best cut has passed the trial
+        # split on a similar great circle for rift_persist_myr in a row
+        if params['rifting_mode'] == 'trial':
+            for _child, _parent in force_diag.get('rift_applied', []):
+                cratons = sdp.rebuild_split_cratons(cratons, rasters['craton'], _parent, _child,
+                                                    _craton_plate_remap, params['raster_spacing'],
+                                                    params.get('topo_simplify_tolerance', 0.4))
+                _rift_cooldown[_child] = _rift_cooldown[_parent] = params.get('rift_cooldown_myr', 10.0)
+                _rift_events.append(dict(time_myr=t, parent=_parent, child=_child,
+                                         cut=_rift_kind.pop(_parent, 'sweep')))
+                pd.DataFrame(_rift_events).to_csv(os.path.join(output_dir, 'rift_events.csv'), index=False)
+            _persist = max(1, int(round(params.get('rift_persist_myr', 3.0) / delta_time)))
+            _state = {}
+            for _pid, _c in force_diag.get('rift', {}).items():
+                _prev = _rift_state.get(_pid)
+                _same = _prev is not None and abs(
+                    sdp.rotate_vector(moving_poles.get(_pid), _prev['normal']) @ _c['normal']) > np.cos(np.radians(15.0))
+                _count = _prev['count'] + 1 if _same else 1
+                if _count >= _persist:
+                    _rift_planned.append((_pid, _c['normal'], _c.get('cells')))
+                    _rift_kind[_pid] = _c.get('cut_kind', 'sweep')
+                    print('  [rift] plate {} passes the trial split for {} steps (tension / strength {:.2f}, '
+                          'cut {:.0f} deg, {}): splits next step'.format(_pid, _count, _c['ratio'], _c['length_deg'],
+                                                                      _rift_kind[_pid]))
+                else:
+                    _state[_pid] = dict(count=_count, normal=_c['normal'])
+            _rift_state = _state
+            # every plate's rift test this step (rift_trials.csv): how close it came to splitting
+            _tr = force_diag.get('rift_trials', {})
+            if _tr:
+                _trf = os.path.join(output_dir, 'rift_trials.csv')
+                pd.DataFrame([dict(time_myr=t, plate_id=_p, area_frac=_r['area_deg2'] / 41252.96,
+                                   **{k: v for k, v in _r.items() if k != 'area_deg2'}) for _p, _r in _tr.items()]
+                             ).to_csv(_trf, mode='a', header=not os.path.exists(_trf), index=False, float_format='%.4g')
+            # every passive-margin trial this step (init_trials.csv; subduction_init: log)
+            if force_diag.get('init_trials'):
+                _itf = os.path.join(output_dir, 'init_trials.csv')
+                pd.DataFrame(force_diag['init_trials']).assign(time_myr=t).to_csv(
+                    _itf, mode='a', header=not os.path.exists(_itf), index=False, float_format='%.4g')
+            _rift_cooldown = {p: r - delta_time for p, r in _rift_cooldown.items() if r > delta_time}
 
         # New plates (fragments) inherit their parent's rotation history, so the
         # rotation file reconstructs them from t = 0 like any other plate.
@@ -681,12 +878,71 @@ try:
                     # only absorb a plate that is not itself driven by a ridge or trench
                     if _no_driver_req and _plate_driver.get(_small, False):
                         continue
+                    # optionally only small plates are absorbed (merge_max_area_frac of the sphere)
+                    _max_frac = params.get('merge_max_area_frac')
+                    if _max_frac is not None and _areas.get(_small, 0) / sum(_areas.values()) > _max_frac:
+                        continue
                     _merge_pairs.append((_big, _small))
                     _plate_cooldown[_p1] = _merge_cooldown
                     _plate_cooldown[_p2] = _merge_cooldown
                     _new_contact[_pair]  = 0
 
             _conservative_contact = _new_contact
+
+        # Welding (collision_weld: on): after weld_after_myr of continuous continental
+        # collision the smaller plate's continent at the contact passes to the larger plate.
+        # With collision_weld_giver: downgoing the continent that arrived on the subducting
+        # plate is accreted to the overriding plate instead, if it is no larger than
+        # weld_accrete_max_frac of the sphere (larger ones stay in collision); the new edge
+        # of the overriding plate is the far side of that continent, where the subducting
+        # plate's ocean meets it.  sutures: tracers marks the join
+        if params['collision_weld_mode'] == 'on':
+            _weld_after = max(1, int(round(params.get('weld_after_myr', 30.0) / delta_time)))
+            _areas_w = sdp.plate_areas(rasters['plate_id'])
+            _total_w = sum(_areas_w.values())
+            _cell_w = sdp.cell_area_weights(sdp.raster_coords(rasters['craton'])[1], rasters['craton'].shape)
+            _used = {_p for _pr in _merge_pairs for _p in _pr}
+            for _pair, _steps in sorted(collision_state.items()):
+                _p1, _p2 = int(_pair[0]), int(_pair[1])
+                if _steps < _weld_after or _p1 in _used or _p2 in _used or _p1 not in _areas_w or _p2 not in _areas_w:
+                    continue
+                _big, _small = (_p1, _p2) if _areas_w[_p1] >= _areas_w[_p2] else (_p2, _p1)
+                _down = polarity_dict.get((min(_p1, _p2), max(_p1, _p2)))
+                _accrete = params['collision_weld_giver_mode'] == 'downgoing' and _down in (_p1, _p2)
+                if _accrete:
+                    _small, _big = _down, _p1 + _p2 - _down      # giver: the subducting plate
+                _pts = force_diag.get('collision_points', {})
+                _moved = sdp.welded_continent_mask(rasters['craton'], _small,
+                                                   _pts.get((_p1, _p2), []) + _pts.get((_p2, _p1), []),
+                                                   params.get('weld_contact_reach_deg', 1.0))
+                _gain = float(_cell_w[_moved].sum())
+                if not _moved.any():
+                    continue
+                if _accrete and _gain / _total_w > params.get('weld_accrete_max_frac', 0.03):
+                    continue        # too large to accrete: the collision goes on
+                if _accrete and _gain / _total_w < params.get('weld_accrete_min_frac', 0.0):
+                    continue        # a sliver of continent: not worth a new plate edge
+                cratons = sdp.transfer_welded_continent(cratons, rasters['craton'], _small, _big, _moved,
+                                                        _craton_plate_remap, params['raster_spacing'],
+                                                        params.get('topo_simplify_tolerance', 0.4))
+                collision_state[_pair] = 0      # the pair carries on; a new weld needs a new collision
+                _used |= {_p1, _p2}
+                _rift_cooldown[_big] = params.get('rift_cooldown_myr', 10.0)
+                _row = dict(time_myr=t, host=_big, absorbed=_small, collided_myr=_steps * delta_time, suture_id=0,
+                            scope='continent', accreted=bool(_accrete), welded_area_frac=round(_gain / _total_w, 4),
+                            host_area_frac=round((_areas_w[_big] + _gain) / _total_w, 4))
+                _smp = force_diag.get('collision_samples', {}).get((_p1, _p2))
+                if params['sutures_mode'] == 'tracers' and _smp:
+                    _sutures = pd.concat([_sutures, sdp.suture_points(_smp, _next_suture_id, t)], ignore_index=True)
+                    _row['suture_id'] = _next_suture_id
+                    _next_suture_id += 1
+                _welds.append(_row)
+                pd.DataFrame(_welds).to_csv(os.path.join(output_dir, 'welds.csv'), index=False)
+                print('  [weld] plates {} and {} collided for {:.0f} Myr: {} {} {} next step{}'.format(
+                    _p1, _p2, _steps * delta_time,
+                    _small, '{} its colliding continent ({:.1%} of the sphere) to'.format(
+                        'accretes' if _accrete else 'gives', _gain / _total_w), _big,
+                    ', suture {} ({} points)'.format(_row['suture_id'], len(_smp)) if _row['suture_id'] else ''))
 
         if params.get('fragmentation_enabled', False) and _new_plates:
             _frag_cooldown = params.get('fragmentation_cooldown_myr', 5.0)
@@ -722,25 +978,17 @@ try:
                                              offset_deg=params['tracer_offset_deg'])
         tracers = gpd.GeoDataFrame(pd.concat([tracers, new_tracers], ignore_index=True),
                                    geometry='geometry').set_crs(epsg=4326, allow_override=True)
+        if params['tracer_thinning_mode'] == 'cell' and i % int(params.get('tracer_thin_interval', 10)) == 0:
+            tracers = sdp.thin_tracers(tracers, rasters['plate_id'],
+                                       cell_deg=params.get('tracer_thin_cell_deg', 0.5))
         _step_times['tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         if _slab_track:
-            slab_tracers = sdp.update_slab_tracers(
-                slab_tracers, boundaries_gdf, delta_time,
-                div_threshold_subduction=params['div_threshold_subduction'],
-                slowing_factor=params.get('slab_slowing_factor', 4),
-                max_sink_rate_km_per_myr=params.get('slab_max_sink_rate', 200.0),
-                sink_rate_factor=params.get('slab_sink_rate_factor', 1.0))
+            slab_tracers = slablet.seed_slabs(slablet.sink_slabs(slab_tracers, delta_time, mantle_p),
+                                              _trench_samples(boundaries_gdf), delta_time, mantle_p, time_myr=t)
             _step_times['slab_tracers'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
         if _slab_enabled:
-            cmb_heat = sdp.update_cmb_heat(
-                cmb_heat, slab_tracers, delta_time,
-                spacing_deg=_mantle_spacing,
-                heating_rate=params.get('cmb_heating_rate', 0.02),
-                slab_suppression=params.get('cmb_slab_suppression', 0.05),
-                surface_coupling=params.get('cmb_surface_coupling', 0.1),
-                sigma_deg=params.get('cmb_sigma_deg', 10.0),
-                max_heat=params.get('cmb_max_heat', 3.0))
+            llsvp_state = slablet.update_llsvp(llsvp_state, slab_tracers, delta_time, mantle_p)
             _step_times['cmb_heat'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
         if _slab_track and 'divergence' in boundaries_gdf.columns:
             _sub = boundaries_gdf[boundaries_gdf['divergence'] < params['div_threshold_subduction']]
@@ -772,9 +1020,14 @@ try:
                 geometry='geometry').set_crs(epsg=4326, allow_override=True)
         _step_times['seamounts'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
+        # A world of one plate has no boundaries left and cannot go on (in long simple runs
+        # the fastest plates consume their neighbours); the run ends at this step.
+        _pids = rasters['plate_id'].values
+        _one_plate = len(np.unique(_pids[np.isfinite(_pids)])) <= 1
+
         # Plot / save (non-blocking; the worker writes files in the background, but
         # this waits when the queue is full).  The last step is always saved.
-        _enqueue_outputs(i, force_save=(i == n_steps))
+        _enqueue_outputs(i, force_save=(i == n_steps or _one_plate))
         _step_times['outputs_enqueue'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         _stats_t0 = time.perf_counter()
@@ -787,6 +1040,10 @@ try:
         print('  --- step timing (step {:d}, {:.1f}s total) ---'.format(i, total))
         for _name, _dt in sorted(_step_times.items(), key=lambda x: -x[1]):
             print('  {:20s}  {:5.1f}s  ({:4.1f}%)'.format(_name, _dt, 100 * _dt / total))
+        if _one_plate:
+            print('\nOne plate is left at t = {:.1f} Myr: the world has no plate boundaries, so the run '
+                  'ends here (step {} is saved).'.format(t, i))
+            break
 
 finally:
     # Drain output queue (also after an error or Ctrl-C in the main loop)

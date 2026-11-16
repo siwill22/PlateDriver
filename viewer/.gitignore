@@ -1,0 +1,8 @@
+node_modules/
+dist/
+public/data/runs/
+shots*/
+*.log
+.DS_Store
+__pycache__/
+public/data/runs.json

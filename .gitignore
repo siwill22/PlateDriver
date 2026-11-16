@@ -16,3 +16,12 @@ gmt.history
 
 # Gate figures for review (kept locally, not versioned)
 show-me/
+
+# Model runs (large; kept locally, never versioned)
+/runs/
+
+# Real-reconstruction mantle runs and their trench-sample cache (local only)
+/runs_real/
+
+# Python bytecode in any folder
+__pycache__/

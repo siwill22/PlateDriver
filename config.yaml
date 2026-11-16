@@ -2,21 +2,21 @@
 # Pass to run_SDP.py with:  python run_SDP.py --config config.yaml
 
 input_files:
-  rotation_model: /Users/simon/GIT/octopus/Atlantis3/atlantis3_rotations.rot
+  rotation_model: examples/atlantis/atlantis3_rotations.rot
   dynamic_polygons:
-    - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topologies.gpml
-    - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topological_polygons.gpml
-  cratons: /Users/simon/GIT/octopus/Atlantis3/atlantis66_cratons.geojson
+    - examples/atlantis/atlantis66_topologies.gpml
+    - examples/atlantis/atlantis66_topological_polygons.gpml
+  continents: examples/atlantis/atlantis66_continents.geojson
 
 output_dir: ./output
 
 run:
   reconstruction_time: 0
   delta_time: 1.0
-  total_time: 1000.0
+  total_time: 500.0          # plates shatter after about 500 Myr (README, known issues)
 
 # Force model preset: 'physical' (the v1 force model, the default; see
-# force_model_v1_plan.md) or 'simple' (the original boundary-force model: fastest, and
+# docs/force_model_v1_plan.md) or 'simple' (the original boundary-force model: fastest, and
 # useful for teaching). Any component listed under force_modes overrides the preset, e.g.
 #   force_modes:
 #     slab_pull: slab_length   # hard | ramp | slab_length
@@ -48,12 +48,15 @@ params:
 
   # --- Output ---
   csv_save_interval:           5        # save outputs every N timesteps
-  plot_interval:               1        # make plots every N timesteps; set to null to disable
-  random_seed:                 null     # integer → repeatable run (hotspots, seamounts, earthquakes, terrain noise)
+  grid_output:                 compact  # compact: grids as float32 / int32 IDs, zlib-compressed (~5x smaller); full: float64, uncompressed
+  plot_interval:               null     # draw plot_NNNN.png every N timesteps (~8 s each, slower than a step); null: none (draw saved steps later with diagnose_run.py)
+  random_seed:                 null     # hotspots, seamounts, earthquakes, terrain noise; null: drawn, in run_info.yaml
 
   # --- Seafloor & ridge tracers ---
   tracer_spacing_deg:          1.0      # seed point spacing along ridge boundaries
   tracer_offset_deg:           0.6      # perpendicular offset from ridge axis at seeding
+  tracer_thin_cell_deg:        0.5      # [tracer_thinning: cell] keep one seafloor tracer per cell this size per plate
+  tracer_thin_interval:        10       # [tracer_thinning: cell] thin every this many steps
   seafloor_spacing_deg:        1.0      # grid spacing for initial seafloor age tracers
   spreading_rate_km_per_myr:   50.0     # assumed spreading rate for age estimation
 
@@ -91,7 +94,7 @@ params:
   slab_slowing_factor:         4        # lower-mantle sinking slowdown (Lithgow-Bertelloni & Richards 1998)
   slab_sink_rate_factor:       1.0      # upper-mantle sinking rate = factor × convergence rate (km/Myr); 10 reproduces runs before the unit fix
   slab_max_sink_rate:          400      # km/Myr; cap on sinking rate (real Earth max ~100-200 km/Myr)
-  slab_thermal_tau_myr:        4        # Myr; thermal decay timescale for slablets (lower = faster fade)
+  slab_thermal_tau_myr:        100      # Myr; thermal decay timescale for slablets (lower = faster fade); open for tuning (was 4: slabs vanished below ~300 km)
   mantle_grid_spacing_deg:     5.0      # degrees; horizontal resolution of 3D mantle temp field
   mantle_depth_interval_km:    100      # km; depth layer thickness
   cmb_heating_rate:            0.02     # heat units added per Myr everywhere (core heating)
@@ -101,8 +104,6 @@ params:
   cmb_max_heat:                3.0      # cap on heat accumulation units
   cmb_dVs_scale:               -0.5     # dVs % per heat unit injected into 3D field (negative = warm)
   cmb_decay_km:                400.0    # Gaussian decay length upward from CMB (km)
-  tomo_smooth_horiz_deg:       5.0      # tomographic blurring: horizontal Gaussian sigma (degrees; 0 = off)
-  tomo_smooth_depth_km:        150.0    # tomographic blurring: vertical Gaussian sigma (km; 0 = off)
 
   # --- Plate resistance and speed scale (force_modes.drag / speed_normalisation) ---
   continent_drag_factor:       3.0     # basal drag under continents relative to ocean (drag: area, area_edge)
@@ -118,7 +119,6 @@ params:
   slab_search_radius_deg:      5       # slab depth at a trench = deepest slab tracer within this distance, on the overriding side
   slab_line_tol_deg:           1       # ... or up to this far on the downgoing side (slablets are seeded on the moving trench line)
   initial_slab_depth_km:       1320    # slab_length / depth_split: the step-0 trenches start with slabs this deep
-  pull_ramp_km_per_myr:        10      # slab_pull: ramp — full pull at this convergence rate
   ridge_push_age_cutoff_myr:   80      # ridge_push: body — force ∝ ∇age on seafloor younger than this (none on older)
   ridge_push_smooth_deg:       0       # ridge_push: body — optional per-plate smoothing of age before the gradient (0 = off; 1.5 costs ~0.2 s/step)
 
@@ -139,8 +139,37 @@ params:
   min_peninsula_area_deg2:     5.0     # minimum fragment area when neck_ratio < 0.2; also the size below which a
                                        # disconnected piece of a plate is absorbed by its neighbour
   fragmentation_cooldown_myr:  5.0     # Myr before a plate can fragment again
+  # --- Rifting (force_modes.rifting: trial) ---
+  rift_strength_continent:     0.5      # continental strength, in full slab pull per unit length
+  oceanic_strength_ratio:      3        # oceanic strength at >= 80 Myr, x continental
+  oceanic_strength_floor:      0.2      # oceanic strength ~ sqrt(min(age, 80)/80), not below this
+  rift_persist_myr:            3        # the cut must pass for this long before the plate splits
+  rift_cooldown_myr:           10       # both halves are not tested again for this long
+  rift_sweep_azimuths:         12       # candidate great circles through the plate centroid
+  rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
+  rift_path_corridor_deg:      5        # [rift_path: least_cost] the path stays this close to the straight cut
+  init_min_cells:              5        # [subduction_init] a passive-margin stretch has at least this many ocean cells
+  init_boundary_gap_cells:     3        # [subduction_init] ... at least this many cells inside the plate's edge
+  # --- Craton cores and belts (force_modes.continent_strength: cores) ---
+  core_spacing_km:             2500     # random terranes at least this far apart, in each continent
+  belt_width_km:               400      # belts between terranes, about this wide
+  core_factor:                 3        # continental rift strength x this on a core
+  belt_strength_factor:        0.5      # ... and x this on a belt
+  core_seed:                   null     # null: random_seed
+  strength_spread:             0.5      # [continent_strength: cores_random] each core / belt factor = median x exp(spread x N(0,1))
+  # --- Welding and sutures (force_modes.collision_weld: on, sutures: tracers) ---
+  weld_after_myr:              30       # continuous continental collision before the smaller plate is absorbed
+  weld_contact_reach_deg:      1        # [collision_weld: on] continent pieces within this of the contact are welded
+  weld_accrete_max_frac:       0.03     # [collision_weld_giver: downgoing] largest continent accreted to the overriding plate (share of the sphere)
+  weld_accrete_min_frac:       0        # [collision_weld_giver: downgoing] smaller continent pieces are not accreted
+  min_piece_area_deg2:         null     # disconnected pieces of a plate smaller than this join a neighbour (null: min_peninsula_area_deg2)
+  collision_stiff_factor:      100      # [collision_contact: stiff] contact drag per collision, independent of the contact length
+  collision_radius_deg:        null     # continents of two plates this close to a boundary are in collision (null: boundary_search_radius_deg)
+  suture_strength_factor:      0.5      # continental rift strength x this near a suture
+  suture_width_deg:            2        # ... within this great-circle distance of a suture point
   merging_enabled:             false    # absorb plates with persistently near-zero relative motion
   merge_conservative_threshold: 0.05   # km/Myr (= mm/yr); boundary |divergence| below this = near-zero
   merge_min_steps:             5        # consecutive near-zero steps before merge fires
   merge_require_no_driver:     true     # only merge if smaller plate has no ridge/subduction boundaries
   merge_cooldown_myr:          10.0     # Myr before merged plate is eligible again
+  merge_max_area_frac:         null     # only absorb plates smaller than this share of the sphere (null: any size)

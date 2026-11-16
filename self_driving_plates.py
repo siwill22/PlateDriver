@@ -1,4 +1,6 @@
+import os
 import time
+import zlib
 
 import pygplates
 from gprm.utils.create_gpml import gpml2gdf, gdf2gpml
@@ -20,6 +22,9 @@ except ImportError:
 from shapely.geometry import Point, Polygon
 from sklearn.neighbors import BallTree
 
+import slablet              # the mantle model, and the sphere helpers below
+from slablet.sphere import lonlat_to_xyz, xyz_to_lonlat, spherical_kernel
+
 
 # Velocities throughout this module come from pygplates.calculate_velocities (or the
 # equivalent numpy code below) and are in km/Myr, which is numerically equal to mm/yr.
@@ -30,20 +35,7 @@ EARTH_RADIUS_KM = pygplates.Earth.mean_radius_in_kms
 # Small spherical helpers shared by the functions below
 # ---------------------------------------------------------------------------
 
-def lonlat_to_xyz(lon, lat):
-    """Unit vectors (..., 3) for lon/lat in degrees."""
-    lon_r, lat_r = np.radians(lon), np.radians(lat)
-    return np.stack([np.cos(lat_r) * np.cos(lon_r),
-                     np.cos(lat_r) * np.sin(lon_r),
-                     np.sin(lat_r)], axis=-1)
-
-
-def xyz_to_lonlat(xyz):
-    """lon, lat in degrees for unit vectors (..., 3)."""
-    xyz = xyz / np.linalg.norm(xyz, axis=-1, keepdims=True)
-    lat = np.degrees(np.arcsin(np.clip(xyz[..., 2], -1.0, 1.0)))
-    lon = np.degrees(np.arctan2(xyz[..., 1], xyz[..., 0]))
-    return lon, lat
+# lonlat_to_xyz and xyz_to_lonlat come from slablet.sphere (imported above).
 
 
 class SphereTree:
@@ -314,46 +306,6 @@ def label_wrapped(mask, connectivity=1):
     return remap[labels], len(uniq)
 
 
-def spherical_gaussian_smooth(field, lats, lons, sigma_deg):
-    """Gaussian smoothing on the sphere of one 2-D field (nlat, nlon) or a stack
-    (..., nlat, nlon), using great-circle distances and cell-area weights.
-
-    Unlike scipy.ndimage.gaussian_filter on a lon/lat grid, the kernel has the same
-    physical width everywhere, wraps across ±180 and passes smoothly over the poles.
-    The sparse kernel is cached per grid/sigma.
-    """
-    if sigma_deg is None or sigma_deg <= 0:
-        return field
-    K = _spherical_kernel(tuple(np.round(lats, 6)), tuple(np.round(lons, 6)), float(sigma_deg))
-    shape = field.shape
-    flat = field.reshape(-1, shape[-2] * shape[-1])
-    out = (K @ flat.T).T
-    return out.reshape(shape)
-
-
-_KERNEL_CACHE = {}
-
-
-def _spherical_kernel(lats, lons, sigma_deg):
-    key = (lats, lons, sigma_deg)
-    if key in _KERNEL_CACHE:
-        return _KERNEL_CACHE[key]
-    from scipy.sparse import csr_matrix
-    lon2d, lat2d = np.meshgrid(lons, lats)
-    pts = np.radians(np.column_stack([lat2d.ravel(), lon2d.ravel()]))
-    area = np.clip(np.cos(pts[:, 0]), 1e-6, None)
-    tree = BallTree(pts, metric='haversine')   # radius query; built once per grid (cached)
-    idx, dist = tree.query_radius(pts, r=np.radians(4 * sigma_deg), return_distance=True)
-    rows = np.repeat(np.arange(len(pts)), [len(i) for i in idx])
-    cols = np.concatenate(idx)
-    w = np.exp(-0.5 * (np.degrees(np.concatenate(dist)) / sigma_deg) ** 2) * area[cols]
-    K = csr_matrix((w, (rows, cols)), shape=(len(pts), len(pts)))
-    row_sums = np.asarray(K.sum(axis=1)).ravel()
-    K = csr_matrix(K.multiply(1.0 / row_sums[:, None]))
-    _KERNEL_CACHE[key] = K
-    return K
-
-
 def nudge_topological_polygons(snapshot, stage_pole_dict=None):
     '''
     Return the resolved plate polygons of a pygplates snapshot as ordinary polygon
@@ -441,10 +393,22 @@ def plate_polygons_to_wrapped_gdf(polygons):
                 sphere_poly = pygplates.PolygonOnSphere(exterior, interiors)
             except Exception:
                 sphere_poly = pygplates.PolygonOnSphere(exterior)
-            for wrapped in wrapper.wrap(sphere_poly):
-                shell = [p.to_lat_lon()[::-1] for p in wrapped.get_exterior_points()]
-                holes = [[p.to_lat_lon()[::-1] for p in wrapped.get_interior_points(k)]
-                         for k in range(wrapped.get_number_of_interior_rings())]
+            try:
+                pieces = [([p.to_lat_lon()[::-1] for p in w.get_exterior_points()],
+                           [[p.to_lat_lon()[::-1] for p in w.get_interior_points(k)]
+                            for k in range(w.get_number_of_interior_rings())])
+                          for w in wrapper.wrap(sphere_poly)]
+            except pygplates.InvalidPointsForPolygonConstructionError as err:
+                # Seen only for a plate whose lon/lat outline runs up the dateline on one side
+                # and down it on the other (a plate over most of the sphere): on the sphere
+                # both edges are the same meridian, so the outline encloses no area.
+                raise RuntimeError(
+                    'plate {} cannot be wrapped at the dateline ({}): its outline spans the '
+                    'dateline from pole to pole ({:.0f}% of the sphere by its holes), which '
+                    'the lon/lat plate polygons cannot represent'.format(
+                        row.get('PLATEID1'), err,
+                        100 * (1 - sum(pygplates.PolygonOnSphere(h).get_area() for h in interiors) / (4 * np.pi)))) from err
+            for shell, holes in pieces:
                 new_row = row.copy()
                 new_row['geometry'] = Polygon(shell, holes)
                 rows.append(new_row)
@@ -452,32 +416,63 @@ def plate_polygons_to_wrapped_gdf(polygons):
     return gpd.GeoDataFrame(rows, crs=rp_gdf.crs).reset_index(drop=True)
 
 
-def resolve_overlaps(gdf, priority_col):
-    gdf = gdf.sort_values(priority_col).reset_index(drop=True)
-    gdf['geometry'] = gdf.geometry.make_valid()
+def overlap_owner_by_polarity(lo, hi, polarity_dict):
+    """Owners of the cells where moved plates overlap, with overlap: polarity.
 
-    result_geoms = []
-    accumulated = None
+    lo and hi are the plate-ID rasters (0: no plate) from drawing the plates highest ID first
+    and lowest ID first, so wherever they differ two plates overlap: lo holds the lower ID and
+    hi the higher. Where the pair has a polarity (polarity_dict, (lo, hi) -> downgoing plate)
+    the overriding plate keeps the cell, as at a trench; otherwise the lower ID keeps it, as
+    with overlap: plate_id. Each overlap is settled by its own pair, so three plates that
+    subduct beneath one another in a cycle are no problem. Where three or more plates overlap,
+    only the lowest and highest IDs take part.
 
-    for i in range(len(gdf)):
-        geom = gdf.geometry.iloc[i]
-        if accumulated is not None:
-            geom = geom.difference(accumulated)
-        result_geoms.append(geom)
-        # Build cumulative union of original geometries
-        accumulated = gdf.geometry.iloc[i] if accumulated is None else accumulated.union(gdf.geometry.iloc[i])
-
-    result = gdf.copy()
-    result.geometry = result_geoms
-
-    return result
+    Returns (owner, overlap, by_polarity): the plate-ID array, the cells where plates overlap,
+    and those settled by a polarity.
+    """
+    owner = np.array(lo, dtype=float, copy=True)
+    overlap = (lo > 0) & (hi > 0) & (lo != hi)
+    by_polarity = np.zeros(overlap.shape, bool)
+    if overlap.any():
+        pairs = np.stack([lo[overlap], hi[overlap]], axis=1).astype(int)
+        uniq, inv = np.unique(pairs, axis=0, return_inverse=True)
+        win = uniq[:, 0].astype(float)
+        known = np.zeros(len(uniq), bool)
+        for k, (a, b) in enumerate(uniq):
+            down = (polarity_dict or {}).get((int(a), int(b)))
+            if down in (a, b):
+                win[k] = b if down == a else a
+                known[k] = True
+        owner[overlap] = win[inv.ravel()]
+        by_polarity[overlap] = known[inv.ravel()]
+    return owner, overlap, by_polarity
 
 
 def update_plate_id_raster(clipped_polygons, raster_spacing=1, tie_break='hash',
-                           previous_plate_id=None, tie_break_seed=0):
+                           previous_plate_id=None, tie_break_seed=0, overlap='plate_id',
+                           polarity_dict=None, diagnostics=None):
+    """Plate-ID raster from the moved plate polygons, gaps filled by the nearest plate.
+
+    clipped_polygons are drawn in their row order, so where plates overlap the last one
+    drawn keeps the cells (overlap: plate_id; the caller sorts them highest ID first, so the
+    lowest ID wins). With overlap: polarity the plates are also drawn in the reverse order,
+    and each overlap goes to the pair's overriding plate (overlap_owner_by_polarity);
+    diagnostics, if a dict, then receives the overlapping area and the share of it settled
+    by a polarity (shares of the sphere's area, cos(lat)-weighted).
+    """
     valid = clipped_polygons.dropna(subset=['geometry'])
     valid = valid[~valid.geometry.is_empty]
     plate_id_raster = rasterize_polygons(valid, zval_field='PLATEID1', sampling=raster_spacing)
+    if overlap == 'polarity':
+        hi = rasterize_polygons(valid.iloc[::-1], zval_field='PLATEID1', sampling=raster_spacing)
+        owner, over, by_pol = overlap_owner_by_polarity(plate_id_raster.values, hi.values, polarity_dict)
+        plate_id_raster = plate_id_raster.copy(data=owner)
+        if diagnostics is not None:
+            _, lats = raster_coords(plate_id_raster)
+            w = cell_area_weights(lats, owner.shape)
+            area = float(w[over].sum())
+            diagnostics['overlap_area_frac'] = area / float(w.sum())
+            diagnostics['overlap_by_polarity_frac'] = float(w[by_pol].sum()) / area if area else np.nan
     plate_id_raster = plate_id_raster.where(plate_id_raster>0, np.nan)
 
     plate_id_raster = fill_nan_spherical(plate_id_raster, tie_break=tie_break,
@@ -486,14 +481,76 @@ def update_plate_id_raster(clipped_polygons, raster_spacing=1, tie_break='hash',
     return plate_id_raster
 
 
-def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1):
+def _midpoint_arc(arc, frame_lon=180.0):
+    """Replace the corners of a staircase arc by the midpoints of its edges.  The arc's end
+    points (plate junctions) and vertices on the raster's outer frame are kept.  For a line at
+    any angle, the midpoints of successive steps lie along its true direction, whereas the
+    corners of a long run lie exactly on a meridian or parallel."""
+    a = np.asarray(arc, float)
+    if len(a) < 3:
+        return arc
+    on_frame = (np.abs(a[:, 0]) >= frame_lon) | (np.abs(a[:, 1]) >= 90.0)
+    mids = 0.5 * (a[:-1] + a[1:])
+    keep_end = on_frame[:-1] & on_frame[1:]           # an edge along the frame stays as it is
+    pts = np.where(keep_end[:, None], a[1:], mids)
+    if np.allclose(a[0], a[-1]):                        # a closed ring with no junction on it
+        return np.vstack([pts, pts[:1]]).tolist()
+    return np.vstack([a[:1], pts, a[-1:]]).tolist()
+
+
+REBUILD_TILE_LON_DEG = 90.0
+REBUILD_TILE_LAT_DEG = 45.0
+_TILE_ID_SCALE = 100            # temporary polygon ID = plate ID x this + tile index
+
+
+def _tile_index(lons, lats):
+    """Tile of every raster node for rebuild_tiles: on (90 deg longitude x 45 deg latitude;
+    the duplicate +180 column joins the -180 tiles)."""
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    nlon = int(round(360 / REBUILD_TILE_LON_DEG))
+    nlat = int(round(180 / REBUILD_TILE_LAT_DEG))
+    i = np.clip(((lon2d + 180.0) // REBUILD_TILE_LON_DEG).astype(int), 0, nlon - 1)
+    i[np.isclose(lon2d, 180.0)] = 0
+    j = np.clip(((lat2d + 90.0) // REBUILD_TILE_LAT_DEG).astype(int), 0, nlat - 1)
+    return i * nlat + j
+
+
+def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1, frame='lonlat', tiles=False):
+    """Plate polygons from the plate-ID raster: polygonise (edges along the cell edges, a
+    staircase of meridians and parallels) and simplify the shared arcs (Douglas-Peucker,
+    tolerance topo_simplify in degrees).  frame is the plate_rebuild mode:
+
+    'lonlat'    simplify the staircase as it is.  Repeated every step, this snaps boundaries
+                that run close to a meridian or parallel onto it exactly (about 7x more
+                boundary length within 1 deg of N-S or E-W than isotropic in physical runs;
+                show-me/2026-09-28-boundary-orientation).
+    'midpoint'  first move every staircase vertex to the midpoint of its edge (_midpoint_arc),
+                then simplify.  The midpoints of successive steps lie along the boundary's
+                true direction, so nothing snaps; same cost as 'lonlat'.
+
+    tiles (rebuild_tiles: on): polygonise every plate in pieces of at most
+    REBUILD_TILE_LON_DEG x REBUILD_TILE_LAT_DEG, which then get their plate ID back.  A plate
+    that touches both edges of the lon/lat map and a pole has an outline that runs up the
+    dateline, down it again and along the pole row; pygplates' dateline wrap then returns the
+    other side of that ring, so the plate is replaced by its complement and its cells go to its
+    neighbours (show-me/2026-10-01-giant-plate-breakup).  No tile holds a pole or touches both
+    map edges.  The pieces of one plate share their edges exactly, and those edges are not
+    boundaries (same-plate arcs are skipped).
+    """
     # Origin offset by half a cell so polygon edges align with raster cell boundaries
     transform = (raster_spacing, 0, -(180 + raster_spacing / 2),
                  0, raster_spacing, -(90 + raster_spacing / 2))
-    new_plate_polygons = polygonize(plate_id_raster,
+    raster = plate_id_raster
+    if tiles:
+        lons, lats = raster_coords(plate_id_raster)
+        v = plate_id_raster.values
+        raster = plate_id_raster.copy(data=np.where(np.isfinite(v), v * _TILE_ID_SCALE + _tile_index(lons, lats), v))
+    new_plate_polygons = polygonize(raster,
                                     return_type='geopandas', transform=transform)
 
     topo = tp.Topology(new_plate_polygons, prequantize=False)
+    if frame == 'midpoint':
+        topo.output['arcs'] = [_midpoint_arc(a) for a in topo.output['arcs']]
     new_plate_polygons_smooth = topo.toposimplify(topo_simplify).to_gdf()
 
     # Fix any invalid geometries produced by toposimplify before clipping
@@ -501,6 +558,9 @@ def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1):
     new_plate_polygons_smooth = new_plate_polygons_smooth.clip(box(-180, -90, 180, 90))
 
     new_plate_polygons_smooth = new_plate_polygons_smooth.rename(columns={'DN':'PLATEID1'})
+    if tiles:
+        new_plate_polygons_smooth['PLATEID1'] = (new_plate_polygons_smooth['PLATEID1'] // _TILE_ID_SCALE).astype(
+            new_plate_polygons_smooth['PLATEID1'].dtype)
 
     return new_plate_polygons_smooth.set_crs(epsg=4326)
 
@@ -721,7 +781,7 @@ def _one_plate_derivative(field, plus, minus, plus_ok, minus_ok, step):
 
 
 def ridge_push_body_torques(age_grid, plate_id_raster, weight, cutoff_myr=80.0, smooth_deg=0.0,
-                            return_field=False):
+                            return_field=False, return_tau=False):
     """Torque on every plate from ridge push as a body force (ridge_push: body).
 
     The force per unit area is f = (weight / cutoff) ∇min(age, cutoff) on ocean cells,
@@ -751,7 +811,7 @@ def ridge_push_body_torques(age_grid, plate_id_raster, weight, cutoff_myr=80.0, 
     key = np.where(ocean, pid, -1.0)
     plates = np.unique(key[ocean])
     if smooth_deg and smooth_deg > 0 and len(plates):
-        K = _spherical_kernel(tuple(np.round(lats, 6)), tuple(np.round(lons, 6)), float(smooth_deg))
+        K = spherical_kernel(tuple(np.round(lats, 6)), tuple(np.round(lons, 6)), float(smooth_deg))
         masks = np.stack([(key == p).ravel() for p in plates], axis=1).astype(float)
         num = K @ (masks * a.ravel()[:, None])
         den = K @ masks
@@ -786,6 +846,8 @@ def ridge_push_body_torques(age_grid, plate_id_raster, weight, cutoff_myr=80.0, 
     torques = {int(p): tau[(key == p)].sum(axis=0) for p in plates}
     if return_field:
         return torques, f_e, f_n
+    if return_tau:
+        return torques, np.where(ocean[..., None], tau, 0.0)
     return torques
 
 
@@ -854,6 +916,34 @@ def _decide_polarity_at_contact(polarity_dict, convergent, seg_pid, pair_lo, pai
 TRENCH_AGE_PROBE_DEG = 1.0
 
 
+def internal_edge_mask(seg_pid, mid_lon, mid_lat, outward, plate_id_raster, probe_deg=0.3, tol_deg=0.02):
+    """True for polygon segments that are not plate boundaries: the segment midpoint lies on a
+    rebuild tile line (a multiple of REBUILD_TILE_LON_DEG in longitude, which includes the
+    dateline, or of REBUILD_TILE_LAT_DEG in latitude) and the plate probe_deg out across it is
+    the segment's own plate.  A real boundary that happens to run along a tile line has
+    another plate across it and is kept.  tol_deg allows for an edge along a parallel being a
+    great-circle arc, whose midpoint lies slightly poleward of the parallel (~0.001 deg for a
+    1 deg edge at 45 deg)."""
+    # Polygon edges run along cell edges, half a cell off the nodes, so a tile line between
+    # the nodes at lon0 - spacing and lon0 is drawn at lon0 - spacing / 2.  The dateline seam
+    # (polygons are clipped to +-180) is exactly at +-180.
+    lons, _ = raster_coords(plate_id_raster)
+    half = 0.5 * abs(float(lons[1] - lons[0]))
+
+    def near_line(x, origin, step):
+        r = (x - origin) / step
+        return np.abs(r - np.round(r)) * step < tol_deg
+
+    on_lon = near_line(mid_lon, -180.0 - half, REBUILD_TILE_LON_DEG) | (np.abs(np.abs(mid_lon) - 180.0) < tol_deg)
+    on_lat = near_line(mid_lat, -90.0 - half, REBUILD_TILE_LAT_DEG)
+    cand = (on_lon | on_lat) & (np.abs(mid_lat) < 90.0 - tol_deg)
+    out = np.zeros(len(seg_pid), bool)
+    if cand.any():
+        lo, la = offset_along_normal(mid_lon[cand], mid_lat[cand], outward[cand], probe_deg)
+        out[cand] = raster_lookup(plate_id_raster, lo, la) == seg_pid[cand]
+    return out
+
+
 def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             craton_raster=None,
                             stage_pole_dict=None,
@@ -870,8 +960,14 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                             slab_tracers=None,
                             force_params=None,
                             diagnostics=None,
-                            collision_info=None):
+                            collision_info=None,
+                            torque_parts=None,
+                            drop_internal_edges=False):
     """Sum boundary forces around every plate and convert the net torque to a stage rotation.
+
+    drop_internal_edges (rebuild_tiles: on): leave out polygon edges that are not plate
+    boundaries -- edges on a rebuild tile line or the dateline with the same plate on both
+    sides (internal_edge_mask) -- so they carry no edge drag and no boundary forces.
 
     With return_torques=True, also returns the net torque of each plate (xyz array) and
     its boundary (edge) tensor Σ L (𝟙 − m mᵀ) over its polygon segments (L = arc length in
@@ -885,11 +981,10 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
 
     modes (force_modes names; the defaults are the simple model):
       slab_pull     hard         forces['slab_pull'] on every convergent segment
-                    ramp         × clip(convergence / pull_ramp_km_per_myr, 0, 1)
                     slab_length  × √(min(age, A)/A) × min(1, z / z_ref), where age is the
                                  seafloor age 1° inside the downgoing plate (age_grid; A =
                                  slab_age_saturation_myr) and z the depth of the deepest
-                                 slab tracer near the segment (slab_depth_at_segments,
+                                 slab tracer near the segment (slab_depth_near,
                                  z_ref = slab_ref_depth_km).  Any segment that is not
                                  divergent and whose plate pair has subducted (has a
                                  polarity) is pulled if there is slab: a slab pulls by
@@ -919,6 +1014,11 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                   the plates)
     diagnostics, if a dict, receives 'segments': a DataFrame of the subduction segments
     and their forces (only when a mode other than the simple ones is used).
+    torque_parts, if a dict, receives where each plate's torque comes from, for the trial
+    split (rift_trial_splits): 'seg_pid', 'seg_xyz' (midpoints), 'seg_torque' (the torque
+    each segment added), 'seg_edge' (its L (𝟙 − m mᵀ)), the collision contact segments
+    ('contact_pid', 'contact_nbr', 'contact_G'), and the body ridge-push torque per
+    physics-grid cell ('body_tau', lat x lon x 3).
     """
     if polarity_dict is None:
         polarity_dict = {}
@@ -956,6 +1056,15 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                     # the boundary; the torque is linear in s (a push is its negative).
                     seg_torque.append(pdriver.get_torque_for_segment(segment, outward_sign))
                     seg_len.append(segment.get_arc_length())
+
+    if seg_pid and drop_internal_edges:
+        _mlat, _mlon = np.array(seg_mid).T
+        keep = ~internal_edge_mask(np.array(seg_pid), _mlon, _mlat, np.array(seg_outward), plate_id_raster)
+        seg_pid = [x for x, k in zip(seg_pid, keep) if k]
+        seg_mid = [x for x, k in zip(seg_mid, keep) if k]
+        seg_outward = [x for x, k in zip(seg_outward, keep) if k]
+        seg_torque = [x for x, k in zip(seg_torque, keep) if k]
+        seg_len = [x for x, k in zip(seg_len, keep) if k]
 
     if seg_pid:
         seg_pid = np.array(seg_pid)
@@ -1007,13 +1116,16 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
             has_polarity = np.array([(int(a), int(b)) in polarity_dict for a, b in zip(pair_lo, pair_hi)])
             slab_set |= valid & ~divergent & has_polarity
 
-        # Continent-continent contact: two different cratons within the search radius.
-        # viscous also resists contacts that have slowed below the subduction threshold.
+        # Continent-continent contact: two different cratons within collision_radius_deg
+        # (default: the search radius).  viscous also resists contacts that have slowed
+        # below the subduction threshold.
         coll_set = slab_set | (valid & ~divergent) if collision_mode == 'viscous' else slab_set
         collision = np.zeros(len(seg_pid), bool)
         if craton_raster is not None and coll_set.any():
+            c_rad = force_params.get('collision_radius_deg')
             c_ids = two_nearest_ids_batch(mid_lat[coll_set], mid_lon[coll_set], craton_raster,
-                                          boundary_search_radius_deg, ignore_zero=True)
+                                          boundary_search_radius_deg if c_rad is None else c_rad,
+                                          ignore_zero=True)
             collision[coll_set] = (c_ids[:, 0] > 0) & (c_ids[:, 1] > 0)
 
         # Slab forces per segment: pull on the downgoing plate, suction on the overriding
@@ -1030,14 +1142,11 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
         suction_w = np.where(convergent & ~is_down, forces.get('slab_suction', 0), 0.0)
         slab_depth = np.zeros(len(seg_pid))
         z_ref = force_params.get('slab_ref_depth_km', 660.0)
-        if modes['slab_pull'] == 'ramp':
-            ramp = force_params.get('pull_ramp_km_per_myr', 10.0)
-            pull_w = pull_w * np.clip(-divergence / ramp, 0.0, 1.0)
         if (modes['slab_pull'] == 'slab_length' or modes['slab_suction'] == 'depth_split') \
                 and slab_tracers is not None and subduct.any():
             # the slab lies on the overriding side: outward from the downgoing plate
             side = np.where(is_down[:, None], outward, -outward)
-            slab_depth[subduct] = slab_depth_at_segments(
+            slab_depth[subduct] = slablet.slab_depth_near(
                 mid_lon[subduct], mid_lat[subduct], side[subduct],
                 slab_tracers['lon'].values, slab_tracers['lat'].values,
                 slab_tracers['depth_km'].values,
@@ -1070,6 +1179,16 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
             pts = collision_info.setdefault('points', {})
             for k in np.where(collision & convergent)[0]:
                 pts.setdefault((int(pair_lo[k]), int(pair_hi[k])), []).append((mid_lon[k], mid_lat[k]))
+            if collision_info.get('want_samples'):
+                # points every <= 0.5 deg along each converging contact segment (sutures)
+                smp = collision_info.setdefault('samples', {})
+                m_xyz = lonlat_to_xyz(mid_lon, mid_lat)
+                for k in np.where(collision & convergent)[0]:
+                    n = max(1, int(np.ceil(np.degrees(seg_len[k]) / 0.5)))
+                    a = (np.arange(n) + 0.5) / n * seg_len[k] - 0.5 * seg_len[k]
+                    along = np.cross(outward[k], m_xyz[k])          # tangent along the segment
+                    P = np.cos(a)[:, None] * m_xyz[k] + np.sin(a)[:, None] * along
+                    smp.setdefault((int(pair_lo[k]), int(pair_hi[k])), []).extend(np.column_stack(xyz_to_lonlat(P)).tolist())
             if collision_mode == 'viscous':
                 tens = collision_info.setdefault('contact_tensors', {})
                 m_xyz = lonlat_to_xyz(mid_lon, mid_lat)
@@ -1077,6 +1196,13 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                     g = np.cross(m_xyz[k], outward[k])
                     pair = (int(pair_lo[k]), int(pair_hi[k]))
                     tens[pair] = tens.get(pair, np.zeros((3, 3))) + 0.5 * seg_len[k] * np.outer(g, g)
+
+        seg_applied = np.zeros((len(seg_pid), 3)) if torque_parts is not None else None
+
+        def _add(k, t):
+            torque_dict[int(seg_pid[k])] = torque_dict[int(seg_pid[k])] + t
+            if seg_applied is not None:
+                seg_applied[k] += np.array(t.to_xyz())
 
         # Pass 2: add up the torques plate by plate, in segment order
         for k in np.where(slab_set | divergent | collision)[0]:
@@ -1095,16 +1221,31 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                         collision_pairs.add(pair)
                     elif 'continental_collision' in forces:
                         # Resistance torque pushing the plate away from the collision.
-                        torque_dict[pid_current] = torque_dict[pid_current] - seg_torque[k] * forces['continental_collision']
+                        _add(k, seg_torque[k] * (-forces['continental_collision']))
                 elif slab_w[k]:
-                    torque_dict[pid_current] = torque_dict[pid_current] + seg_torque[k] * float(slab_w[k])
+                    _add(k, seg_torque[k] * float(slab_w[k]))
             elif 'ridge_push' in forces and modes['ridge_push'] == 'boundary':
-                torque_dict[pid_current] = torque_dict[pid_current] - seg_torque[k] * forces['ridge_push']
+                _add(k, seg_torque[k] * (-forces['ridge_push']))
+
+        if torque_parts is not None:
+            m_xyz = lonlat_to_xyz(mid_lon, mid_lat)
+            L = np.array(seg_len)
+            coll = np.where(collision)[0] if collision_mode == 'viscous' else np.array([], int)
+            g = np.cross(m_xyz[coll], outward[coll]) if len(coll) else np.zeros((0, 3))
+            torque_parts.update(
+                seg_pid=seg_pid.astype(int), seg_xyz=m_xyz, seg_torque=seg_applied,
+                seg_edge=L[:, None, None] * (np.eye(3)[None] - m_xyz[:, :, None] * m_xyz[:, None, :]),
+                contact_pid=seg_pid[coll].astype(int), contact_nbr=neighbour[coll].astype(int),
+                contact_xyz=m_xyz[coll],
+                contact_G=0.5 * L[coll][:, None, None] * g[:, :, None] * g[:, None, :])
 
     if modes['ridge_push'] == 'body' and age_grid is not None and 'ridge_push' in forces:
         body = ridge_push_body_torques(age_grid, plate_id_raster, forces['ridge_push'],
                                        force_params.get('ridge_push_age_cutoff_myr', 80.0),
-                                       force_params.get('ridge_push_smooth_deg', 0.0))
+                                       force_params.get('ridge_push_smooth_deg', 0.0),
+                                       return_tau=torque_parts is not None)
+        if torque_parts is not None:
+            body, torque_parts['body_tau'] = body
         for pid, t in body.items():
             if pid in torque_dict:
                 torque_dict[pid] = torque_dict[pid] + pygplates.Vector3D(*t)
@@ -1136,6 +1277,21 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
     return new_stage_pole_dict, collision_pairs, torques, edge_tensors
 
 
+def _lstsq(M, rhs):
+    """Least-squares solution of M w = rhs by SVD (numpy). Some LAPACK builds fail to
+    converge on well-conditioned drag systems (OpenBLAS 0.3.34, conda-forge, Nov 2026: a
+    symmetric 60 x 60 system with condition number 1.5e4); those fall back to QR with
+    column pivoting (LAPACK gelsy), which agrees to rounding."""
+    try:
+        w = np.linalg.lstsq(M, rhs, rcond=1e-12)[0]
+        if np.all(np.isfinite(w)):
+            return w
+    except np.linalg.LinAlgError:
+        pass
+    import scipy.linalg
+    return scipy.linalg.lstsq(M, rhs, cond=1e-12, lapack_driver='gelsy')[0]
+
+
 def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, params,
                         drag_mode, speed_mode, speed_state, delta_time, contact_tensors=None):
     """Angular velocities from net torques with basal and boundary resistance, scaled to a
@@ -1154,6 +1310,10 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
       the convergence (normal) component is resisted; strike-slip along the contact is
       free.  The plates are then solved together (one 3N × 3N system), so the drag acts on
       this step's velocities and can slow a pair to a stop but never reverse it.
+      With collision_contact_mode 'stiff' the pair's drag is collision_stiff_factor × G / tr G
+      instead (tr G is the contact length): the same resistance whatever the contact length,
+      so a short contact still stops the convergence there and acts as a pivot (rotation
+      about the contact and strike-slip along it stay free).
     speed_mode
       none            ω scaled by speed_scale (default 1)
       calibrate_once  scale k set at the first call so the area-weighted RMS speed equals
@@ -1205,13 +1365,16 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
             for pid in order:
                 M[where[pid]:where[pid] + 3, where[pid]:where[pid] + 3] += blocks[pid]
             c = params.get('collision_drag_factor', 10.0) * width
+            stiff = params.get('collision_contact_mode', 'length') == 'stiff'
+            c_s = params.get('collision_stiff_factor', 100.0)
             for (a, b), G in contacts.items():
                 ia, ib = where[a], where[b]
-                M[ia:ia + 3, ia:ia + 3] += c * G
-                M[ib:ib + 3, ib:ib + 3] += c * G
-                M[ia:ia + 3, ib:ib + 3] -= c * G
-                M[ib:ib + 3, ia:ia + 3] -= c * G
-            w_all = np.linalg.lstsq(M, rhs, rcond=1e-12)[0]
+                cG = c_s * G / max(np.trace(G), 1e-12) if stiff else c * G
+                M[ia:ia + 3, ia:ia + 3] += cG
+                M[ib:ib + 3, ib:ib + 3] += cG
+                M[ia:ia + 3, ib:ib + 3] -= cG
+                M[ib:ib + 3, ia:ia + 3] -= cG
+            w_all = _lstsq(M, rhs)
             omega = {pid: w_all[where[pid]:where[pid] + 3] for pid in order}
         else:
             for pid, t in torques.items():
@@ -1219,7 +1382,7 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
                 if not np.any(Dp):
                     omega[pid] = np.zeros(3)
                     continue
-                omega[pid] = np.linalg.lstsq(Dp, t, rcond=1e-12)[0]
+                omega[pid] = _lstsq(Dp, t)
 
     total_area = sum(area_of.get(pid, 0.0) for pid in omega)
     msq = sum(w @ J_of[pid] @ w for pid, w in omega.items() if pid in J_of)
@@ -1244,7 +1407,8 @@ def solve_plate_motions(torques, edge_tensors, plate_id_raster, craton_raster, p
         print('  [speed cap] RMS {:.1f} km/Myr > cap {:.1f}; scaled down this step'.format(
             k * rms_unscaled, cap))
     speed_state['last'] = dict(k_used=k_used, rms_unscaled=rms_unscaled,
-                               rms=k_used * rms_unscaled, capped=capped)
+                               rms=k_used * rms_unscaled, capped=capped,
+                               omega={pid: np.asarray(w, float) for pid, w in omega.items()})   # unscaled
 
     return {pid: pdriver.torque_to_stage_rotation(pygplates.Vector3D(*(k_used * w)), delta_time)
             for pid, w in omega.items()}
@@ -1255,13 +1419,13 @@ def detach_colliding_slabs(slab_tracers, collision_state, collision_points, delt
     """collision: breakoff.  For every plate pair that has been colliding for at least
     delay_myr, mark the slab tracers within radius_deg (great-circle) of its collision
     segments as detached (column 'attached' = False, in place).  A detached slab no longer
-    pulls (slab_depth_at_segments only sees attached tracers) but stays in the mantle
+    pulls (slab_depth_near only sees attached tracers) but stays in the mantle
     outputs.  Slab seeded later, if subduction starts again, is attached."""
     if slab_tracers is None or not len(slab_tracers):
         return
     if 'attached' not in slab_tracers.columns:
         slab_tracers['attached'] = True
-    attached = slab_tracers['attached'].fillna(True).astype(bool).values
+    attached = np.array(slab_tracers['attached'].fillna(True).astype(bool))   # a copy: pandas 3's .values is read-only
     from scipy.spatial import cKDTree
     s_xyz = None
     for pair, steps in collision_state.items():
@@ -1362,6 +1526,8 @@ def detect_enclosed_plates(plate_id_raster):
     areas = plate_areas(plate_id_raster)
 
     merge_pairs = []
+    if len(areas) <= 2:
+        return merge_pairs          # a plate with one neighbour on a two-plate sphere is not enclosed
     for pid, nbrs in _neighbour_ids(vals).items():
         if len(nbrs) != 1 or pid in at_pole:
             continue
@@ -1656,13 +1822,721 @@ def detect_and_split_plates(plate_id_raster, new_plate_polygons, params,
     return raster, split_info, next_pid
 
 
+def _cut_candidates(centre, n_azimuth=12, offsets_deg=(-15.0, 0.0, 15.0)):
+    """Unit normals of candidate cut planes (great circles) for a plate with centroid
+    `centre`: n_azimuth directions through the centroid, each also shifted by the offsets
+    (a plane at angular distance δ from the centroid has normal n cos δ + c sin δ)."""
+    east = np.cross([0.0, 0.0, 1.0], centre)
+    if np.linalg.norm(east) < 1e-9:
+        east = np.array([1.0, 0.0, 0.0])
+    east /= np.linalg.norm(east)
+    north = np.cross(centre, east)
+    out = []
+    for az in np.arange(n_azimuth) * np.pi / n_azimuth:
+        n0 = np.cos(az) * east + np.sin(az) * north
+        for d in np.radians(offsets_deg):
+            n = n0 * np.cos(d) + centre * np.sin(d)
+            out.append(n / np.linalg.norm(n))
+    return np.array(out)
+
+
+def _circle_points(normal, step_deg=0.5):
+    """Points every step_deg around the great circle with the given plane normal."""
+    u = np.cross(normal, [0.0, 0.0, 1.0])
+    if np.linalg.norm(u) < 1e-9:
+        u = np.cross(normal, [1.0, 0.0, 0.0])
+    u /= np.linalg.norm(u)
+    v = np.cross(normal, u)
+    t = np.radians(np.arange(0.0, 360.0, step_deg))
+    return np.cos(t)[:, None] * u + np.sin(t)[:, None] * v
+
+
+def _grid_edges(mask):
+    """8-neighbour edges between the True cells of a global (nlat, nlon) grid whose columns
+    wrap in longitude.  Returns (a, b) flat indices, each edge once."""
+    nlat, nlon = mask.shape
+    idx = np.arange(nlat * nlon).reshape(nlat, nlon)
+    A, B = [], []
+    for di, dj in ((0, 1), (1, -1), (1, 0), (1, 1)):
+        a, ma = idx[:nlat - di], mask[:nlat - di]
+        b, mb = np.roll(idx[di:], -dj, axis=1), np.roll(mask[di:], -dj, axis=1)
+        ok = ma & mb
+        A.append(a[ok]); B.append(b[ok])
+    return np.concatenate(A), np.concatenate(B)
+
+
+def _least_cost_cut(nrm, P, on, full, edge, xyz2, sig2, ea, eb, wgt, corridor_deg):
+    """rift_path: least_cost.  The cheapest 8-connected path across plate `full` (a
+    (nlat, nlon) mask on the 1 deg grid, columns wrapping) between the two ends of the
+    straight cut (great circle with normal nrm; P, on: its points and which lie in the plate),
+    within corridor_deg of it.  Cost of a step: great-circle length × mean strength of its two
+    cells.  Returns (side1 mask: the +nrm half, path flat indices) or None when there is no
+    path or it does not split the plate in two.  The path is also returned as a mask."""
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import dijkstra
+    d_c = xyz2 @ nrm
+    corr = full & (np.abs(d_c) < np.sin(np.radians(corridor_deg)))
+    i_start = np.where(on & ~np.roll(on, 1))[0][0]
+    i_end = np.where(on & ~np.roll(on, -1))[0][0]
+    near = np.cos(np.radians(corridor_deg))
+    src = np.flatnonzero(corr & edge & (xyz2 @ P[i_start] > near))
+    dst = np.flatnonzero(corr & edge & (xyz2 @ P[i_end] > near))
+    if not len(src) or not len(dst):
+        return None
+    cf = corr.ravel()
+    keep = cf[ea] & cf[eb]
+    n = full.size
+    G = csr_matrix((wgt[keep], (ea[keep], eb[keep])), shape=(n, n))
+    dist, pred, _ = dijkstra(G, directed=False, indices=src, min_only=True, return_predecessors=True)
+    t = dst[np.argmin(dist[dst])]
+    if not np.isfinite(dist[t]):
+        return None
+    path = [t]
+    while pred[path[-1]] >= 0:
+        path.append(pred[path[-1]])
+    path = np.array(path[::-1])
+    on_path = np.zeros(n, bool)
+    on_path[path] = True
+    on_path = on_path.reshape(full.shape)
+    lab, n_lab = label_wrapped(full & ~on_path, connectivity=1)
+    side1 = d_c > 0
+    far = np.sin(np.radians(corridor_deg))
+    for k in range(1, n_lab + 1):
+        comp = lab == k
+        up, down = (comp & (d_c > far)).any(), (comp & (d_c < -far)).any()
+        if up and down:
+            return None                        # the path does not separate the two sides
+        side1[comp] = up or (not down and (d_c[comp] > 0).mean() > 0.5)
+    return side1 & full, path, on_path
+
+
+def rift_strength(xyz, continent, age, params, cores=None, core_tree=None, suture_tree=None):
+    """Strength of the plate against rifting at points xyz (n, 3), as the rift test uses it:
+    a strength per unit length of cut, in units of full slab pull per unit length.
+      continent: rift_strength_continent (σc), x suture_strength_factor within
+                 suture_width_deg of a suture point (suture_tree), x the core or belt factor
+                 of the nearest craton-core point (cores, core_tree; _continent_factor);
+      ocean:     oceanic_strength_ratio x σc x max(oceanic_strength_floor, √(min(age, 80)/80)),
+                 with age the seafloor age in Myr (no age: as 80 Myr).
+    continent is a boolean array; age is an array or None."""
+    sigma_c = params.get('rift_strength_continent', 0.5)
+    sc = np.full(len(xyz), sigma_c)
+    if suture_tree is not None:
+        s_chord = 2.0 * np.sin(np.radians(params.get('suture_width_deg', 2.0)) / 2.0)
+        near = np.array([len(h) > 0 for h in suture_tree.query_ball_point(xyz, s_chord)], bool)
+        sc = np.where(near, params.get('suture_strength_factor', 0.5) * sigma_c, sigma_c)
+    if core_tree is not None:
+        sc = sc * _continent_factor(cores, xyz, params, core_tree)
+    f_age = np.ones(len(xyz))
+    if age is not None:
+        f_age = np.where(np.isfinite(age), np.sqrt(np.clip(np.nan_to_num(age), 0, 80) / 80.0), 1.0)
+    return np.where(continent, sc, params.get('oceanic_strength_ratio', 3.0) * sigma_c
+                    * np.maximum(params.get('oceanic_strength_floor', 0.2), f_age))
+
+
+def passive_margin_stretches(full, cont, gap_cells=3, min_cells=5):
+    """Passive-margin candidates of one plate on a global (nlat, nlon) grid whose columns wrap
+    (no duplicate seam column): the plate's ocean cells next to its own continent (4-neighbours),
+    at least gap_cells cells inside the plate's edge (so not at an existing boundary), grouped
+    into connected stretches (8-neighbours) of at least min_cells cells.
+    full: the plate's cells; cont: continent cells.  Returns a list of boolean masks."""
+    margin = full & ~cont & np.logical_or.reduce(wrap_neighbours(full & cont))
+    inner = full.copy()
+    for _ in range(gap_cells):
+        inner &= np.logical_and.reduce(wrap_neighbours(inner))
+    lab, n = label_wrapped(margin & inner, connectivity=2)
+    counts = np.bincount(lab.ravel(), minlength=n + 1)
+    return [lab == k for k in range(1, n + 1) if counts[k] >= min_cells]
+
+
+def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, params,
+                      contact_scale=0.0, skip_pids=(), slab_pull_weight=6.0, sutures=None, cores=None,
+                      trials=None, margins=None):
+    """Trial split of every plate (rifting: trial).  For each candidate cut (_cut_candidates),
+    the plate's basal drag, edge drag, contact drag and torques are split between the two
+    sides, and the tension across the cut is compared with the strength along it.
+
+    With ω the plate's solved (unscaled) rotation, half 1 needs the torque
+    τh = D1 ω − τ1 from half 2 to move with the plate.  A uniform normal traction t along
+    the cut (normal n̂ from half 1 to half 2) gives torque t M on half 1, M = ∫ r × n̂ ds,
+    so t = τh · M / |M|²; t > 0 pulls the halves apart.  The cut passes if
+      - t > σ̄, the mean strength along the cut (units: full slab pull per unit length,
+        i.e. t is divided by slab_pull_weight × 0.1° in radians, the torque scale of
+        plate_driver.get_torque_for_segment); σ = rift_strength_continent on continent,
+        oceanic_strength_ratio × σc × max(oceanic_strength_floor, √(min(age, 80)/80)) on
+        ocean;
+      - the free halves (ω ∓ D⁻¹ τh) open along at least half the cut;
+      - both halves are at least min_child_area_deg2, and the cut crosses the plate once.
+    With sutures (DataFrame lon, lat, suture_id; sutures: tracers), continental strength is
+    × suture_strength_factor within suture_width_deg of a suture point, and each suture with
+    at least 5 points on a plate adds its best-fit great circle as a candidate cut.
+    With cores (continent_strength: cores), continental strength is also × the core or belt
+    factor of the nearest craton-core point (_continent_factor).
+    trials, if a dict, receives for every plate tested {pid: dict(area_deg2, cuts, one_piece,
+    under_tension, max_tension, best_ratio, tension, strength, passed)}: how many candidate cuts
+    reached each test, the largest tension of any cut, and the best t/σ̄ with its tension and
+    strength (whether or not that cut also opens).
+    margins, if a list, receives one record per passive-margin stretch of every plate tested
+    (subduction_init: log; passive_margin_stretches): the straight cut along the stretch's
+    best-fit great circle, with the ocean on side 1, judged like a rift cut but nothing is
+    split.  Record: plate_id, margin, cells, lon, lat (stretch centre), age_median, age_min,
+    age_max (ocean along the stretch), ocean_side_frac (plate area on the ocean side),
+    one_piece, traction (t as above: negative = compression across the cut), strength (σ̄
+    along the cut), strength_margin (σ of the stretch's cells), closing_frac (share of the
+    cut along which the free halves converge); with rift_path: least_cost also path_traction,
+    path_strength, path_cont_frac (share of the path on continent) and path_closing_frac for
+    the same cut moved onto the weakest path within the corridor (_least_cost_cut).
+    Returns {pid: dict(normal, ratio = t/σ̄, tension, strength, length_deg, weak_zone, cut_kind)}
+    for the plates whose best cut (largest t/σ̄) passes; cut_kind is 'sweep' or 'suture'.
+    """
+    grid_deg = params.get('physics_grid_deg', 1.0)
+    sigma_c = params.get('rift_strength_continent', 0.5)
+    min_area = params.get('min_child_area_deg2', 25.0)
+    width = params.get('edge_drag_width_km', 3000.0) / EARTH_RADIUS_KM
+    unit = slab_pull_weight * np.radians(0.1)
+
+    sl, _ = grid_stride(plate_id_raster, grid_deg)
+    lons, lats = raster_coords(plate_id_raster)
+    pid_g = np.asarray(plate_id_raster.values, float)[sl]
+    lon2d, lat2d = np.meshgrid(lons[sl[1]], lats[sl[0]])
+    dA = np.cos(np.radians(lat2d)) * np.radians(abs(lons[sl[1]][1] - lons[sl[1]][0])) \
+        * np.radians(abs(lats[sl[0]][1] - lats[sl[0]][0]))
+    cont_g = np.zeros(pid_g.shape, bool) if craton_raster is None \
+        else np.nan_to_num(np.asarray(craton_raster.values, float)[sl]) > 0
+    w_g = np.where(cont_g, params.get('continent_drag_factor', 3.0), 1.0) * dA
+    xyz_g = lonlat_to_xyz(lon2d, lat2d)
+    body = parts.get('body_tau')
+    path_mode = params.get('rift_path_mode', 'straight') == 'least_cost'
+    core_tree = None
+    if cores is not None and len(cores):
+        from scipy.spatial import cKDTree as _CT
+        core_tree = _CT(lonlat_to_xyz(cores['lon'].values.astype(float), cores['lat'].values.astype(float)))
+    suture_tree, suture_fits = None, {}
+    if sutures is not None and len(sutures):
+        from scipy.spatial import cKDTree
+        s_lon, s_lat = sutures['lon'].values.astype(float), sutures['lat'].values.astype(float)
+        s_xyz = lonlat_to_xyz(s_lon, s_lat)
+        suture_tree = cKDTree(s_xyz)
+        s_pid = raster_lookup(plate_id_raster, s_lon, s_lat)
+        for (q, sid), idx in pd.DataFrame({'p': s_pid, 's': sutures['suture_id'].values}).groupby(['p', 's']).groups.items():
+            if len(idx) >= 5:
+                Xq = s_xyz[np.asarray(idx)]
+                # best-fit great circle: the plane normal is the direction of least spread
+                suture_fits.setdefault(int(q), []).append(np.linalg.eigh(Xq.T @ Xq)[1][:, 0])
+    # the 1 deg grid without the duplicate 180 deg column
+    ncol = pid_g.shape[1] - 1 if abs(lons[sl[1]][-1] - lons[sl[1]][0] - 360.0) < 1e-6 else pid_g.shape[1]
+    if margins is not None:
+        m_age = None if age_grid is None else \
+            raster_lookup(age_grid, lon2d[:, :ncol], lat2d[:, :ncol]).astype(float)
+        m_gap, m_min = params.get('init_boundary_gap_cells', 3), params.get('init_min_cells', 5)
+    if path_mode:
+        # the strength of every cell
+        pid2, xyz2 = pid_g[:, :ncol], xyz_g[:, :ncol]
+        cont2 = cont_g[:, :ncol]
+        lo2, la2 = lon2d[:, :ncol], lat2d[:, :ncol]
+        a2 = None if age_grid is None else raster_lookup(age_grid, lo2, la2).astype(float).ravel()
+        sig2 = rift_strength(xyz2.reshape(-1, 3), cont_g[:, :ncol].ravel(), a2, params,
+                             cores, core_tree, suture_tree).reshape(pid2.shape)
+        corridor = params.get('rift_path_corridor_deg', 5.0)
+        from scipy.spatial import cKDTree as _Tree
+    cand_out = {}
+    for pid, om in omega.items():
+        if pid in skip_pids:
+            continue
+        cell = pid_g == pid
+        area_deg2 = dA[cell].sum() * np.degrees(1.0) ** 2
+        if area_deg2 < 2 * min_area or not np.any(om):
+            continue
+        X = xyz_g[cell]
+        Dc = w_g[cell][:, None, None] * (np.eye(3)[None] - X[:, :, None] * X[:, None, :])
+        tb = body[cell] if body is not None else np.zeros_like(X)
+        sp = parts['seg_pid'] == pid
+        Xs, ts, es = parts['seg_xyz'][sp], parts['seg_torque'][sp], width * parts['seg_edge'][sp]
+        # the pair's contact tensor holds the segments of both plates' rings (½ L g gᵀ each)
+        cp = (parts['contact_pid'] == pid) | (parts['contact_nbr'] == pid)
+        Xc, Gc = parts['contact_xyz'][cp], contact_scale * parts['contact_G'][cp]
+        other = np.where(parts['contact_pid'][cp] == pid, parts['contact_nbr'][cp], parts['contact_pid'][cp])
+        om_n = np.array([omega.get(int(q), np.zeros(3)) for q in other]).reshape(-1, 3)
+        tc = -np.einsum('kij,kj->ki', Gc, om - om_n) if len(Gc) else np.zeros((0, 3))   # contact drag at ω
+        centre = (X * dA[cell][:, None]).sum(0)
+        centre /= np.linalg.norm(centre)
+        if path_mode:
+            full = pid2 == pid
+            edge = full & ~np.logical_and.reduce(wrap_neighbours(full))
+            ea, eb = _grid_edges(full)
+            x2f, s2f = xyz2.reshape(-1, 3), sig2.ravel()
+            wgt = np.arccos(np.clip((x2f[ea] * x2f[eb]).sum(1), -1, 1)) * 0.5 * (s2f[ea] + s2f[eb])
+            cell_tree = _Tree(X)
+
+            def _path_cut(nrm, P, on):
+                """The least-cost version of the straight cut nrm (P, on as in the loop below):
+                dict(s1, t, sig, r, nk, ds_k, tau_h, K1, K2), or None when there is no path,
+                a side is smaller than min_area, or M vanishes."""
+                res = _least_cost_cut(nrm, P, on, full, edge, xyz2, sig2, ea, eb, wgt, corridor)
+                if res is None:
+                    return None
+                side_2d, path, on_path = res
+                ext = (lambda a: np.concatenate([a, a[:, :1]], axis=1)) if ncol < pid_g.shape[1] else (lambda a: a)
+                s1 = ext(side_2d)[cell]
+                off_path = ~ext(on_path)[cell]
+                a1 = dA[cell][s1].sum() * np.degrees(1.0) ** 2
+                if min(a1, area_deg2 - a1) < min_area:
+                    return None
+                m1s = s1[cell_tree.query(Xs)[1]] if len(Xs) else np.zeros(0, bool)
+                m1c = s1[cell_tree.query(Xc)[1]] if len(Xc) else np.zeros(0, bool)
+                D1 = Dc[s1].sum(0) + es[m1s].sum(0)
+                D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
+                t1 = tb[s1].sum(0) + ts[m1s].sum(0) + tc[m1c].sum(0)
+                K1, K2 = D1 + Gc[m1c].sum(0), D2 + Gc[~m1c].sum(0)
+                tau_h = D1 @ om - t1
+                Rp = x2f[path]
+                r = Rp[:-1] + Rp[1:]
+                r /= np.linalg.norm(r, axis=1)[:, None]
+                ds_k = np.arccos(np.clip((Rp[:-1] * Rp[1:]).sum(1), -1, 1))
+                nk = np.cross(r, Rp[1:] - Rp[:-1])
+                nk /= np.linalg.norm(nk, axis=1)[:, None]
+                # n̂ from half 1 to half 2: flip where a point just off the path is on half 1
+                q = r + np.sin(np.radians(0.7 * grid_deg)) * nk     # 0.7 of a grid cell off the path
+                nb = cell_tree.query(q / np.linalg.norm(q, axis=1)[:, None], k=8)[1]
+                first = nb[np.arange(len(nb)), np.argmax(off_path[nb], axis=1)]   # nearest cell not on the path
+                nk[s1[first]] *= -1
+                M = (np.cross(r, nk) * ds_k[:, None]).sum(0)
+                if M @ M <= 0:
+                    return None
+                return dict(s1=s1, t=float(tau_h @ M / (M @ M)) / unit,
+                            sig=float((0.5 * (s2f[path[:-1]] + s2f[path[1:]]) * ds_k).sum() / ds_k.sum()),
+                            r=r, nk=nk, ds_k=ds_k, tau_h=tau_h, K1=K1, K2=K2,
+                            cont_frac=float((cont2.ravel()[path]).mean()))
+        if margins is not None:
+            # passive-margin cuts (subduction_init: log): the straight cut of the rift test along
+            # each stretch, recorded whatever the result
+            full_m, cont_m, xyz_m = cell[:, :ncol], cont_g[:, :ncol], xyz_g[:, :ncol]
+            for k_m, mk in enumerate(passive_margin_stretches(full_m, cont_m, m_gap, m_min)):
+                Xm = xyz_m[mk]
+                nrm = np.linalg.eigh(Xm.T @ Xm)[1][:, 0]       # best-fit great circle
+                cm = Xm.sum(0) / np.linalg.norm(Xm.sum(0))
+                # the plate's continent within 3 deg of the stretch on side 2 (X·n < 0)
+                Xn = xyz_m[full_m & cont_m]
+                Xn = Xn[Xn @ cm > np.cos(np.radians(3.0))]
+                if len(Xn) and (Xn @ nrm).mean() > 0:
+                    nrm = -nrm
+                s1 = X @ nrm > 0
+                a1 = dA[cell][s1].sum() * np.degrees(1.0) ** 2
+                P = _circle_points(nrm, 0.5)
+                plo, pla = xyz_to_lonlat(P)
+                on = raster_lookup(plate_id_raster, plo, pla) == pid
+                ag = np.full(len(Xm), np.nan) if m_age is None else m_age[mk]
+                fin = np.isfinite(ag)
+                mlon, mlat = xyz_to_lonlat(cm)
+                r = dict(plate_id=int(pid), margin=k_m, cells=int(mk.sum()), lon=float(mlon), lat=float(mlat),
+                         age_median=float(np.median(ag[fin])) if fin.any() else np.nan,
+                         age_min=float(ag[fin].min()) if fin.any() else np.nan,
+                         age_max=float(ag[fin].max()) if fin.any() else np.nan,
+                         ocean_side_frac=float(a1 / area_deg2),
+                         one_piece=bool(on.sum() >= 2 and np.count_nonzero(on != np.roll(on, 1)) == 2),
+                         traction=np.nan, strength=np.nan, closing_frac=np.nan,
+                         path_traction=np.nan, path_strength=np.nan, path_cont_frac=np.nan, path_closing_frac=np.nan,
+                         strength_margin=float(rift_strength(Xm, np.zeros(len(Xm), bool), ag, params).mean()))
+                margins.append(r)
+                if on.sum() < 2 or not 0 < a1 < area_deg2:
+                    continue
+                if path_mode and r['one_piece']:
+                    # the same cut moved onto the weakest path within the corridor (rift_path: least_cost)
+                    pc = _path_cut(nrm, P, on)
+                    if pc is not None:
+                        r.update(path_traction=pc['t'], path_strength=pc['sig'], path_cont_frac=pc['cont_frac'])
+                        try:
+                            w1, w2 = om - np.linalg.solve(pc['K1'], pc['tau_h']), om + np.linalg.solve(pc['K2'], pc['tau_h'])
+                            r['path_closing_frac'] = float((((np.cross(w2 - w1, pc['r']) * pc['nk']).sum(1) < 0)
+                                                            * pc['ds_k']).sum() / pc['ds_k'].sum())
+                        except np.linalg.LinAlgError:
+                            pass
+                m1s, m1c = Xs @ nrm > 0, Xc @ nrm > 0
+                D1 = Dc[s1].sum(0) + es[m1s].sum(0)
+                D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
+                t1 = tb[s1].sum(0) + ts[m1s].sum(0) + tc[m1c].sum(0)
+                K1, K2 = D1 + Gc[m1c].sum(0), D2 + Gc[~m1c].sum(0)
+                tau_h = D1 @ om - t1
+                R = P[on]
+                M = np.cross(R, -nrm).sum(0) * np.radians(0.5)
+                if M @ M <= 0:
+                    continue
+                cont_c = np.zeros(len(R), bool) if craton_raster is None \
+                    else np.nan_to_num(raster_lookup(craton_raster, plo[on], pla[on])) > 0
+                age_c = None if age_grid is None else raster_lookup(age_grid, plo[on], pla[on]).astype(float)
+                r.update(traction=float(tau_h @ M / (M @ M)) / unit,
+                         strength=float(rift_strength(R, cont_c, age_c, params, cores, core_tree, suture_tree).mean()))
+                try:
+                    w1, w2 = om - np.linalg.solve(K1, tau_h), om + np.linalg.solve(K2, tau_h)
+                    r['closing_frac'] = float(((np.cross(w2 - w1, R) @ (-nrm)) < 0).mean())
+                except np.linalg.LinAlgError:
+                    pass
+        best = None
+        sweep = _cut_candidates(centre, params.get('rift_sweep_azimuths', 12),
+                                tuple(params.get('rift_sweep_offsets_deg', (-15.0, 0.0, 15.0))))
+        weak = suture_fits.get(int(pid), [])
+        kinds = ['sweep'] * len(sweep) + ['suture'] * len(weak)
+        rec = None
+        if trials is not None:
+            rec = trials[int(pid)] = dict(area_deg2=float(area_deg2), cuts=0, one_piece=0, under_tension=0,
+                                          max_tension=np.nan, best_ratio=np.nan, tension=np.nan,
+                                          strength=np.nan, passed=False)
+
+        def _note(t, sig=None):
+            if rec is None:
+                return
+            rec['max_tension'] = np.nanmax([rec['max_tension'], t])
+            if sig is not None and t > 0 and not (t / sig <= rec['best_ratio']):
+                rec.update(best_ratio=t / sig, tension=t, strength=sig)
+        for k_c, nrm in enumerate(list(sweep) + weak):
+            h1 = X @ nrm > 0
+            a1 = dA[cell][h1].sum() * np.degrees(1.0) ** 2
+            if min(a1, area_deg2 - a1) < min_area:
+                continue
+            if rec is not None:
+                rec['cuts'] += 1
+            # the part of the great circle inside the plate: one piece only
+            P = _circle_points(nrm, 0.5)
+            plo, pla = xyz_to_lonlat(P)
+            on = raster_lookup(plate_id_raster, plo, pla) == pid
+            if on.sum() < 2 or np.count_nonzero(on != np.roll(on, 1)) != 2:
+                continue
+            if rec is not None:
+                rec['one_piece'] += 1
+            s1, m1s, m1c = X @ nrm > 0, Xs @ nrm > 0, Xc @ nrm > 0
+            D1 = Dc[s1].sum(0) + es[m1s].sum(0)
+            D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
+            # contact drag: an external torque at the solved ω for the tension; an extra
+            # stiffness for the free halves
+            t1 = tb[s1].sum(0) + ts[m1s].sum(0) + tc[m1c].sum(0)
+            K1, K2 = D1 + Gc[m1c].sum(0), D2 + Gc[~m1c].sum(0)
+            tau_h = D1 @ om - t1
+            ds = np.radians(0.5)
+            R = P[on]
+            M = np.cross(R, -nrm).sum(0) * ds                     # n̂ = −nrm: from half 1 to half 2
+            if M @ M <= 0:
+                continue
+            t = float(tau_h @ M / (M @ M)) / unit
+            _note(t)
+            if rec is not None and t > 0:
+                rec['under_tension'] += 1
+            if path_mode:
+                # only cuts whose straight version is under tension; the path moves the cut
+                # by at most the corridor, so a compressed straight cut is not searched
+                if t <= 0:
+                    continue
+                pc = _path_cut(nrm, P, on)
+                if pc is None:
+                    continue
+                s1, t, sig, r, nk, ds_k, tau_h, K1, K2 = (pc[k] for k in ('s1', 't', 'sig', 'r', 'nk', 'ds_k', 'tau_h', 'K1', 'K2'))
+                _note(t, sig)
+                if t <= sig:
+                    continue
+                try:
+                    w1 = om - np.linalg.solve(K1, tau_h)
+                    w2 = om + np.linalg.solve(K2, tau_h)
+                except np.linalg.LinAlgError:
+                    continue
+                opening = ((np.cross(w2 - w1, r) * nk).sum(1) > 0) * ds_k
+                if opening.sum() < 0.5 * ds_k.sum():
+                    continue
+                if best is None or t / sig > best['ratio']:
+                    best = dict(normal=nrm, ratio=t / sig, tension=t, strength=sig,
+                                length_deg=float(np.degrees(ds_k.sum())), weak_zone=k_c >= len(sweep),
+                                cut_kind=kinds[k_c], cells=dict(xyz=X, side1=s1))
+                continue
+            # strength along the cut
+            cont_c = np.zeros(len(R), bool) if craton_raster is None \
+                else np.nan_to_num(raster_lookup(craton_raster, plo[on], pla[on])) > 0
+            age_c = None if age_grid is None else raster_lookup(age_grid, plo[on], pla[on]).astype(float)
+            sig = rift_strength(R, cont_c, age_c, params, cores, core_tree, suture_tree).mean()
+            _note(t, sig)
+            if t <= sig:
+                continue
+            # the free halves must open along at least half the cut
+            try:
+                w1 = om - np.linalg.solve(K1, tau_h)
+                w2 = om + np.linalg.solve(K2, tau_h)
+            except np.linalg.LinAlgError:
+                continue
+            opening = (np.cross(w2 - w1, R) @ (-nrm)) > 0
+            if opening.mean() < 0.5:
+                continue
+            if best is None or t / sig > best['ratio']:
+                best = dict(normal=nrm, ratio=t / sig, tension=t, strength=sig,
+                            length_deg=on.sum() * 0.5, weak_zone=k_c >= len(sweep), cut_kind=kinds[k_c])
+        if best is not None:
+            cand_out[int(pid)] = best
+            if rec is not None:
+                rec['passed'] = True
+    return cand_out
+
+
+def apply_rift_split(plate_id_raster, craton_raster, pid, normal, next_pid, cells=None):
+    """Cut plate pid along the great circle with the given plane normal, or, with cells
+    (rift_path: least_cost; dict xyz, side1 of the plate's 1 deg cells, moved with the plate),
+    give each raster cell the side of the nearest of those cells.  The smaller side becomes
+    plate next_pid, on the plate-ID raster and on the craton raster (so a rifted continent stays
+    split when the cratons overwrite the plates next step).
+    Returns (plate_id_raster, craton_raster, child_pid or None)."""
+    lons, lats = raster_coords(plate_id_raster)
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    vals = plate_id_raster.values.copy()
+    mine = vals == pid
+    if cells is None:
+        side = lonlat_to_xyz(lon2d, lat2d) @ np.asarray(normal) > 0
+    else:
+        from scipy.spatial import cKDTree
+        side = np.zeros(vals.shape, bool)
+        near = cKDTree(cells['xyz']).query(lonlat_to_xyz(lon2d[mine], lat2d[mine]))[1]
+        side[mine] = np.asarray(cells['side1'])[near]
+    a, b = mine & side, mine & ~side
+    w = np.cos(np.radians(lat2d))
+    child = a if w[a].sum() < w[b].sum() else b
+    if not child.any():
+        return plate_id_raster, craton_raster, None
+    vals[child] = next_pid
+    plate_id_raster = plate_id_raster.copy(data=vals)
+    if craton_raster is not None:
+        cv = craton_raster.values.copy()
+        cv[child & (cv == pid)] = next_pid
+        craton_raster = craton_raster.copy(data=cv)
+    return plate_id_raster, craton_raster, next_pid
+
+
+def rotate_xyz(rotation, xyz):
+    """Unit vectors (n, 3) turned by a pygplates FiniteRotation (Rodrigues' formula)."""
+    xyz = np.asarray(xyz, float)
+    if rotation is None:
+        return xyz
+    axis, angle = rotation_axis_angle(rotation)
+    if angle == 0.0:
+        return xyz.copy()
+    return (xyz * np.cos(angle) + np.cross(axis, xyz) * np.sin(angle)
+            + np.outer(xyz @ axis, axis) * (1.0 - np.cos(angle)))
+
+
+def rotate_vector(rotation, v):
+    """A unit vector turned by a pygplates FiniteRotation (unchanged if rotation is None)."""
+    if rotation is None:
+        return np.asarray(v, float)
+    return np.array((rotation * pygplates.PointOnSphere(*np.asarray(v, float))).to_xyz())
+
+
+def generate_craton_cores(craton_raster, spacing_km=2500.0, belt_km=400.0, seed=None, point_deg=0.5,
+                          spread=None, core_factor=3.0, belt_factor=0.5):
+    """continent_strength: cores.  Random terranes in every continent of the step-0 craton
+    raster (values are plate IDs): seeds drawn area-uniformly at least spacing_km apart (dart
+    throwing on the sphere), every continental cell takes its nearest seed on the same
+    continent, and cells where (distance to the 2nd-nearest seed − distance to the nearest)
+    × R < belt_km form the belts between terranes; the rest are cores.  Returns points every
+    point_deg (DataFrame lon, lat, terrane, belt), which move with their plates.
+
+    continent_strength: cores_random (spread given): each terrane's core and each belt (one per
+    pair of neighbouring terranes) also gets its own strength factor, lognormal about
+    core_factor and belt_factor: factor = median × exp(spread × N(0, 1)), drawn after the
+    terranes, so the layout is the same as with cores.  Column 'factor'."""
+    from scipy.spatial import cKDTree
+    rng = np.random.default_rng(seed)
+    lons, lats = raster_coords(craton_raster)
+    lon2, lat2 = np.meshgrid(lons, lats)
+    stride = max(1, int(round(point_deg / abs(lons[1] - lons[0]))))
+    lon2, lat2 = lon2[::stride, ::stride], lat2[::stride, ::stride]
+    keep = lon2 < 180.0 - 1e-9                              # no duplicate 180 deg column
+    cont = np.nan_to_num(np.asarray(craton_raster.values, float))[::stride, ::stride].astype(int)
+    cont = np.where(keep, cont, 0)
+    X = lonlat_to_xyz(lon2, lat2)
+    w = np.cos(np.radians(lat2))
+    min_ang = spacing_km / EARTH_RADIUS_KM
+    rows, nid = [], 0
+    for pid in np.unique(cont[cont > 0]):
+        m = cont == pid
+        idx = np.flatnonzero(m)
+        pr = w.ravel()[idx] / w.ravel()[idx].sum()
+        cand = X.reshape(-1, 3)[rng.choice(idx, size=min(4000, len(idx)), p=pr, replace=False)]
+        chosen = []
+        for c in cand:
+            if not chosen or np.arccos(np.clip(np.array(chosen) @ c, -1, 1)).min() > min_ang:
+                chosen.append(c)
+        S = np.array(chosen)
+        if len(S) == 1:
+            terr, belt = np.zeros(m.sum(), int), np.zeros(m.sum(), bool)
+            terr2 = terr
+        else:
+            d, j = cKDTree(S).query(X[m], k=2)
+            ang = 2 * np.arcsin(np.clip(d / 2, 0, 1))
+            terr, belt = j[:, 0], (ang[:, 1] - ang[:, 0]) * EARTH_RADIUS_KM < belt_km
+            terr2 = j[:, 1]
+        rows.append(pd.DataFrame({'lon': lon2[m], 'lat': lat2[m], 'terrane': nid + 1 + terr, 'belt': belt,
+                                  'terrane2': nid + 1 + terr2}))
+        nid += len(S)
+    if not rows:
+        return pd.DataFrame(columns=['lon', 'lat', 'terrane', 'belt'])
+    out = pd.concat(rows, ignore_index=True)
+    if spread is not None:
+        # one factor per terrane core and per belt (an unordered pair of terranes)
+        lo_t = np.minimum(out.terrane.values, out.terrane2.values)
+        hi_t = np.maximum(out.terrane.values, out.terrane2.values)
+        core_f = core_factor * np.exp(spread * rng.standard_normal(nid + 1))
+        pairs, inv = np.unique(np.column_stack([lo_t, hi_t]), axis=0, return_inverse=True)
+        belt_f = belt_factor * np.exp(spread * rng.standard_normal(len(pairs)))
+        out['factor'] = np.where(out.belt.values, belt_f[np.ravel(inv)], core_f[out.terrane.values])
+    return out.drop(columns='terrane2')
+
+
+def _continent_factor(cores, xyz, params, tree=None):
+    """Continental rift-strength factor at points xyz (n, 3) from the craton-core points
+    (continent_strength: cores): craton_core_factor on a core, belt_strength_factor on a belt,
+    by the nearest core point; 1 with no core points."""
+    if cores is None or not len(cores):
+        return np.ones(len(xyz))
+    if tree is None:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(lonlat_to_xyz(cores['lon'].values.astype(float), cores['lat'].values.astype(float)))
+    near = tree.query(xyz)[1]
+    if 'factor' in cores.columns:                  # continent_strength: cores_random
+        return cores['factor'].values.astype(float)[near]
+    belt = cores['belt'].values.astype(bool)[near]
+    return np.where(belt, params.get('belt_strength_factor', 0.5),
+                    params.get('core_factor', params.get('craton_core_factor', 3.0)))
+
+
+def suture_points(samples, suture_id, time_myr):
+    """Suture tracers for one weld: the contact sample points (lon, lat) of the welded pair
+    (sutures: tracers).  Returns a DataFrame lon, lat, suture_id, time_myr."""
+    a = np.asarray(samples, float).reshape(-1, 2)
+    return pd.DataFrame({'lon': a[:, 0], 'lat': a[:, 1], 'suture_id': int(suture_id),
+                         'time_myr': float(time_myr)})
+
+
+def advect_sutures(sutures, plate_id_raster, stage_pole_dict):
+    """Move suture tracers one step with the stage rotation of the plate each sits on
+    (plate_id_raster: the plates before the move).  Suture tracers are never deleted."""
+    if sutures is None or not len(sutures):
+        return sutures
+    lon, lat = sutures['lon'].values.astype(float), sutures['lat'].values.astype(float)
+    pid = raster_lookup(plate_id_raster, lon, lat)
+    new_lon, new_lat = lon.copy(), lat.copy()
+    for q in np.unique(pid[np.isfinite(pid)]):
+        rot = stage_pole_dict.get(int(q))
+        if rot is None:
+            continue
+        m = pid == q
+        new_lon[m], new_lat[m] = rotate_lonlat(rot, lon[m], lat[m])
+    out = sutures.copy()
+    out['lon'], out['lat'] = new_lon, new_lat
+    return out
+
+
+def continent_overlap(craton_gdf, sampling):
+    """Continent hidden by overlapping continent polygons, for step_stats.
+
+    The continents are polygons carried rigidly by their plates; where two overlap, the
+    craton raster can show only one, so the other is hidden.  Every polygon is burnt into a
+    count grid (same cell-registered grid as rasterize_polygons); a cell covered n times hides
+    n - 1 cells of continent.  Returns dict(continent_area_km2 = area covered at least once,
+    continent_hidden_km2 = hidden area) on the sphere (cos-latitude cell areas, the duplicate
+    180 deg column dropped)."""
+    from affine import Affine
+    from rasterio.features import MergeAlg, rasterize
+    nlat, nlon = int(round(180 / sampling)) + 1, int(round(360 / sampling)) + 1
+    transform = Affine(sampling, 0.0, -180 - sampling / 2., 0.0, sampling, -90 - sampling / 2.)
+    shapes = [(g, 1) for g in craton_gdf.geometry if g is not None and not g.is_empty]
+    if not shapes:
+        return dict(continent_area_km2=0.0, continent_hidden_km2=0.0)
+    n = rasterize(shapes, transform=transform, out_shape=(nlat, nlon), merge_alg=MergeAlg.add,
+                  fill=0, dtype='uint16')[:, :-1].astype(float)
+    lats = -90 + np.arange(nlat) * sampling
+    cell = (np.radians(sampling) * EARTH_RADIUS_KM) ** 2 * np.clip(np.cos(np.radians(lats)), 0, None)[:, None]
+    return dict(continent_area_km2=float((cell * (n > 0)).sum()),
+                continent_hidden_km2=float((cell * np.maximum(n - 1, 0)).sum()))
+
+
+def rebuild_split_cratons(cratons, craton_raster, parent, child, craton_id_remap=None,
+                          raster_spacing=0.25, topo_simplify=0.4):
+    """After a rift split, replace the craton features of the parent plate (including cratons
+    absorbed into it) by polygons of its craton cells on each side of the cut, taken from the
+    craton raster (plate_rebuild: midpoint outlines; no vector clipping).  Returns the new
+    feature list; other cratons are kept as they are."""
+    remap = craton_id_remap or {}
+    host = lambda p: remap.get(p, p)
+    keep = [f for f in cratons if host(f.get_reconstruction_plate_id()) != parent]
+    vals = np.nan_to_num(np.asarray(craton_raster.values, float))
+    sel = np.where(np.isin(vals, [parent, child]), vals, 0.0)
+    polys = update_plate_polygons(craton_raster.copy(data=sel), raster_spacing=raster_spacing,
+                                  topo_simplify=topo_simplify, frame='midpoint')
+    polys = polys.explode(index_parts=False).reset_index(drop=True)
+    polys = polys[polys.geometry.geom_type.isin(['Polygon']) & polys.PLATEID1.isin([parent, child])]
+    new = list(gdf2gpml(densify_plate_polygons(polys[['PLATEID1', 'geometry']]))) if len(polys) else []
+    for k in [k for k, v in remap.items() if v == parent]:
+        del remap[k]                       # those cratons are now part of the rebuilt features
+    return keep + new
+
+
+def welded_continent_mask(craton_raster, giver, contact_points, reach_deg=1.0):
+    """A weld (collision_weld: on) passes only the continent at the contact: the craton cells of plate
+    `giver` that take part in a collision -- each connected piece of its continent with a
+    cell within reach_deg (great-circle) of one of the contact points.  Returns a boolean
+    mask on the craton raster (all False if nothing is near the contact)."""
+    from scipy.spatial import cKDTree
+    vals = np.nan_to_num(np.asarray(craton_raster.values, float))
+    mine = vals == giver
+    if not mine.any() or not contact_points:
+        return np.zeros_like(mine)
+    lons, lats = raster_coords(craton_raster)
+    labels, _ = label_wrapped(mine)
+    r, c = np.nonzero(mine)
+    tree = cKDTree(lonlat_to_xyz(lons[c], lats[r]))
+    plon, plat = np.asarray(contact_points, float).T
+    hits = tree.query_ball_point(lonlat_to_xyz(plon, plat), 2.0 * np.sin(0.5 * np.radians(reach_deg)))
+    idx = np.unique(np.concatenate([np.asarray(h, dtype=int) for h in hits]))
+    if not len(idx):
+        return np.zeros_like(mine)
+    return mine & np.isin(labels, np.unique(labels[r[idx], c[idx]]))
+
+
+def transfer_welded_continent(cratons, craton_raster, giver, taker, moved, craton_id_remap=None,
+                              raster_spacing=0.25, topo_simplify=0.4):
+    """Continent-only weld: the giver's craton cells in `moved` (welded_continent_mask) pass
+    to plate `taker`.  The giver's craton features are rebuilt from the craton raster as in
+    rebuild_split_cratons, the moved cells with the taker's plate ID; the rest of the giver
+    (its ocean and any continent away from the contact) stays its own plate.  The craton
+    override hands the moved cells to the taker next step.  Returns the new feature list."""
+    remap = craton_id_remap or {}
+    host = lambda p: remap.get(p, p)
+    keep = [f for f in cratons if host(f.get_reconstruction_plate_id()) != giver]
+    vals = np.nan_to_num(np.asarray(craton_raster.values, float))
+    tmp = float(int(vals.max()) + 1)       # a temporary ID for the moved cells
+    sel = np.where(vals == giver, float(giver), 0.0)
+    sel[moved] = tmp
+    polys = update_plate_polygons(craton_raster.copy(data=sel), raster_spacing=raster_spacing,
+                                  topo_simplify=topo_simplify, frame='midpoint')
+    polys = polys.explode(index_parts=False).reset_index(drop=True)
+    polys = polys[polys.geometry.geom_type.isin(['Polygon']) & polys.PLATEID1.isin([giver, tmp])].copy()
+    polys['PLATEID1'] = np.where(polys.PLATEID1 == tmp, taker, giver).astype(int)
+    new = list(gdf2gpml(densify_plate_polygons(polys[['PLATEID1', 'geometry']]))) if len(polys) else []
+    for k in [k for k, v in remap.items() if v == giver]:
+        del remap[k]                       # those cratons are now part of the rebuilt features
+    return keep + new
+
+
 def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=None, params=None,
                      polarity_dict=None, merge_pairs=None, fragmentation_cooldown_pids=None,
                      collision_state=None, craton_id_remap=None, next_plate_id=None,
                      speed_state=None, previous_plate_id=None, force_fields=None,
-                     force_diag=None):
+                     force_diag=None, rift_splits=None, rift_skip=(), sutures=None, cores=None):
     """Rebuild the plate configuration from moved plate polygons and compute the next
     stage rotations.
+
+    rift_splits [(pid, plane normal xyz)]: plates to cut along great circles this step
+    (decided by the rifting trial split of an earlier step, the normal already moved with
+    the plate); the smaller side becomes a new plate (apply_rift_split).  With
+    rifting: trial, force_diag['rift'] receives this step's passing cuts
+    (rift_trial_splits; plates in rift_skip are not tested) and force_diag['rift_applied']
+    the splits made, as (child, parent).  sutures (lon, lat, suture_id; sutures: tracers)
+    weaken the continental strength of the trial split and add one candidate cut per suture;
+    with sutures: tracers, force_diag['collision_samples'] receives {pair: [(lon, lat)]} along
+    each converging continent-continent contact.
 
     force_fields feeds the force modes that need them (see force_fields_needed):
       'tracers'       (lon, lat, age, plate_id) seafloor tracers at this step's positions
@@ -1697,7 +2571,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     breakoff = collision_mode == 'breakoff'
     if breakoff:
         collision_mode = 'viscous' if params.get('breakoff_contact', 'viscous') == 'viscous' else 'coupling'
-    min_fragment_area         = params.get('min_peninsula_area_deg2',    5.0)
+    # disconnected pieces smaller than this are absorbed by a neighbour, not made plates
+    min_fragment_area         = params.get('min_piece_area_deg2') or params.get('min_peninsula_area_deg2', 5.0)
     drag_mode                 = params.get('drag_mode',                  'none')
     speed_mode                = params.get('speed_normalisation',        'none')
     # The simple model (ω = τ, no scaling) keeps the original code path exactly
@@ -1725,14 +2600,18 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     rp_gdf = plate_polygons_to_wrapped_gdf(new_features)
     _ct['wrap_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    clipped_polygons = resolve_overlaps(rp_gdf, priority_col='PLATEID1')
-    clipped_polygons = clipped_polygons.explode(index_parts=False).reset_index(drop=True)
+    # Where moved plates overlap, the plate burnt into the raster last keeps the area: the
+    # plates are burnt highest ID first, so the lowest ID wins (overlap: plate_id), unless
+    # overlap: polarity gives each overlap to the pair's overriding plate (update_plate_id_raster).
+    clipped_polygons = rp_gdf.sort_values('PLATEID1', ascending=False, kind='stable')
     _ct['resolve_overlaps'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     plate_id_raster = update_plate_id_raster(clipped_polygons, raster_spacing=raster_spacing,
                                              tie_break=params.get('tie_break', 'previous_owner'),
                                              previous_plate_id=previous_plate_id,
-                                             tie_break_seed=params.get('tie_break_seed', 0))
+                                             tie_break_seed=params.get('tie_break_seed', 0),
+                                             overlap=params.get('overlap_mode', 'plate_id'),
+                                             polarity_dict=polarity_dict, diagnostics=force_diag)
     if next_plate_id is None:
         next_plate_id = int(np.nanmax(plate_id_raster.values)) + 1
     _ct['plate_id_raster'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
@@ -1758,6 +2637,8 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
         valid_cratons = wrapped_cratons.dropna(subset=['geometry'])
         valid_cratons = valid_cratons[~valid_cratons.geometry.is_empty]
         craton_raster = rasterize_polygons(valid_cratons, zval_field='PLATEID1', sampling=raster_spacing)
+        if force_diag is not None:
+            force_diag['continent_overlap'] = continent_overlap(valid_cratons, raster_spacing)
 
     def _remapped_cratons():
         if craton_raster is None or not craton_id_remap:
@@ -1778,6 +2659,21 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     _ct['craton_raster'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     new_plates = []
+    rift_applied = []
+    for item in (rift_splits or []):
+        pid, normal = item[0], item[1]
+        cells = item[2] if len(item) > 2 else None
+        plate_id_raster, craton_raster, child = apply_rift_split(plate_id_raster, craton_raster,
+                                                                 int(pid), normal, next_plate_id, cells)
+        if child is not None:
+            if pid in stage_pole_dict:
+                stage_pole_dict[child] = stage_pole_dict[pid]
+            new_plates.append((child, int(pid)))
+            rift_applied.append((child, int(pid)))
+            print('  [rift] plate {} split: new plate {}'.format(int(pid), child))
+            next_plate_id += 1
+    if force_diag is not None:
+        force_diag['rift_applied'] = rift_applied
 
     def _inherit(pairs):
         for new_pid, parent_pid in pairs:
@@ -1793,7 +2689,9 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
 
     def _rebuild_polygons(raster):
         polys = update_plate_polygons(raster, raster_spacing=raster_spacing,
-                                      topo_simplify=topo_simplify)
+                                      topo_simplify=topo_simplify,
+                                      frame=params.get('plate_rebuild_mode', 'lonlat'),
+                                      tiles=params.get('rebuild_tiles_mode', 'off') == 'on')
         polys = polys.explode(index_parts=False).reset_index(drop=True)
         return polys[polys.geometry.geom_type.isin(['Polygon'])]
 
@@ -1860,11 +2758,13 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
             live &= slab_tracers['attached'].fillna(True).astype(bool)
         slab_tracers = slab_tracers[live]      # detached slabs (breakoff) no longer pull
     force_params = {k: params[k] for k in ('slab_ref_depth_km', 'slab_age_saturation_myr',
-                                           'pull_ramp_km_per_myr', 'slab_search_radius_deg',
+                                           'slab_search_radius_deg',
                                            'slab_line_tol_deg', 'ridge_push_age_cutoff_myr',
-                                           'ridge_push_smooth_deg') if k in params}
+                                           'ridge_push_smooth_deg', 'collision_radius_deg') if k in params}
 
-    collision_info = {}
+    collision_info = {'want_samples': True} if params.get('sutures_mode', 'none') == 'tracers' else {}
+    rifting = params.get('rifting_mode', 'none') == 'trial' and solve_motions
+    torque_parts = {} if rifting else None
     _stage_out = polygons_to_stage_poles(
                                               new_plate_polygons, plate_id_raster, forces,
                                               craton_raster,
@@ -1881,7 +2781,9 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                               slab_tracers=slab_tracers,
                                               force_params=force_params,
                                               diagnostics=force_diag,
-                                              collision_info=collision_info)
+                                              collision_info=collision_info,
+                                              torque_parts=torque_parts,
+                                              drop_internal_edges=params.get('rebuild_tiles_mode', 'off') == 'on')
     if solve_motions:
         _, _collision_pairs, _torques, _edge_tensors = _stage_out
         new_stage_pole_dict = solve_plate_motions(_torques, _edge_tensors, plate_id_raster,
@@ -1890,6 +2792,32 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                                   contact_tensors=collision_info.get('contact_tensors'))
     else:
         new_stage_pole_dict, _collision_pairs = _stage_out
+
+    if rifting and torque_parts.get('seg_pid') is not None:
+        _t_rift = time.perf_counter()
+        width = params.get('edge_drag_width_km', 3000.0) / EARTH_RADIUS_KM
+        contact_scale = params.get('collision_drag_factor', 10.0) * width if collision_mode == 'viscous' else 0.0
+        if (collision_mode == 'viscous' and params.get('collision_contact_mode', 'length') == 'stiff'
+                and len(torque_parts.get('contact_G', []))):
+            # the trial split sees the same contact drag as the solve: c_s G / tr G per pair
+            tr = {pair: np.trace(G) for pair, G in (collision_info.get('contact_tensors') or {}).items()}
+            cp_, cn_ = torque_parts['contact_pid'], torque_parts['contact_nbr']
+            f = np.array([params.get('collision_stiff_factor', 100.0) / max(tr.get((min(a, b), max(a, b)), 0.0), 1e-12)
+                          for a, b in zip(cp_, cn_)])
+            torque_parts['contact_G'] = torque_parts['contact_G'] * f[:, None, None]
+            contact_scale = 1.0
+        rift_trials = {}
+        init_trials = [] if params.get('subduction_init_mode', 'off') == 'log' else None
+        rift = rift_trial_splits(plate_id_raster, craton_raster, age_grid, torque_parts,
+                                 speed_state['last']['omega'], params, contact_scale=contact_scale,
+                                 skip_pids=set(rift_skip), slab_pull_weight=forces.get('slab_pull', 6.0),
+                                 sutures=sutures, cores=cores, trials=rift_trials, margins=init_trials)
+        if force_diag is not None:
+            force_diag['rift'] = rift
+            force_diag['rift_trials'] = rift_trials
+            if init_trials is not None:
+                force_diag['init_trials'] = init_trials
+        _ct['rift_test'] = time.perf_counter() - _t_rift
 
     if collision_state is not None and (collision_mode == 'coupling' or breakoff):
         # coupling blends the pair's velocities; with breakoff on the viscous contact drag
@@ -1904,7 +2832,11 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                                params.get('breakoff_delay_myr', 10.0),
                                params.get('slab_search_radius_deg', 5.0))
 
-    _ct['stage_poles'] = time.perf_counter() - _t0
+    _ct['stage_poles'] = time.perf_counter() - _t0 - _ct.get('rift_test', 0.0)
+    if force_diag is not None and 'samples' in collision_info:
+        force_diag['collision_samples'] = collision_info['samples']
+    if force_diag is not None:
+        force_diag['collision_points'] = collision_info.get('points', {})
 
     _ct_total = sum(_ct.values())
     print('  [compute_timestep {:.1f}s]'.format(_ct_total),
@@ -2000,6 +2932,34 @@ def _points_every(boundaries_gdf, mask, spacing_deg):
         carry = length - (d - spacing_deg)
     return (np.array(lats), np.array(lons), np.array(rows, dtype=int),
             np.array(normals).reshape(-1, 3))
+
+
+def thin_tracers(tracers, plate_id_raster, cell_deg=0.5):
+    """Keep at most one active seafloor tracer per cell_deg lon/lat cell per plate: the
+    one nearest the cell centre.  Ridges seed a tracer pair every step whatever the
+    spreading rate, so slow plates pile tracers up; the physics age grid (1 deg) cannot use
+    that density.  Cells are lon/lat, so near the poles they are smaller and keep more
+    tracers than needed, which only makes the thinning more conservative."""
+    if tracers is None or len(tracers) == 0:
+        return tracers
+    active = tracers[tracers.active.astype(bool)]
+    lon, lat = active.geometry.x.values, active.geometry.y.values
+    pid = raster_lookup(plate_id_raster, lon, lat)
+    pid = np.where(np.isfinite(pid), pid, -1).astype(np.int64)
+    ci = np.floor((np.mod(lon + 180.0, 360.0)) / cell_deg).astype(np.int64)
+    ri = np.floor((np.clip(lat, -90.0, 90.0 - 1e-9) + 90.0) / cell_deg).astype(np.int64)
+    # distance to the cell centre on the sphere (chord length is monotonic in angle)
+    clon = np.radians(-180.0 + (ci + 0.5) * cell_deg); clat = np.radians(-90.0 + (ri + 0.5) * cell_deg)
+    lo, la = np.radians(lon), np.radians(lat)
+    d = (np.cos(la) * np.cos(lo) - np.cos(clat) * np.cos(clon)) ** 2 + \
+        (np.cos(la) * np.sin(lo) - np.cos(clat) * np.sin(clon)) ** 2 + (np.sin(la) - np.sin(clat)) ** 2
+    ncols = int(round(360.0 / cell_deg)) + 1
+    key = (pid * (ncols * ncols) + ri * ncols + ci)
+    order = np.lexsort((d, key))                      # by cell, nearest first
+    first = np.ones(len(order), bool)
+    first[1:] = key[order][1:] != key[order][:-1]
+    keep = np.sort(order[first])
+    return active.iloc[keep].reset_index(drop=True)
 
 
 def seed_ridge_tracers(boundaries_gdf, spacing_deg=2.0,
@@ -2200,337 +3160,23 @@ def deactivate_subducted_tracers(tracers, boundaries_gdf, threshold=-1.0, max_di
     return tracers
 
 
-# Slablets from trenches converging at least this fast (km/Myr = mm/yr) get full weight;
-# slower (near-stalled) boundaries contribute proportionally less.
-SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR = 10.0
+def _empty_samples():
+    """No trench samples (the same as slablet.empty_samples())."""
+    return {'lon': np.zeros(0), 'lat': np.zeros(0), 'convergence_km_per_myr': np.zeros(0)}
 
 
-def update_slab_tracers(slab_tracers, boundaries_gdf, delta_time,
-                         div_threshold_subduction=-0.0001,
-                         slowing_factor=4,
-                         sample_deg=1.0,
-                         upper_mantle_km=670.0,
-                         cmb_depth_km=2890.0,
-                         max_sink_rate_km_per_myr=200.0,
-                         sink_rate_factor=1.0):
-    """Seed new slablets at subduction zones and sink existing ones downward.
-
-    slab_tracers is a plain DataFrame with columns:
-        lon, lat, depth_km, age, active, sink_rate_km_per_myr, weight
-    All sinking is vertical — lon/lat stay fixed after seeding.
-    Sinking rate: sink_rate_factor × convergence rate (km/Myr) in the upper mantle,
-    divided by slowing_factor in the lower mantle, capped at max_sink_rate_km_per_myr.
-    Each slablet's weight is delta_time × min(1, |convergence| / 10 km/Myr): the
-    mantle signal per Myr of subduction does not depend on the time step, and
-    near-stalled boundaries contribute little.
-    Slablets that reach the CMB are removed.
-    """
-    slab_tracers = slab_tracers.copy()
-
-    if len(slab_tracers) > 0:
-        active = slab_tracers['active'].astype(bool)
-        upper = active & (slab_tracers['depth_km'] < upper_mantle_km)
-        lower = active & (slab_tracers['depth_km'] >= upper_mantle_km)
-        slab_tracers.loc[upper, 'depth_km'] += (
-            slab_tracers.loc[upper, 'sink_rate_km_per_myr'] * delta_time)
-        slab_tracers.loc[lower, 'depth_km'] += (
-            slab_tracers.loc[lower, 'sink_rate_km_per_myr'] / slowing_factor * delta_time)
-        slab_tracers.loc[active, 'age'] += delta_time
-        slab_tracers = slab_tracers[slab_tracers['depth_km'] < cmb_depth_km].reset_index(drop=True)
-
+def trench_samples(boundaries_gdf, div_threshold_subduction=-0.0001, sample_deg=1.0):
+    """Trench samples for the mantle model (slablet.core): points every sample_deg along
+    the boundaries converging faster than div_threshold_subduction, with
+    convergence_km_per_myr = |divergence|.  PlateDriver's grid is the mantle frame."""
     if boundaries_gdf is None or 'divergence' not in boundaries_gdf.columns:
-        return slab_tracers
-
-    sub = (boundaries_gdf['divergence'] < div_threshold_subduction).values
-    s_lat, s_lon, s_row, _ = _points_every(boundaries_gdf, sub, sample_deg)
-    if len(s_lat):
-        convergence = np.abs(boundaries_gdf['divergence'].values[s_row].astype(float))
-        new = pd.DataFrame({
-            'lon': s_lon, 'lat': s_lat, 'depth_km': 0.0, 'age': 0.0, 'active': True,
-            'sink_rate_km_per_myr': np.minimum(convergence * sink_rate_factor, max_sink_rate_km_per_myr),
-            'weight': delta_time * np.minimum(1.0, convergence / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR),
-            'attached': True})
-        slab_tracers = new if len(slab_tracers) == 0 else pd.concat([slab_tracers, new], ignore_index=True)
-    return slab_tracers
-
-
-def seed_initial_slabs(boundaries_gdf, depth_km, delta_time,
-                       div_threshold_subduction=-0.0001,
-                       sample_deg=1.0,
-                       upper_mantle_km=670.0,
-                       slowing_factor=4,
-                       max_sink_rate_km_per_myr=200.0,
-                       sink_rate_factor=1.0):
-    """Slab tracers for the trenches of the starting configuration.
-
-    Each convergent boundary (sampled every sample_deg, as in update_slab_tracers) gets
-    the column of slablets the model itself would have built had it been subducting at
-    its present rate until its slab reached depth_km: one slablet per delta_time of that
-    history, sinking at the same rates as update_slab_tracers.  The sink rate is floored
-    at SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR so a near-stalled trench does not need
-    thousands of Myr of history.  Columns are vertical (lon/lat fixed, mantle frame).
-    Returns a DataFrame with the update_slab_tracers columns (empty if no trenches).
-    """
-    columns = ['lon', 'lat', 'depth_km', 'age', 'active', 'sink_rate_km_per_myr', 'weight', 'attached']
-    if (depth_km <= 0 or boundaries_gdf is None or len(boundaries_gdf) == 0
-            or 'divergence' not in boundaries_gdf.columns):
-        return pd.DataFrame(columns=columns)
+        return _empty_samples()
     sub = (boundaries_gdf['divergence'] < div_threshold_subduction).values
     s_lat, s_lon, s_row, _ = _points_every(boundaries_gdf, sub, sample_deg)
     if not len(s_lat):
-        return pd.DataFrame(columns=columns)
-    convergence = np.abs(boundaries_gdf['divergence'].values[s_row].astype(float))
-    rate = np.clip(convergence * sink_rate_factor, SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR,
-                   max_sink_rate_km_per_myr)
-    # time for the slab to reach depth_km: upper mantle at rate, lower at rate / slowing_factor
-    upper = min(depth_km, upper_mantle_km)
-    t_end = upper / rate + max(0.0, depth_km - upper_mantle_km) * slowing_factor / rate
-    n = np.ceil(t_end / delta_time).astype(int) + 1          # ages 0, dt, ..., >= t_end
-    point = np.repeat(np.arange(len(s_lat)), n)
-    age = (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n)) * delta_time
-    r = rate[point]
-    t_um = upper_mantle_km / r
-    depth = np.where(age <= t_um, r * age, upper_mantle_km + (age - t_um) * r / slowing_factor)
-    return pd.DataFrame({
-        'lon': s_lon[point], 'lat': s_lat[point],
-        'depth_km': np.minimum(depth, depth_km), 'age': age, 'active': True,
-        'sink_rate_km_per_myr': r,
-        'weight': delta_time * np.minimum(1.0, convergence[point] / SLAB_FULL_WEIGHT_CONVERGENCE_KM_PER_MYR),
-        'attached': True})
-
-
-def slab_depth_at_segments(mid_lon, mid_lat, side_xyz, slab_lon, slab_lat, slab_depth,
-                           radius_deg=5.0, line_tol_deg=1.0, depth_cap_km=None, cell_deg=0.25):
-    """Depth (km) of the deepest slab tracer near each boundary segment, on one side of it.
-
-    side_xyz (n, 3) is the segment's great-circle normal, signed to point to the side
-    where the slab lies (the overriding plate).  A tracer counts if it is within
-    radius_deg (great-circle) of the segment midpoint and not more than line_tol_deg on
-    the other side of the segment's great circle (slablets are seeded on the trench
-    line, and the line moves).  Slablets sink vertically where they were seeded, so the
-    deep part of a retreating trench's slab lies under the overriding plate, as a
-    dipping slab does.  0 where there is no slab.
-
-    For speed, depths are capped at depth_cap_km (the depth beyond which no force grows)
-    and the slab is reduced to its deepest tracer in each cell_deg lon/lat cell, keeping
-    that tracer's own position.  Only a cell whose deepest tracer is on the wrong side of
-    a segment while a shallower one is on the right side can differ, which cell_deg well
-    below line_tol_deg makes rare.
-    """
-    z = np.zeros(len(mid_lon))
-    if len(slab_depth) == 0 or len(mid_lon) == 0:
-        return z
-    slab_lon, slab_lat = np.asarray(slab_lon, float), np.asarray(slab_lat, float)
-    slab_depth = np.asarray(slab_depth, float)
-    if depth_cap_km is not None:
-        slab_depth = np.minimum(slab_depth, depth_cap_km)
-    if cell_deg:
-        cell = (np.floor((slab_lat + 90.0) / cell_deg).astype(np.int64) * 100000
-                + np.floor(((slab_lon + 180.0) % 360.0) / cell_deg).astype(np.int64))
-        order = np.lexsort((-slab_depth, cell))                # by cell, deepest first
-        first = order[np.r_[True, cell[order][1:] != cell[order][:-1]]]
-        slab_lon, slab_lat, slab_depth = slab_lon[first], slab_lat[first], slab_depth[first]
-    from scipy.spatial import cKDTree
-    s_xyz = lonlat_to_xyz(np.asarray(slab_lon, float), np.asarray(slab_lat, float))
-    m_xyz = lonlat_to_xyz(np.asarray(mid_lon, float), np.asarray(mid_lat, float))
-    chord = 2.0 * np.sin(np.radians(radius_deg) / 2.0)
-    pairs = cKDTree(m_xyz).sparse_distance_matrix(cKDTree(s_xyz), chord, output_type='ndarray')
-    if len(pairs) == 0:
-        return z
-    seg, idx = pairs['i'], pairs['j']
-    side = np.einsum('ij,ij->i', s_xyz[idx], np.asarray(side_xyz, float)[seg])   # sin(distance from the great circle), + on the slab side
-    ok = side > -np.sin(np.radians(line_tol_deg))
-    np.maximum.at(z, seg[ok], np.asarray(slab_depth, float)[idx[ok]])
-    return z
-
-
-def _mantle_grid(spacing_deg):
-    lons_g = np.arange(-180 + spacing_deg / 2, 180, spacing_deg)
-    lats_g = np.arange( -90 + spacing_deg / 2,  90, spacing_deg)
-    return lons_g, lats_g
-
-
-def _slab_weights(slab_tracers):
-    if 'weight' in slab_tracers.columns:
-        return slab_tracers['weight'].values.astype(float)
-    return np.ones(len(slab_tracers))
-
-
-def update_cmb_heat(cmb_heat, slab_tracers, delta_time,
-                    spacing_deg=5.0,
-                    cmb_depth_km=2890.0,
-                    cmb_layer_km=400.0,
-                    heating_rate=0.02,
-                    slab_suppression=0.05,
-                    surface_coupling=0.1,
-                    sigma_deg=10.0,
-                    max_heat=3.0):
-    """Accumulate CMB heat each timestep, building LLSVP-like warm regions.
-
-    Core heating increments the 2D field (nlat × nlon) everywhere each step;
-    slablets suppress it with depth-weighted coupling.  A wide spherical
-    Gaussian keeps the pattern large-scale.  Positive values = warm regions
-    (slow dVs); passed to generate_mantle_temp_field as the upwelling anomaly.
-
-    Two physical mechanisms are combined:
-      - Thermal (material): slablets near the CMB suppress with full weight (1.0).
-      - Dynamic pressure (incompressibility): surface slablets suppress with
-        surface_coupling weight, representing instantaneous Stokes-flow coupling.
-    Coupling varies linearly with depth from surface_coupling at 0 km to 1.0 at
-    cmb_depth_km, so the LLSVP anti-correlation with subduction appears from the
-    first timestep rather than waiting ~50 Myr for material to arrive physically.
-
-    Parameters
-    ----------
-    heating_rate : float
-        Heat units added per Myr everywhere (core heating).
-    slab_suppression : float
-        Heat units removed per unit-weight slablet per Myr (at full coupling = CMB depth).
-    surface_coupling : float
-        Fractional coupling at depth=0 (0 = no instantaneous signal, 1 = full).
-    sigma_deg : float
-        Horizontal smoothing (degrees) applied each Myr; for other time steps the
-        width scales with sqrt(delta_time) so the smoothing acts like diffusion.
-    max_heat : float
-        Safety cap on accumulated heat units.
-    """
-    lons_g, lats_g = _mantle_grid(spacing_deg)
-    nlat, nlon = cmb_heat.shape
-
-    # Core heating everywhere
-    cmb_heat = cmb_heat + heating_rate * delta_time
-
-    if len(slab_tracers) > 0:
-        all_active = slab_tracers[slab_tracers['active'].astype(bool)]
-        if len(all_active) > 0:
-            lons_f   = all_active['lon'].values.astype(float)
-            lats_f   = all_active['lat'].values.astype(float)
-            depths_f = all_active['depth_km'].values.astype(float)
-
-            coupling = surface_coupling + (1.0 - surface_coupling) * (depths_f / cmb_depth_km)
-            weights  = slab_suppression * delta_time * coupling * _slab_weights(all_active)
-
-            lon_idx = np.clip(np.floor((lons_f + 180) / spacing_deg).astype(int), 0, nlon - 1)
-            lat_idx = np.clip(np.floor((lats_f + 90)  / spacing_deg).astype(int), 0, nlat - 1)
-            suppress = np.zeros_like(cmb_heat)
-            np.add.at(suppress, (lat_idx, lon_idx), weights)
-            cmb_heat = np.maximum(cmb_heat - suppress, 0.0)
-
-    cmb_heat = spherical_gaussian_smooth(cmb_heat, lats_g, lons_g, sigma_deg * np.sqrt(delta_time))
-
-    return np.minimum(cmb_heat, max_heat)
-
-
-def _remove_area_weighted_mean(field, lats):
-    w = np.cos(np.radians(lats))[:, None] * np.ones(field.shape[-1])
-    means = (field * w).sum(axis=(-2, -1)) / w.sum()
-    return field - means[:, None, None]
-
-
-def generate_mantle_temp_field(slab_tracers,
-                                spacing_deg=5.0,
-                                depth_interval_km=100.0,
-                                max_depth_km=2890.0,
-                                temp_anomaly_K=-500.0,
-                                thermal_tau_myr=200.0,
-                                dVs_per_K=-0.001,
-                                sigma_deg=3.0,
-                                sigma_depth_km=150.0,
-                                cmb_heat=None,
-                                cmb_dVs_scale=-0.5,
-                                cmb_decay_km=400.0,
-                                tomo_smooth_horiz_deg=0.0,
-                                tomo_smooth_depth_km=0.0):
-    """Bin slab tracers onto a 3D grid and return a dVs/Vs anomaly Dataset.
-
-    Each slablet contributes a cold temperature anomaly (temp_anomaly_K × its weight)
-    that decays exponentially with age (thermal_tau_myr).  The summed ΔT per grid cell
-    is smoothed (spherical Gaussian horizontally, Gaussian in depth) and converted to
-    dVs/Vs % (dVs_per_K, default -0.001 %/K, so a fresh unit-weight slablet gives
-    -0.5% per cell).
-
-    If cmb_heat (a 2D nlat×nlon array from update_cmb_heat) is provided, a warm
-    negative-dVs anomaly is added in the deepest layers, decaying upward as
-    exp(-(distance from CMB / cmb_decay_km)²).
-
-    Each depth layer has zero area-weighted mean, like tomography models.
-    Returns xr.Dataset with variables 'dVs' and optionally 'cmb_heat'
-    (dims: depth, lat, lon).
-    """
-    from scipy.ndimage import gaussian_filter1d
-
-    lons_g, lats_g = _mantle_grid(spacing_deg)
-    depths_g = np.arange(depth_interval_km / 2, max_depth_km, depth_interval_km)
-    nlon, nlat, ndepth = len(lons_g), len(lats_g), len(depths_g)
-    field = np.zeros((ndepth, nlat, nlon), dtype=float)
-
-    def _smooth(f, sig_h_deg, sig_d_km):
-        f = spherical_gaussian_smooth(f, lats_g, lons_g, sig_h_deg)
-        if sig_d_km > 0:
-            f = gaussian_filter1d(f, sig_d_km / depth_interval_km, axis=0, mode='nearest')
-        return f
-
-    if len(slab_tracers) > 0:
-        active = slab_tracers[slab_tracers['active'].astype(bool)]
-        if len(active) > 0:
-            ages_f   = active['age'].values.astype(float)
-            lons_f   = active['lon'].values.astype(float)
-            lats_f   = active['lat'].values.astype(float)
-            depths_f = active['depth_km'].values.astype(float)
-
-            dT  = temp_anomaly_K * np.exp(-ages_f / thermal_tau_myr) * _slab_weights(active)
-            dVs = dT * dVs_per_K
-
-            lon_idx = np.clip(
-                np.floor((lons_f + 180) / spacing_deg).astype(int), 0, nlon - 1)
-            lat_idx = np.clip(
-                np.floor((lats_f + 90)  / spacing_deg).astype(int), 0, nlat - 1)
-            dep_idx = np.clip(
-                np.floor(depths_f / depth_interval_km).astype(int), 0, ndepth - 1)
-            np.add.at(field, (dep_idx, lat_idx, lon_idx), dVs)
-
-            field = _smooth(field, sigma_deg, sigma_depth_km)
-
-    # Inject LLSVP-like warm anomaly from CMB heat accumulation.
-    # Iterate deepest→shallowest; break once decay becomes negligible.
-    if cmb_heat is not None and cmb_heat.shape == (nlat, nlon):
-        _n_injected = 0
-        for dep_i in range(ndepth - 1, -1, -1):
-            dist_from_cmb = max_depth_km - depths_g[dep_i]
-            decay = np.exp(-(dist_from_cmb / cmb_decay_km) ** 2)
-            if decay < 1e-4:
-                break
-            field[dep_i] += cmb_heat * cmb_dVs_scale * decay
-            _n_injected += 1
-        print(f'  [mantle] LLSVP injected into {_n_injected} depth layers; '
-              f'cmb_heat range {cmb_heat.min():.3f}–{cmb_heat.max():.3f}; '
-              f'dVs at CMB: {field[-1].min():.4f}–{field[-1].max():.4f} %')
-    elif cmb_heat is not None:
-        print(f'  [mantle] WARNING: cmb_heat shape {cmb_heat.shape} != expected ({nlat},{nlon}) — LLSVP skipped')
-
-    field = _remove_area_weighted_mean(field, lats_g)
-
-    if tomo_smooth_horiz_deg > 0 or tomo_smooth_depth_km > 0:
-        field = _smooth(field, tomo_smooth_horiz_deg, tomo_smooth_depth_km)
-        field = _remove_area_weighted_mean(field, lats_g)
-
-    data_vars = {
-        'dVs': xr.DataArray(
-            field, dims=['depth', 'lat', 'lon'],
-            coords={'depth': depths_g, 'lat': lats_g, 'lon': lons_g},
-            attrs={'units': '%',
-                   'long_name': 'dVs/Vs anomaly (positive = cold fast slab; negative = warm slow region)',
-                   'temp_anomaly_K': temp_anomaly_K,
-                   'thermal_tau_myr': thermal_tau_myr,
-                   'dVs_per_K': dVs_per_K}),
-    }
-    if cmb_heat is not None and cmb_heat.shape == (nlat, nlon):
-        data_vars['cmb_heat'] = xr.DataArray(
-            cmb_heat, dims=['lat', 'lon'],
-            coords={'lat': lats_g, 'lon': lons_g},
-            attrs={'units': 'heat units',
-                   'long_name': 'CMB heat accumulation (proxy for LLSVP intensity)'})
-    return xr.Dataset(data_vars)
+        return _empty_samples()
+    return {'lon': s_lon, 'lat': s_lat,
+            'convergence_km_per_myr': np.abs(boundaries_gdf['divergence'].values[s_row].astype(float))}
 
 
 def generate_hotspot_locations(n=20, locations=None, seed=None):
@@ -2576,6 +3222,117 @@ def seed_hotspot_seamounts(hotspot_locs, prob=0.3, rng=None):
         return gpd.GeoDataFrame(columns=['geometry', 'hotspot_id', 'age', 'active'],
                                 geometry='geometry').set_crs(epsg=4326)
     return gpd.GeoDataFrame(rows, geometry='geometry').set_crs(epsg=4326)
+
+
+def _offset(lon, lat, normal_xyz, distance_deg):
+    """Points moved distance_deg along the great circle in the direction of the unit tangent
+    normal_xyz (N, 3); negative distances go the other way."""
+    p = lonlat_to_xyz(lon, lat)
+    d = np.radians(distance_deg)
+    return xyz_to_lonlat(p * np.cos(d) + normal_xyz * np.sin(d))
+
+
+def _azimuth_deg(lon, lat, tangent_xyz):
+    """Azimuth (clockwise from north) of unit tangent vectors (N, 3) at lon/lat."""
+    lo, la = np.radians(lon), np.radians(lat)
+    east = np.column_stack([-np.sin(lo), np.cos(lo), np.zeros_like(lo)])
+    north = np.column_stack([-np.sin(la) * np.cos(lo), -np.sin(la) * np.sin(lo), np.cos(la)])
+    return np.degrees(np.arctan2((tangent_xyz * east).sum(1), (tangent_xyz * north).sum(1))) % 360.0
+
+
+def plate_step(t, delta_time, plate_id_raster, stage_pole_dict, boundaries_gdf, params,
+               polarity_dict=None, craton_counts=None, craton_raster=None, age_grid=None,
+               trench_sample_deg=1.0, ridge_sample_deg=0.5, probe_deg=0.5, age_probe_km=100.0):
+    """This world's state at model time t as a slablet PlateStep (the plate-history contract in
+    slablet/plate_history.py), over the step [t, t + delta_time] that stage_pole_dict covers.
+
+    plate identity   the nearest cell of the plate-ID raster (it is this world's state, not a cache)
+    omega            each stage rotation's axis x angle / delta_time (rad/Myr), as plate_velocity_ne uses
+    trench samples   positions and convergence exactly as trench_samples makes them, plus polarity from
+                     resolve_downgoing_plate (as the boundary outputs record it): the down-dip azimuth
+                     points to the side, probe_deg along the boundary normal, whose cell is the
+                     overriding plate (NaN if neither or both are); the trench moves with the
+                     overriding plate; the subducting seafloor age is age_grid at age_probe_km on the
+                     downgoing side (NaN without age_grid)
+    ridge samples    every ridge_sample_deg along boundaries diverging faster than div_threshold_ridge
+    seafloor age     age_grid (the 1-degree physics grid, which is cell-centred), else NaN
+    continent        craton_raster > 0 (this world's continents); craton: the same, as this world has no
+                     separate craton (keel) polygons
+    trench lines     the 2-vertex arcs of the converging boundaries
+    """
+    from slablet import plate_history as PH
+    R = PH.RADIUS_KM
+
+    def plate_id_at(lon, lat):
+        v = np.asarray(raster_lookup(plate_id_raster, np.asarray(lon, float), np.asarray(lat, float)), float)
+        return np.where(np.isfinite(v), v, 0).astype(int)
+
+    omega = {}
+    for pid, rot in stage_pole_dict.items():
+        if rot is None or rot.represents_identity_rotation():
+            omega[int(pid)] = np.zeros(3)
+        else:
+            pole, angle = rot.get_euler_pole_and_angle()
+            omega[int(pid)] = np.array(pole.to_xyz()) * angle / delta_time
+
+    def velocity_ne(pid, lon, lat):
+        om = np.array([omega.get(int(q), np.full(3, np.nan)) for q in pid]).reshape(-1, 3)
+        v = np.cross(om, lonlat_to_xyz(lon, lat)) * R
+        az_e = np.column_stack([-np.sin(np.radians(lon)), np.cos(np.radians(lon)), np.zeros(len(lon))])
+        az_n = np.column_stack([-np.sin(np.radians(lat)) * np.cos(np.radians(lon)),
+                                -np.sin(np.radians(lat)) * np.sin(np.radians(lon)), np.cos(np.radians(lat))])
+        return (v * az_e).sum(1), (v * az_n).sum(1)
+
+    trench = PH.empty_trench()
+    ridge = PH.empty_ridge()
+    lines = []
+    if boundaries_gdf is not None and len(boundaries_gdf) and 'divergence' in boundaries_gdf.columns:
+        div = boundaries_gdf['divergence'].values.astype(float)
+        sub = div < params['div_threshold_subduction']
+        lat_s, lon_s, row, normal = _points_every(boundaries_gdf, sub, trench_sample_deg)
+        if len(lat_s):
+            p1 = np.nan_to_num(boundaries_gdf['plateid1_poly1'].values.astype(float)[row]).astype(int)
+            p2 = np.nan_to_num(boundaries_gdf['plateid1_poly2'].values.astype(float)[row]).astype(int)
+            down = np.array([resolve_downgoing_plate(a, b, polarity_dict or {}, craton_counts)
+                             for a, b in zip(p1, p2)])
+            over = np.where(down == p1, p2, p1)
+            side_pid = [plate_id_at(*_offset(lon_s, lat_s, sg * normal, probe_deg)) for sg in (1.0, -1.0)]
+            plus, minus = side_pid[0] == over, side_pid[1] == over
+            toward = np.where(plus & ~minus, 1.0, np.where(minus & ~plus, -1.0, np.nan))
+            ok = np.isfinite(toward) & (over > 0)
+            azimuth = np.full(len(lat_s), np.nan)
+            azimuth[ok] = _azimuth_deg(lon_s[ok], lat_s[ok], toward[ok, None] * normal[ok])
+            te, tn = velocity_ne(over, lon_s, lat_s)
+            age = np.full(len(lat_s), np.nan)
+            if age_grid is not None and ok.any():
+                a_lon, a_lat = _offset(lon_s[ok], lat_s[ok], -toward[ok, None] * normal[ok], np.degrees(age_probe_km / R))
+                age[ok] = np.asarray(raster_lookup(age_grid, a_lon, a_lat), float)
+            trench = {'lon': lon_s, 'lat': lat_s, 'convergence_km_per_myr': np.abs(div[row]),
+                      'downdip_azimuth_deg': azimuth, 'trench_east_km_per_myr': np.where(over > 0, te, np.nan),
+                      'trench_north_km_per_myr': np.where(over > 0, tn, np.nan), 'seafloor_age_myr': age}
+        rid = div > params['div_threshold_ridge']
+        lat_r, lon_r, row_r, _ = _points_every(boundaries_gdf, rid, ridge_sample_deg)
+        if len(lat_r):
+            ridge = {'lon': lon_r, 'lat': lat_r, 'divergence_km_per_myr': div[row_r],
+                     'length_km': np.full(len(lat_r), np.radians(ridge_sample_deg) * R)}
+        lines = [np.asarray(g.coords)[:, :2] for g in boundaries_gdf.geometry.values[sub] if g is not None]
+
+    lons, lats = PH.cell_centred_grid(1.0)
+    if age_grid is not None:
+        seafloor_age = age_grid.rename({d: n for d, n in zip(age_grid.dims, ('lat', 'lon'))}).astype(float)
+    else:
+        seafloor_age = xr.DataArray(np.full((len(lats), len(lons)), np.nan), dims=('lat', 'lon'),
+                                    coords={'lat': lats, 'lon': lons})
+
+    def continent_at(lon, lat):
+        if craton_raster is None:
+            return np.zeros(np.shape(lon), bool)
+        v = np.asarray(raster_lookup(craton_raster, np.asarray(lon, float), np.asarray(lat, float)), float)
+        return np.nan_to_num(v) > 0
+
+    return PH.check(PH.PlateStep(time=float(t), delta_time=float(delta_time), plate_id_at=plate_id_at,
+                                 omega=omega, trench=trench, ridge=ridge, seafloor_age=seafloor_age,
+                                 continent_at=continent_at, craton_at=continent_at, trench_lines=lines))
 
 
 def craton_counts_from_raster(craton_raster):
@@ -3015,8 +3772,21 @@ def generate_seafloor_age_grid(tracer_csv, craton_raster=None, region='d', spaci
     if not isinstance(spacing, str):
         spacing = f'{spacing}d'
 
-    res = pygmt.blockmedian(tracer_csv, region=region, incols='1,2,0',
-                            spacing=spacing, output_type='numpy')
+    # GMT reads '=', '+' or '?' in a file name as format flags, so such a path is read from a
+    # copy. (The file goes to GMT rather than the numbers: GMT's text reader rounds a few values
+    # in the last bit differently, which moves about 0.5% of the interpolated cells.)
+    tmp = None
+    if any(c in str(tracer_csv) for c in '=+?'):
+        import shutil, tempfile
+        fd, tmp = tempfile.mkstemp(suffix='.csv')
+        os.close(fd)
+        shutil.copyfile(tracer_csv, tmp)
+    try:
+        res = pygmt.blockmedian(tmp or tracer_csv, region=region, incols='1,2,0',
+                                spacing=spacing, output_type='numpy')
+    finally:
+        if tmp:
+            os.remove(tmp)
     age_grid = pygmt.sphinterpolate(res, region=region, spacing=spacing)
 
     if craton_raster is not None:
@@ -3077,25 +3847,74 @@ def generate_topo_bathy_grid(seafloor_age_grid, topography_raster=None,
                         attrs={'units': 'meters', 'long_name': 'topography-bathymetry'})
 
 
-def write_rotation_file(rotation_records, path, fixed_plate_id=0):
+# Names used before November 2026 and their replacements. "Craton" meant all continental
+# lithosphere in the input, and the strong cores of continent_strength: cores in the params.
+RENAMED_PARAMS = {'craton_core_spacing_km': 'core_spacing_km', 'craton_belt_width_km': 'belt_width_km',
+                  'craton_core_factor': 'core_factor', 'craton_core_seed': 'core_seed'}
+
+
+def continent_grid(run_dir, tag):
+    """A run's saved continent mask for one step (DataArray, > 0 on continent), or None:
+    continent_<tag>.nc, or craton_<tag>.nc from runs made before November 2026."""
+    for name in ('continent', 'craton'):
+        path = os.path.join(run_dir, '{}_{}.nc'.format(name, tag))
+        if os.path.exists(path):
+            return xr.open_dataset(path)[name]
+    return None
+
+
+def cores_file(run_dir, tag):
+    """A run's strong-core points for one step (cores_<tag>.csv, or craton_cores_<tag>.csv
+    from runs made before November 2026), or None."""
+    for name in ('cores', 'craton_cores'):
+        path = os.path.join(run_dir, '{}_{}.csv'.format(name, tag))
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def write_rotation_file(rotation_records, path, fixed_plate_id=0, present_time=None):
     """Write accumulated finite rotations to a GPlates .rot file.
 
-    rotation_records is a list of (time_myr, plate_id, FiniteRotation) tuples
-    produced by accumulating stage poles across timesteps.  A t=0 identity
-    entry is written automatically for every plate that appears in the records.
+    rotation_records is a list of (time_myr, plate_id, FiniteRotation) tuples produced by
+    accumulating stage poles across timesteps: each rotation moves the step-0 geometry of
+    its plate to its position at elapsed model time time_myr.
+
+    present_time None (rotation_time: elapsed): the time column is elapsed model time, as
+    recorded.
+
+    present_time t_N (rotation_time: before_snapshot): the step at t_N is "present day"
+    (0 Ma) and the time column counts back from it, as GPlates expects, so the file
+    reconstructs that step's outputs (plate polygons, boundaries, seafloor ages, all in
+    present-day positions) back through the run: the rotation at age a = t_N - t is
+    F(t) F(t_N)^-1, which moves a plate from its position at t_N to its position at t. Plates
+    no longer present at t_N are left out. A zero-age identity line is written for every plate.
     """
     from collections import defaultdict
 
     by_plate = defaultdict(list)
     for time_myr, pid, rot in rotation_records:
         by_plate[pid].append((time_myr, rot))
+    if present_time is not None:
+        back = {}
+        for pid, recs in by_plate.items():
+            recs = dict(recs)
+            if not any(abs(t - present_time) < 1e-9 for t in recs):
+                continue
+            now_inv = recs[min(recs, key=lambda t: abs(t - present_time))].get_inverse()
+            recs.setdefault(0.0, pygplates.FiniteRotation.create_identity_rotation())
+            back[pid] = [(round(present_time - t, 9), rot * now_inv)
+                         for t, rot in recs.items() if t <= present_time + 1e-9]
+        by_plate = back
 
     lines = []
     for pid in sorted(by_plate.keys()):
-        # t=0 identity line (required by GPlates)
+        # zero-age identity line (required by GPlates)
         lines.append('{:d}   {:8.4f}   {:9.4f}   {:10.4f}   {:9.4f}   {:d}'.format(
             pid, 0.0, 0.0, 0.0, 0.0, fixed_plate_id))
         for time_myr, rot in sorted(by_plate[pid], key=lambda x: x[0]):
+            if present_time is not None and time_myr == 0:
+                continue                      # the identity line above is the present day
             if rot.represents_identity_rotation():
                 lat, lon, angle = 0.0, 0.0, 0.0
             else:

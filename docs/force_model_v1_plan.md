@@ -1,5 +1,8 @@
 # Force model v1 — plan
 
+`show-me/` and `runs/` paths in this document are local working folders and are not in the repository; the
+results they held are stated in the text here, and those behind README statements in `docs/evidence.md`.
+
 Draft prepared with Claude Code. Decisions come from a design interview (Q1–Q18); the
 question number is given in brackets.
 
@@ -70,8 +73,11 @@ When the run starts, the log prints the resolved modes and the k it used.
 
 ## Formulation notes
 
-**Spherical geometry.** Everything here is on a sphere, and nothing uses a flat
-approximation:
+**Spherical geometry.** The force model below is on a sphere and uses no flat
+approximation. The plate geometry it reads is not: the plates are rebuilt each step from a
+lon/lat raster and simplified in degrees, ridge push (`body`) takes the age gradient along lon
+and lat, and with `rebuild_tiles: off` the dateline seam counts as boundary in the edge drag
+(note added 2026-11-16; `docs/public_release_plan.md`, problem 7).
 
 - **Tensors:** for each plate p, the drag tensor is I_p = Σ w (𝟙 − r rᵀ) dA over its
   cells; J_p is the same sum with w = 1. r is the unit position vector and dA uses
