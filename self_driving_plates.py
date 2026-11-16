@@ -2107,7 +2107,7 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
                 nk = np.cross(r, Rp[1:] - Rp[:-1])
                 nk /= np.linalg.norm(nk, axis=1)[:, None]
                 # n̂ from half 1 to half 2: flip where a point just off the path is on half 1
-                q = r + np.sin(np.radians(0.7)) * nk
+                q = r + np.sin(np.radians(0.7 * grid_deg)) * nk     # 0.7 of a grid cell off the path
                 nb = cell_tree.query(q / np.linalg.norm(q, axis=1)[:, None], k=8)[1]
                 first = nb[np.arange(len(nb)), np.argmax(off_path[nb], axis=1)]   # nearest cell not on the path
                 nk[s1[first]] *= -1
