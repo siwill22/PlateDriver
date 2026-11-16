@@ -146,7 +146,8 @@ def summarise(d, t0, t1):
         'step_s': s.seconds_step.mean(),
     }
     saved = sorted(int(f[13:17]) for f in os.listdir(d) if f.startswith('seafloor_age_') and f.endswith('.nc'))
-    end = max([x for x in saved if x <= t1], default=None)
+    t_of = dict(zip(st.step, st.time_myr))                 # saved step -> model time (any time step)
+    end = max([x for x in saved if t_of.get(x, np.inf) <= t1 + 1e-9], default=None)
     age = ocean_age(d, end, float(st.loc[st.step == end, 'time_myr'].iloc[0])) if end is not None else None
     if age:
         row.update({'age_at': end, 'age_median': age['median'], 'age_gt100_pct': age['gt100'],
@@ -191,11 +192,12 @@ def figures(runs_dir, name, seeds, until, cfg_path, df, table_md):
     out = os.path.join(REPO, 'show-me', '%s-%s' % (datetime.date.today().isoformat(), name))
     os.makedirs(out, exist_ok=True)
     dirs = [seed_dir(runs_dir, name, s) for s in seeds]
-    step = max(1, int(round(until / 10)))
-    seq = [int(x) for x in range(0, int(until) + 1, step)]
+    dt = float(yaml.safe_load(open(cfg_path))['run'].get('delta_time', 1.0))
+    every = max(1, int(round(until / 10)))
+    seq = [int(round(t / dt)) for t in range(0, int(until) + 1, every)]      # model times as step numbers
     subprocess.run([sys.executable, os.path.join(REPO, 'diagnose_run.py'), *dirs,
                     '--labels', *['tie seed %d' % s for s in seeds], '--out', out,
-                    '--sequence-steps', *map(str, seq), '--steps', str(int(until))], cwd=REPO, check=True)
+                    '--sequence-steps', *map(str, seq), '--steps', str(int(round(until / dt)))], cwd=REPO, check=True)
     df.round(3).to_csv(os.path.join(out, 'gate_table.csv'), index=False)
     with open(os.path.join(out, 'README.md'), 'w') as f:
         f.write('# Gate: %s\n\nConfig `%s`, tie seeds %s, %g Myr; runs in `%s`.\n'
