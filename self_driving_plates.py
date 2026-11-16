@@ -3769,8 +3769,21 @@ def generate_seafloor_age_grid(tracer_csv, craton_raster=None, region='d', spaci
     if not isinstance(spacing, str):
         spacing = f'{spacing}d'
 
-    res = pygmt.blockmedian(tracer_csv, region=region, incols='1,2,0',
-                            spacing=spacing, output_type='numpy')
+    # GMT reads '=', '+' or '?' in a file name as format flags, so such a path is read from a
+    # copy. (The file goes to GMT rather than the numbers: GMT's text reader rounds a few values
+    # in the last bit differently, which moves about 0.5% of the interpolated cells.)
+    tmp = None
+    if any(c in str(tracer_csv) for c in '=+?'):
+        import shutil, tempfile
+        fd, tmp = tempfile.mkstemp(suffix='.csv')
+        os.close(fd)
+        shutil.copyfile(tracer_csv, tmp)
+    try:
+        res = pygmt.blockmedian(tmp or tracer_csv, region=region, incols='1,2,0',
+                                spacing=spacing, output_type='numpy')
+    finally:
+        if tmp:
+            os.remove(tmp)
     age_grid = pygmt.sphinterpolate(res, region=region, spacing=spacing)
 
     if craton_raster is not None:
