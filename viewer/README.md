@@ -57,9 +57,10 @@ grids/strength/NNNN.bin   uint8, 720 x 361: rift strength (self_driving_plates.r
 Grids use the Geode Archive byte layout: longitude fastest from -180 (seam not repeated), then
 latitude ascending from -90, both poles included. `run.json` gives `grid` (nlon, nlat) and `layers`.
 
-- Continents are `craton_NNNN.nc > 0` (in PlateDriver the same cells as land and as no seafloor
-  age). With `continent_strength: cores` each continental node takes the core/belt flag of its
-  nearest `craton_cores_NNNN.csv` point, the lookup the model itself uses.
+- Continents are `continent_NNNN.nc > 0` (`craton_NNNN.nc` in runs made before November 2026; in
+  PlateDriver the same cells as land and as no seafloor age). With `continent_strength: cores` each
+  continental node takes the core/belt flag of its nearest `cores_NNNN.csv` point
+  (`craton_cores_NNNN.csv` before November 2026), the lookup the model itself uses.
 
 - PlateDriver's 2-point boundary segments are chained into polylines (petrify spaces trench
   triangles per feature) and densified along great circles to ≤ 1°.

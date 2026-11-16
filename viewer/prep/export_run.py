@@ -14,7 +14,7 @@ V1 exports boundaries, plates and velocities:
                            label position (plate_stats.csv, plate_id_NNNN.nc)
   velocities.json          petrify VelocityField: fixed points, east/north km/Myr per step
   grids/continents/NNNN.bin  uint8 class grid (Archive layout, below): 0 ocean, 1 continent,
-                           2 craton core, 3 belt
+                           2 strong core, 3 belt
   grids/strength/NNNN.bin  uint8 rift strength (below): value x STRENGTH_SCALE, 255 no data
   diagnostics.json         every step's whole-run numbers for the plot above the time bar
                            (step_stats.csv, plate_stats.csv), and the rift and weld times
@@ -23,10 +23,11 @@ Grids use the Geode Archive byte layout: longitude fastest, -180 + i * 360 / nlo
 (no repeated seam), then latitude ascending, -90 + j * 180 / (nlat - 1) (both poles).
 At 0.5 deg (--grid-deg) that is 720 x 361, every second node of PlateDriver's 0.25 deg grid.
 
-Continents: PlateDriver's continental mask is craton_NNNN.nc > 0 (the same cells as land
-and as no seafloor age).  With continent_strength: cores, each continental node takes the
-core/belt flag of its nearest craton-core point (craton_cores_NNNN.csv), the same lookup
-the model uses for continental strength (self_driving_plates._continent_factor).
+Continents: PlateDriver's continental mask is continent_NNNN.nc > 0 (craton_NNNN.nc in runs
+made before November 2026; the same cells as land and as no seafloor age).  With
+continent_strength: cores, each continental node takes the core/belt flag of its nearest core
+point (cores_NNNN.csv, before November 2026 craton_cores_NNNN.csv), the same lookup the model
+uses for continental strength (self_driving_plates._continent_factor).
 
 Strength: the plate's strength against rifting at each node, from the same function the
 rift test uses (self_driving_plates.rift_strength): strength per unit length of cut, in units
