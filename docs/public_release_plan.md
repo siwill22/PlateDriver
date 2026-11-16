@@ -91,6 +91,10 @@ paths are relative to the PlateDriver folder.
   (`741e72b`), and the least-cost rift cut now scales with the force grid (`a815951`).
 
 **Still open:**
+- **slablet's seafloor cache** does not record where tracking started, so a new user who follows a 250-Ma config
+  gets a 50-km lithosphere lid up to 3% dVs different from runs made on a cache tracked from 1000 Ma (everything
+  deeper is identical; slablet `docs/status.md`). Put the start in the cache key, or make the tracker always start
+  from the model's oldest time, before the release.
 - **`show-me/` references.** The README cites six `show-me/` folders as evidence, and `show-me/` is not in the
   repository. Before the release, either publish the folders it cites (for example under `docs/results/`) or drop
   the references.
