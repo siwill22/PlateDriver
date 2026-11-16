@@ -73,7 +73,8 @@ paths are relative to the PlateDriver folder.
 - **Seed ensemble** (`show-me/2026-11-16-seeds_current/`): eight more seeds of the current model to 500 Myr; none
   failed, every invariant holds, and the new rotation files reconstruct each run.
 - **Reproduction:** today's code reproduces the 16 November polarity run bit for bit over 100 Myr, from its old config
-  (`cratons` and the `craton_*` names). slablet's mantle field on Muller 2022 is bit-identical to a run from `fc4d706`.
+  (`cratons` and the `craton_*` names). slablet's mantle field (its unblurred `dVs`) on Muller 2022, Muller 2019 and Clennett 2020 from 250 Ma is
+  bit-identical at every saved age to runs from `fc4d706`.
 - **1000 Myr** (`show-me/2026-11-17-long_current/`): the current model on four seeds to its full length. All finish,
   and the first 500 Myr of seeds 0-2 are bit-identical to the earlier runs. But in three of four seeds the
   continents shatter from about 400 Myr (35-51 plates over 750-1000 Myr, 13-23 of them slivers): merging holds
