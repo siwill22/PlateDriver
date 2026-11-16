@@ -9,22 +9,20 @@ v1 force model described in docs/force_model_v1_plan.md.
 MODE_CHOICES = {
     'drag':                ('none', 'area', 'area_edge'),
     'ridge_push':          ('boundary', 'body'),
-    'slab_pull':           ('hard', 'ramp', 'slab_length'),
+    'slab_pull':           ('hard', 'slab_length'),
     'slab_suction':        ('ratio', 'depth_split'),
     'polarity':            ('id', 'age'),
     'collision':           ('resistance', 'viscous', 'coupling', 'breakoff'),
     'speed_normalisation': ('none', 'calibrate_once', 'per_step'),
     'tracer_thinning':     ('none', 'cell'),
-    'plate_rebuild':       ('lonlat', 'midpoint', 'rotated'),
+    'plate_rebuild':       ('lonlat', 'midpoint'),
     'rifting':             ('none', 'trial'),
     'collision_weld':      ('off', 'on'),
-    'collision_weld_scope': ('plate', 'continent'),
     'collision_weld_giver': ('smaller', 'downgoing'),
     'collision_contact':   ('length', 'stiff'),
     'sutures':             ('none', 'tracers'),
     'rift_path':           ('straight', 'least_cost'),
     'continent_strength':  ('uniform', 'cores', 'cores_random'),
-    'collision_tear':      ('off', 'on'),
     'rebuild_tiles':       ('off', 'on'),
     'subduction_init':     ('off', 'log'),
     'overlap':             ('plate_id', 'polarity'),
@@ -43,13 +41,11 @@ PRESETS = {
         'plate_rebuild':       'lonlat',
         'rifting':             'none',
         'collision_weld':      'off',
-        'collision_weld_scope': 'plate',
         'collision_weld_giver': 'smaller',
         'collision_contact':   'length',
         'sutures':             'none',
         'rift_path':           'straight',
         'continent_strength':  'uniform',
-        'collision_tear':      'off',
         'rebuild_tiles':       'off',
         'subduction_init':     'off',
         'overlap':             'polarity',   # the overriding plate keeps the overlap (Nov 2026)
@@ -66,13 +62,11 @@ PRESETS = {
         'plate_rebuild':       'midpoint',
         'rifting':             'trial',
         'collision_weld':      'off',     # physical default decided at the R3 gate
-        'collision_weld_scope': 'plate',
         'collision_weld_giver': 'smaller',
         'collision_contact':   'length',
         'sutures':             'none',    # physical default decided at the R3 gate
         'rift_path':           'straight',   # physical default decided at the R4 gate
         'continent_strength':  'uniform',    # physical default decided at the R5 gate
-        'collision_tear':      'off',
         'rebuild_tiles':       'on',      # the dateline seam is not a boundary (release plan, stage A2)
         'subduction_init':     'off',
         'overlap':             'polarity',   # the overriding plate keeps the overlap (Nov 2026)
@@ -83,28 +77,30 @@ PRESETS = {
 IMPLEMENTED = {
     'drag':                {'none', 'area', 'area_edge'},
     'ridge_push':          {'boundary', 'body'},
-    'slab_pull':           {'hard', 'ramp', 'slab_length'},
+    'slab_pull':           {'hard', 'slab_length'},
     'slab_suction':        {'ratio', 'depth_split'},
     'polarity':            {'id', 'age'},
     'collision':           {'resistance', 'viscous', 'coupling', 'breakoff'},
     'speed_normalisation': {'none', 'calibrate_once', 'per_step'},
     'tracer_thinning':     {'none', 'cell'},
-    'plate_rebuild':       {'lonlat', 'midpoint', 'rotated'},
+    'plate_rebuild':       {'lonlat', 'midpoint'},
     'rifting':             {'none', 'trial'},
     'collision_weld':      {'off', 'on'},
-    'collision_weld_scope': {'plate', 'continent'},
     'collision_weld_giver': {'smaller', 'downgoing'},
     'collision_contact':   {'length', 'stiff'},
     'sutures':             {'none', 'tracers'},
     'rift_path':           {'straight', 'least_cost'},
     'continent_strength':  {'uniform', 'cores', 'cores_random'},
-    'collision_tear':      {'off', 'on'},
     'rebuild_tiles':       {'off', 'on'},
     'subduction_init':     {'off', 'log'},
     'overlap':             {'plate_id', 'polarity'},
 }
 
 DEFAULT_PRESET = 'physical'
+
+# Components removed in November 2026, with the behaviour that remains: welds always pass
+# only the continent at the contact, and collisions add no tear cuts to the rift test.
+REMOVED_COMPONENTS = {'collision_weld_scope': 'continent', 'collision_tear': 'off'}
 
 
 def resolve_force_modes(cfg):
@@ -121,6 +117,14 @@ def resolve_force_modes(cfg):
     modes = dict(PRESETS[preset])
 
     overrides = dict(cfg.get('force_modes') or {})
+    # Modes removed in November 2026 (docs/public_release_plan.md, decision 5): a config may
+    # still name the behaviour that remains, but not the one that went.
+    for component, kept in REMOVED_COMPONENTS.items():
+        if component in overrides:
+            mode = overrides.pop(component)
+            if mode != kept:
+                raise SystemExit('force_modes.{}: {} was removed in November 2026; only {} remains '
+                                 '(docs/public_release_plan.md)'.format(component, mode, kept))
     legacy_collision = (cfg.get('params') or {}).get('collision_mode')
     if legacy_collision is not None and 'collision' not in overrides:
         overrides['collision'] = legacy_collision

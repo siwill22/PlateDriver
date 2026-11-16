@@ -10,7 +10,6 @@
 #   continent_strength: cores_random
 #   collision_weld: on
 #   rebuild_tiles: on
-#   collision_weld_scope: continent
 #   collision_weld_giver: downgoing
 #   collision_contact: stiff
 # params different from config.yaml:
@@ -33,7 +32,6 @@ force_modes:
   continent_strength: cores_random
   collision_weld: 'on'
   rebuild_tiles: 'on'
-  collision_weld_scope: continent
   collision_weld_giver: downgoing
   collision_contact: stiff
 forces:
@@ -102,7 +100,6 @@ params:
   oceanic_strength_ratio: 3
   physics_grid_deg: 1.0
   plot_interval: null
-  pull_ramp_km_per_myr: 10
   random_seed: 42
   raster_spacing: 0.25
   ridge_push_age_cutoff_myr: 80
@@ -150,11 +147,6 @@ params:
   tracer_thin_cell_deg: 0.5
   tracer_thin_interval: 10
   weld_after_myr: 30
-  collision_tear_offsets_deg:
-  - 5
-  - 10
-  - 15
-  - 20
   strength_spread: 0.5
   collision_radius_deg: 0.5
   weld_accrete_min_frac: 0.002

@@ -121,7 +121,6 @@ params:
   slab_search_radius_deg:      5       # slab depth at a trench = deepest slab tracer within this distance, on the overriding side
   slab_line_tol_deg:           1       # ... or up to this far on the downgoing side (slablets are seeded on the moving trench line)
   initial_slab_depth_km:       1320    # slab_length / depth_split: the step-0 trenches start with slabs this deep
-  pull_ramp_km_per_myr:        10      # slab_pull: ramp — full pull at this convergence rate
   ridge_push_age_cutoff_myr:   80      # ridge_push: body — force ∝ ∇age on seafloor younger than this (none on older)
   ridge_push_smooth_deg:       0       # ridge_push: body — optional per-plate smoothing of age before the gradient (0 = off; 1.5 costs ~0.2 s/step)
 
@@ -151,7 +150,6 @@ params:
   rift_sweep_azimuths:         12       # candidate great circles through the plate centroid
   rift_sweep_offsets_deg:      [-15, 0, 15]   # ... each also shifted this far from the centroid
   rift_path_corridor_deg:      5        # [rift_path: least_cost] the path stays this close to the straight cut
-  collision_tear_offsets_deg:  [5, 10, 15, 20]   # [collision_tear: on] extra cuts parallel to a continental collision contact, this far to either side
   init_min_cells:              5        # [subduction_init] a passive-margin stretch has at least this many ocean cells
   init_boundary_gap_cells:     3        # [subduction_init] ... at least this many cells inside the plate's edge
   # --- Craton cores and belts (force_modes.continent_strength: cores) ---
@@ -163,7 +161,7 @@ params:
   strength_spread:             0.5      # [continent_strength: cores_random] each core / belt factor = median x exp(spread x N(0,1))
   # --- Welding and sutures (force_modes.collision_weld: on, sutures: tracers) ---
   weld_after_myr:              30       # continuous continental collision before the smaller plate is absorbed
-  weld_contact_reach_deg:      1        # [collision_weld_scope: continent] continent pieces within this of the contact are welded
+  weld_contact_reach_deg:      1        # [collision_weld: on] continent pieces within this of the contact are welded
   weld_accrete_max_frac:       0.03     # [collision_weld_giver: downgoing] largest continent accreted to the overriding plate (share of the sphere)
   weld_accrete_min_frac:       0        # [collision_weld_giver: downgoing] smaller continent pieces are not accreted
   min_piece_area_deg2:         null     # disconnected pieces of a plate smaller than this join a neighbour (null: min_peninsula_area_deg2)

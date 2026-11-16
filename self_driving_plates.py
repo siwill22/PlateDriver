@@ -491,16 +491,6 @@ def update_plate_id_raster(clipped_polygons, raster_spacing=1, tie_break='hash',
     return plate_id_raster
 
 
-def _rebuild_frame_rotation(plate_id_raster, seed=0):
-    """A random rotation for frame='rotated', fixed by the raster's content and seed, so a
-    run repeats exactly but the frame differs from step to step."""
-    h = zlib.crc32(np.ascontiguousarray(np.nan_to_num(plate_id_raster.values)).tobytes())
-    rng = np.random.default_rng([h, int(seed)])
-    v = rng.normal(size=3)
-    v /= np.linalg.norm(v)
-    return pygplates.FiniteRotation(pygplates.PointOnSphere(*v), rng.uniform(0.0, 2.0 * np.pi))
-
-
 def _midpoint_arc(arc, frame_lon=180.0):
     """Replace the corners of a staircase arc by the midpoints of its edges.  The arc's end
     points (plate junctions) and vertices on the raster's outer frame are kept.  For a line at
@@ -535,8 +525,7 @@ def _tile_index(lons, lats):
     return i * nlat + j
 
 
-def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1, frame='lonlat',
-                          frame_seed=0, rotated_resimplify_deg=0.05, tiles=False):
+def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1, frame='lonlat', tiles=False):
     """Plate polygons from the plate-ID raster: polygonise (edges along the cell edges, a
     staircase of meridians and parallels) and simplify the shared arcs (Douglas-Peucker,
     tolerance topo_simplify in degrees).  frame is the plate_rebuild mode:
@@ -548,13 +537,6 @@ def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1, fr
     'midpoint'  first move every staircase vertex to the midpoint of its edge (_midpoint_arc),
                 then simplify.  The midpoints of successive steps lie along the boundary's
                 true direction, so nothing snaps; same cost as 'lonlat'.
-    'rotated'   resample the raster (nearest cell) onto the lon/lat grid turned by a rotation
-                Q that changes every step (_rebuild_frame_rotation), polygonise and simplify
-                there, and turn the polygons back.  It removes the snapping too, but moves
-                every boundary by up to about the tolerance each step, which makes the plate
-                motions jitter (R1 gate), and costs about 0.2 s more.  A plate cut at Q's
-                dateline comes back as two polygons with the same PLATEID1; their common
-                edge is not a boundary (topo_polygons_to_boundaries skips same-plate arcs).
 
     tiles (rebuild_tiles: on): polygonise every plate in pieces of at most
     REBUILD_TILE_LON_DEG x REBUILD_TILE_LAT_DEG, which then get their plate ID back.  A plate
@@ -565,25 +547,6 @@ def update_plate_polygons(plate_id_raster, raster_spacing=1, topo_simplify=1, fr
     map edges.  The pieces of one plate share their edges exactly, and those edges are not
     boundaries (same-plate arcs are skipped).
     """
-    if frame == 'rotated':
-        q = _rebuild_frame_rotation(plate_id_raster, frame_seed)
-        lons, lats = raster_coords(plate_id_raster)
-        lon2d, lat2d = np.meshgrid(lons, lats)
-        lon_src, lat_src = rotate_lonlat(q.get_inverse(), lon2d.ravel(), lat2d.ravel())
-        in_q = plate_id_raster.copy(data=raster_lookup(plate_id_raster, lon_src, lat_src).reshape(lon2d.shape))
-        polys = update_plate_polygons(in_q, raster_spacing, topo_simplify, tiles=tiles)
-        # clipping can leave degenerate line pieces; pygplates cannot write mixed types
-        polys = polys.explode(index_parts=False).reset_index(drop=True)
-        polys = polys[polys.geometry.geom_type == 'Polygon']
-        back = nudge_polygons(polys, {int(p): q.get_inverse() for p in polys.PLATEID1.unique()})
-        back = plate_polygons_to_wrapped_gdf(back)[['PLATEID1', 'geometry']]
-        # Rotating back needs the edges densified (they were straight in Q's lon/lat); a
-        # light simplification removes the extra vertices again.  The polygons are no longer
-        # a staircase here, so this cannot snap them to the grid.
-        back = tp.Topology(back, prequantize=False).toposimplify(rotated_resimplify_deg).to_gdf()
-        back.geometry = back.geometry.make_valid()
-        return back.set_crs(epsg=4326, allow_override=True)
-
     # Origin offset by half a cell so polygon edges align with raster cell boundaries
     transform = (raster_spacing, 0, -(180 + raster_spacing / 2),
                  0, raster_spacing, -(90 + raster_spacing / 2))
@@ -1028,7 +991,6 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
 
     modes (force_modes names; the defaults are the simple model):
       slab_pull     hard         forces['slab_pull'] on every convergent segment
-                    ramp         × clip(convergence / pull_ramp_km_per_myr, 0, 1)
                     slab_length  × √(min(age, A)/A) × min(1, z / z_ref), where age is the
                                  seafloor age 1° inside the downgoing plate (age_grid; A =
                                  slab_age_saturation_myr) and z the depth of the deepest
@@ -1190,9 +1152,6 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
         suction_w = np.where(convergent & ~is_down, forces.get('slab_suction', 0), 0.0)
         slab_depth = np.zeros(len(seg_pid))
         z_ref = force_params.get('slab_ref_depth_km', 660.0)
-        if modes['slab_pull'] == 'ramp':
-            ramp = force_params.get('pull_ramp_km_per_myr', 10.0)
-            pull_w = pull_w * np.clip(-divergence / ramp, 0.0, 1.0)
         if (modes['slab_pull'] == 'slab_length' or modes['slab_suction'] == 'depth_split') \
                 and slab_tracers is not None and subduct.any():
             # the slab lies on the overriding side: outward from the downgoing plate
@@ -1947,32 +1906,6 @@ def _least_cost_cut(nrm, P, on, full, edge, xyz2, sig2, ea, eb, wgt, corridor_de
     return side1 & full, path, on_path
 
 
-def collision_tear_candidates(collision_points, offsets_deg=(5, 10, 15, 20), min_points=5):
-    """collision_tear: on.  {pid: [plane normals]} of candidate cuts near each continent-
-    continent collision: the best-fit great circle of the pair's contact points (normal n, the
-    direction of least spread), moved each offset to either side of the contact centre c --
-    the plane n cos d ± c sin d lies at great-circle distance d from c, like the offset cuts
-    of _cut_candidates.  Both plates of the pair get all of them; a cut that misses a plate is
-    dropped by the trial split itself."""
-    out = {}
-    for pair, pts in (collision_points or {}).items():
-        if len(pts) < min_points:
-            continue
-        lon, lat = np.array(pts, float).T
-        X = lonlat_to_xyz(lon, lat)
-        n = np.linalg.eigh(X.T @ X)[1][:, 0]
-        c = X.sum(0)
-        c /= np.linalg.norm(c)
-        cands = []
-        for d in np.radians(np.asarray(offsets_deg, float)):
-            for sign in (1.0, -1.0):
-                m = n * np.cos(d) + sign * c * np.sin(d)
-                cands.append(m / np.linalg.norm(m))
-        for p in pair:
-            out.setdefault(int(p), []).extend(cands)
-    return out
-
-
 def rift_strength(xyz, continent, age, params, cores=None, core_tree=None, suture_tree=None):
     """Strength of the plate against rifting at points xyz (n, 3), as the rift test uses it:
     a strength per unit length of cut, in units of full slab pull per unit length.
@@ -2014,7 +1947,7 @@ def passive_margin_stretches(full, cont, gap_cells=3, min_cells=5):
 
 def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, params,
                       contact_scale=0.0, skip_pids=(), slab_pull_weight=6.0, sutures=None, cores=None,
-                      collision_points=None, report=None, trials=None, margins=None):
+                      trials=None, margins=None):
     """Trial split of every plate (rifting: trial).  For each candidate cut (_cut_candidates),
     the plate's basal drag, edge drag, contact drag and torques are split between the two
     sides, and the tension across the cut is compared with the strength along it.
@@ -2035,13 +1968,6 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
     at least 5 points on a plate adds its best-fit great circle as a candidate cut.
     With cores (continent_strength: cores), continental strength is also × the core or belt
     factor of the nearest craton-core point (_continent_factor).
-    With collision_points ({pair: [(lon, lat)]} along this step's converging continent-continent
-    contacts; collision_tear: on), each plate of a pair with at least 5 contact points gets
-    extra candidate cuts: the contact's best-fit great circle moved collision_tear_offsets_deg
-    to either side (collision_tear_candidates) -- where a plate held at a collision would tear
-    from the part still being pulled.  They are judged like every other cut.
-    report, if a dict, receives {pid: dict(tear_cuts, one_piece, under_tension, best_ratio)} for
-    the plates given tear cuts: how far their tear cuts got through the tests.
     trials, if a dict, receives for every plate tested {pid: dict(area_deg2, cuts, one_piece,
     under_tension, max_tension, best_ratio, tension, strength, passed)}: how many candidate cuts
     reached each test, the largest tension of any cut, and the best t/σ̄ with its tension and
@@ -2057,8 +1983,7 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
     path_strength, path_cont_frac (share of the path on continent) and path_closing_frac for
     the same cut moved onto the weakest path within the corridor (_least_cost_cut).
     Returns {pid: dict(normal, ratio = t/σ̄, tension, strength, length_deg, weak_zone, cut_kind)}
-    for the plates whose best cut (largest t/σ̄) passes; cut_kind is 'sweep', 'suture' or
-    'tear'.
+    for the plates whose best cut (largest t/σ̄) passes; cut_kind is 'sweep' or 'suture'.
     """
     grid_deg = params.get('physics_grid_deg', 1.0)
     sigma_c = params.get('rift_strength_continent', 0.5)
@@ -2094,8 +2019,6 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
                 Xq = s_xyz[np.asarray(idx)]
                 # best-fit great circle: the plane normal is the direction of least spread
                 suture_fits.setdefault(int(q), []).append(np.linalg.eigh(Xq.T @ Xq)[1][:, 0])
-    tear_fits = collision_tear_candidates(collision_points, params.get('collision_tear_offsets_deg', (5, 10, 15, 20))) \
-        if collision_points else {}
     # the 1 deg grid without the duplicate 180 deg column
     ncol = pid_g.shape[1] - 1 if abs(lons[sl[1]][-1] - lons[sl[1]][0] - 360.0) < 1e-6 else pid_g.shape[1]
     if margins is not None:
@@ -2248,8 +2171,7 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
         sweep = _cut_candidates(centre, params.get('rift_sweep_azimuths', 12),
                                 tuple(params.get('rift_sweep_offsets_deg', (-15.0, 0.0, 15.0))))
         weak = suture_fits.get(int(pid), [])
-        tears = tear_fits.get(int(pid), [])
-        kinds = ['sweep'] * len(sweep) + ['suture'] * len(weak) + ['tear'] * len(tears)
+        kinds = ['sweep'] * len(sweep) + ['suture'] * len(weak)
         rec = None
         if trials is not None:
             rec = trials[int(pid)] = dict(area_deg2=float(area_deg2), cuts=0, one_piece=0, under_tension=0,
@@ -2262,11 +2184,7 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
             rec['max_tension'] = np.nanmax([rec['max_tension'], t])
             if sig is not None and t > 0 and not (t / sig <= rec['best_ratio']):
                 rec.update(best_ratio=t / sig, tension=t, strength=sig)
-        rep_t = None
-        if report is not None and tears:
-            rep_t = report.setdefault(int(pid), dict(tear_cuts=len(tears), one_piece=0, under_tension=0,
-                                                     best_ratio=np.nan))
-        for k_c, nrm in enumerate(list(sweep) + weak + tears):
+        for k_c, nrm in enumerate(list(sweep) + weak):
             h1 = X @ nrm > 0
             a1 = dA[cell][h1].sum() * np.degrees(1.0) ** 2
             if min(a1, area_deg2 - a1) < min_area:
@@ -2279,11 +2197,8 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
             on = raster_lookup(plate_id_raster, plo, pla) == pid
             if on.sum() < 2 or np.count_nonzero(on != np.roll(on, 1)) != 2:
                 continue
-            is_tear = rep_t is not None and kinds[k_c] == 'tear'
             if rec is not None:
                 rec['one_piece'] += 1
-            if is_tear:
-                rep_t['one_piece'] += 1
             s1, m1s, m1c = X @ nrm > 0, Xs @ nrm > 0, Xc @ nrm > 0
             D1 = Dc[s1].sum(0) + es[m1s].sum(0)
             D2 = Dc[~s1].sum(0) + es[~m1s].sum(0)
@@ -2306,15 +2221,11 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
                 # by at most the corridor, so a compressed straight cut is not searched
                 if t <= 0:
                     continue
-                if is_tear:
-                    rep_t['under_tension'] += 1
                 pc = _path_cut(nrm, P, on)
                 if pc is None:
                     continue
                 s1, t, sig, r, nk, ds_k, tau_h, K1, K2 = (pc[k] for k in ('s1', 't', 'sig', 'r', 'nk', 'ds_k', 'tau_h', 'K1', 'K2'))
                 _note(t, sig)
-                if is_tear:
-                    rep_t['best_ratio'] = np.nanmax([rep_t['best_ratio'], t / sig])
                 if t <= sig:
                     continue
                 try:
@@ -2336,10 +2247,6 @@ def rift_trial_splits(plate_id_raster, craton_raster, age_grid, parts, omega, pa
             age_c = None if age_grid is None else raster_lookup(age_grid, plo[on], pla[on]).astype(float)
             sig = rift_strength(R, cont_c, age_c, params, cores, core_tree, suture_tree).mean()
             _note(t, sig)
-            if is_tear:
-                if t > 0:
-                    rep_t['under_tension'] += 1
-                rep_t['best_ratio'] = np.nanmax([rep_t['best_ratio'], t / sig])
             if t <= sig:
                 continue
             # the free halves must open along at least half the cut
@@ -2563,7 +2470,7 @@ def rebuild_split_cratons(cratons, craton_raster, parent, child, craton_id_remap
 
 
 def welded_continent_mask(craton_raster, giver, contact_points, reach_deg=1.0):
-    """Continent-only weld (collision_weld_scope: continent): the craton cells of plate
+    """A weld (collision_weld: on) passes only the continent at the contact: the craton cells of plate
     `giver` that take part in a collision -- each connected piece of its continent with a
     cell within reach_deg (great-circle) of one of the contact points.  Returns a boolean
     mask on the craton raster (all False if nothing is near the contact)."""
@@ -2780,7 +2687,6 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
         polys = update_plate_polygons(raster, raster_spacing=raster_spacing,
                                       topo_simplify=topo_simplify,
                                       frame=params.get('plate_rebuild_mode', 'lonlat'),
-                                      frame_seed=params.get('tie_break_seed', 0),
                                       tiles=params.get('rebuild_tiles_mode', 'off') == 'on')
         polys = polys.explode(index_parts=False).reset_index(drop=True)
         return polys[polys.geometry.geom_type.isin(['Polygon'])]
@@ -2848,7 +2754,7 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
             live &= slab_tracers['attached'].fillna(True).astype(bool)
         slab_tracers = slab_tracers[live]      # detached slabs (breakoff) no longer pull
     force_params = {k: params[k] for k in ('slab_ref_depth_km', 'slab_age_saturation_myr',
-                                           'pull_ramp_km_per_myr', 'slab_search_radius_deg',
+                                           'slab_search_radius_deg',
                                            'slab_line_tol_deg', 'ridge_push_age_cutoff_myr',
                                            'ridge_push_smooth_deg', 'collision_radius_deg') if k in params}
 
@@ -2896,22 +2802,17 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
                           for a, b in zip(cp_, cn_)])
             torque_parts['contact_G'] = torque_parts['contact_G'] * f[:, None, None]
             contact_scale = 1.0
-        tear_report, rift_trials = {}, {}
+        rift_trials = {}
         init_trials = [] if params.get('subduction_init_mode', 'off') == 'log' else None
         rift = rift_trial_splits(plate_id_raster, craton_raster, age_grid, torque_parts,
                                  speed_state['last']['omega'], params, contact_scale=contact_scale,
                                  skip_pids=set(rift_skip), slab_pull_weight=forces.get('slab_pull', 6.0),
-                                 sutures=sutures, cores=cores,
-                                 collision_points=collision_info.get('points')
-                                 if params.get('collision_tear_mode', 'off') == 'on' else None,
-                                 report=tear_report, trials=rift_trials, margins=init_trials)
+                                 sutures=sutures, cores=cores, trials=rift_trials, margins=init_trials)
         if force_diag is not None:
             force_diag['rift'] = rift
             force_diag['rift_trials'] = rift_trials
             if init_trials is not None:
                 force_diag['init_trials'] = init_trials
-            if tear_report:
-                force_diag['tear_report'] = tear_report
         _ct['rift_test'] = time.perf_counter() - _t_rift
 
     if collision_state is not None and (collision_mode == 'coupling' or breakoff):
