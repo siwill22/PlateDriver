@@ -50,7 +50,7 @@ paths are relative to the PlateDriver folder.
 
 **B3, done:** smoke tests and a test of the drag tensor on a spherical cap (`2b412ba`, `0bfb67a`).
 
-**S, done except S4 and S5:**
+**S, done except S5 (the tag):**
 - **Licence and tests:** slablet has an MIT licence (`16dcc83`), and its contract test passes on a fresh clone
   (`2ce084f`).
 - **S1:** the S40RTS stage-0 work is committed at Simon's request (slablet `3d98c18`, `5479451`; PlateDriver
@@ -58,10 +58,35 @@ paths are relative to the PlateDriver folder.
 - **S3:** config paths use `$SLABLET_DATA` and `$GPRM_CACHE` (`76dabf5`). The configs resolve to the same files as
   before, and 151 tests pass.
 
+**S4, done:** nothing is held back (decision 7), and the status page is brought up to date (slablet `3049e15`).
+
+**Tests, night of 16-17 November** (Simon: "extensive and careful tests of the existing functionality"):
+- **Fresh install.** `environment.yml` builds an environment from conda-forge and GitHub (pandas 3.1, numpy 2.5,
+  OpenBLAS 0.3.34). It found two faults no test had: breakoff wrote into a read-only pandas array (`0a3a062`), and the
+  drag solve's SVD failed on one OpenBLAS (`a796f16`, now falls back to QR). slablet's own tests pass there after a
+  test-helper fix (slablet `b11e8f4`). The viewer installs, builds and passes its three browser checks from a clean
+  clone, on runs exported from the clone.
+- **Mode matrix** (`show-me/2026-11-16-mode_matrix/`): every allowed mode value runs in both environments, and the two
+  environments agree to 1e-12. Fixed on the way: output folders named with `=` or `+` lost their age grids
+  (`96abdcb`, `93873fa`); `rifting: trial` silently did nothing in `simple` and now stops with a message (`e2b272f`);
+  a null `random_seed` is now recorded so the run can be repeated (`a6ca02c`).
+- **Seed ensemble** (`show-me/2026-11-16-seeds_current/`): eight more seeds of the current model to 500 Myr; none
+  failed, every invariant holds, and the new rotation files reconstruct each run.
+- **Reproduction:** today's code reproduces the 16 November polarity run bit for bit over 100 Myr, from its old config
+  (`cratons` and the `craton_*` names). slablet's mantle field on Muller 2022 is bit-identical to a run from `fc4d706`.
+- **1000 Myr** (`show-me/2026-11-17-long_current/`): the current model on four seeds to its full length. All finish,
+  and the first 500 Myr of seeds 0-2 are bit-identical to the earlier runs. But in three of four seeds the
+  continents shatter from about 400 Myr (35-51 plates over 750-1000 Myr, 13-23 of them slivers): merging holds
+  the small-plate rifting for 500 Myr, not for 1000. This belongs with v3's questions about plate size.
+- **Numerical sensitivity** (`show-me/2026-11-17-numerical_sensitivity/`): the force grid is converged at 1 deg. The time
+  step and the plate grid are not: a finer step or plate grid leaves more starting ocean unsubducted, so part of the
+  defaults' consumption of old ocean is numerical. Two gate-tool faults with time steps other than 1 Myr are fixed
+  (`741e72b`), and the least-cost rift cut now scales with the force grid (`a815951`).
+
 **Still open:**
-- **S4, docs (decision 7):** Simon decided nothing is held back, so slablet goes public with its full history, the
-  register and the status page included. What remains is to check that the README and the status page describe the
-  current code.
+- **`show-me/` references.** The README cites six `show-me/` folders as evidence, and `show-me/` is not in the
+  repository. Before the release, either publish the folders it cites (for example under `docs/results/`) or drop
+  the references.
 - **B1:** PlateDriver requires a tagged slablet, once slablet is public.
 - **Release:** tag slablet; merge `mantle-extract` into PlateDriver's `master`; rename the GitHub repository. Each
   outward step waits for Simon.

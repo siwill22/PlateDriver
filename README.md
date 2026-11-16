@@ -929,7 +929,10 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
     trenches; in one of the three current-model runs one reaches 49% of the sphere by 1000 Myr.
   - **Small plates rift more easily than large ones**, so without merging the slivers multiply:
     current-model settings without merging reach 50–90 plates by 500–750 Myr in two of three
-    seeds. `merging_enabled` with `merge_max_area_frac` keeps it in check.
+    seeds. `merging_enabled` with `merge_max_area_frac` holds it for about 500 Myr, but not to
+    the current model's full 1000 Myr: in three of four seeds the continents shatter from about
+    400 Myr, and the mean plate count over 750–1000 Myr is 35–51, with 13–23 plates smaller than
+    0.5% of the sphere (November 2026).
   - With `rifting: none`, nothing breaks a continent.
 - **Collision settings are not calibrated.** `collision_stiff_factor` (100) and
   `weld_accrete_max_frac` (3% of the sphere) are order-of-magnitude choices; the convergence
