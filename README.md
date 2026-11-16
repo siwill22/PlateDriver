@@ -144,6 +144,9 @@ run:
   total_time: 200.0           # run duration (Myr)
 ```
 
+The starting map must have ridges and trenches at `reconstruction_time`, since they set the first
+plate motions; a run that finds none stops at once. The bundled Atlantis map is drawn for 0 Ma only.
+
 ### Force model
 
 ```yaml

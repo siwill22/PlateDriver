@@ -283,6 +283,13 @@ force_diag = {}
                                        speed_state=speed_state,
                                        force_fields=_step0_fields,
                                        force_diag=force_diag)
+if all(r.represents_identity_rotation() for r in stage_pole_dict.values()):
+    # e.g. a starting map drawn for one time, started at another: its ridges and trenches are
+    # not valid there, so no force acts and the run would only repeat the starting map
+    raise SystemExit('No plate moves at the start: the starting map has no ridge or trench at '
+                     'reconstruction_time = {} Ma, so no force acts. Start at a time at which its ridges '
+                     'and trenches are valid (the bundled Atlantis map is drawn for 0 Ma only).'.format(
+                         reconstruction_time))
 # Craton cores and belts (continent_strength: cores), from the step-0 continents; they move
 # with their plates like the suture tracers.  Their own generator, so no other random draw
 # changes.

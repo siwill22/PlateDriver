@@ -9,7 +9,7 @@ The files come from the course's working folder (octopus, `Atlantis3/`), with th
 | `atlantis66_topologies.gpml` | the plate boundaries (ridges, trenches with their polarity, transforms) |
 | `atlantis66_topological_polygons.gpml` | the plate polygons built from those boundaries |
 | `atlantis66_continents.geojson` | the continents, each with the plate it rides on (`PLATEID1`); `.gplates.xml` is GPlates' attribute mapping. In octopus this is `atlantis66_cratons.geojson` |
-| `atlantis3_rotations.rot` | the rotation model the map was drawn with; with `reconstruction_time: 0` the plates start where they are drawn |
+| `atlantis3_rotations.rot` | the rotation model the map was drawn with; with `reconstruction_time: 0` the plates start where they are drawn. The map is drawn for 0 Ma only: 7 of its 10 plate polygons are valid at 0 Ma alone, so it cannot start at another time |
 
 PlateDriver reads only the starting map. From there the plates move under the forces of the model, so a run is
 not a reconstruction of Atlantis's history.
