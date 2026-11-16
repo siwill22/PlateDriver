@@ -1421,7 +1421,7 @@ def detach_colliding_slabs(slab_tracers, collision_state, collision_points, delt
         return
     if 'attached' not in slab_tracers.columns:
         slab_tracers['attached'] = True
-    attached = slab_tracers['attached'].fillna(True).astype(bool).values
+    attached = np.array(slab_tracers['attached'].fillna(True).astype(bool))   # a copy: pandas 3's .values is read-only
     from scipy.spatial import cKDTree
     s_xyz = None
     for pair, steps in collision_state.items():

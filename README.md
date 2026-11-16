@@ -82,7 +82,14 @@ chosen is in `docs/force_model_v2_plan.md` (stages R0–R10).
 
 ### Requirements
 
-Python ≥ 3.10 with pygplates (≥ 0.36; developed with 1.0), [gprm](https://github.com/siwill22/GPlatesReconstructionModel), PyGMT, geopandas, shapely ≥ 2, xarray, numpy, scipy, scikit-learn, scikit-image, pyproj, topojson, xarray-spatial, pyshtools and PyYAML. The `pygmt17` conda environment has all of these.
+Python ≥ 3.10 with pygplates (≥ 0.36; developed with 1.0), [gprm](https://github.com/siwill22/GPlatesReconstructionModel), PyGMT, geopandas, shapely ≥ 2, xarray, numpy, scipy, scikit-learn, scikit-image, pyproj, topojson, xarray-spatial, pyshtools, PyYAML and [slablet](https://github.com/siwill22/slablet). `environment.yml` builds an environment with all of these from conda-forge and GitHub:
+
+    conda env create -f environment.yml
+    conda activate platedriver
+    pip install /path/to/slablet
+    python -m pytest tests
+
+The tests pass in it (Python 3.12, pandas 3, numpy 2.5; November 2026) and in the `pygmt17` environment the model was developed in (pandas 2.3, numpy 1.26). Build it with `PYTHONPATH` unset if that points at other copies of gprm or PlateTectonicTools, or pip takes those as installed.
 
 ### Units and time
 

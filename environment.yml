@@ -1,0 +1,38 @@
+# A conda environment for PlateDriver, from public sources only:
+#
+#   conda env create -f environment.yml
+#   conda activate platedriver
+#   pip install -e /path/to/slablet          # the mantle model (github.com/siwill22/slablet)
+#   python -m pytest tests
+#
+# Developed in the pygmt17 environment (Python 3.12, pygplates 1.0).
+name: platedriver
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pygplates>=0.36
+  - pygmt
+  - geopandas
+  - shapely>=2
+  - xarray
+  - netcdf4
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - scikit-image
+  - pyproj
+  - pyyaml
+  - topojson
+  - xarray-spatial
+  - pyshtools
+  - numba
+  - rasterio
+  - pooch
+  - cartopy
+  - setuptools<80
+  - pytest
+  - pip
+  - pip:
+      - git+https://github.com/siwill22/GPlatesReconstructionModel
