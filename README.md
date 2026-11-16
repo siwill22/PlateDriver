@@ -936,7 +936,9 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
     seeds. `merging_enabled` with `merge_max_area_frac` holds it for about 500 Myr, but not to
     the current model's full 1000 Myr: in three of four seeds the continents shatter from about
     400 Myr, and the mean plate count over 750–1000 Myr is 35–51, with 13–23 plates smaller than
-    0.5% of the sphere (November 2026).
+    0.5% of the sphere (November 2026). The plain `physical` preset does the same (13 plates at 500
+    Myr, 37 at 700 Myr). `min_child_area_deg2: 400` stops most of it but brings back a giant plate
+    (37–48% of the sphere) and old ocean; `merge_max_area_frac: 0.05` does not stop it.
   - With `rifting: none`, nothing breaks a continent.
 - **Collision settings are not calibrated.** `collision_stiff_factor` (100) and
   `weld_accrete_max_frac` (3% of the sphere) are order-of-magnitude choices; the convergence
