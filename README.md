@@ -109,7 +109,7 @@ grids back, so the format does not change a run.
 
 | File pattern | Interval | Contents |
 |---|---|---|
-| `plot_NNNN.png` | Every `plot_interval` steps | Map: plate polygons, boundary types, velocity vectors, continents, seafloor tracers coloured by age, seamounts (red triangles) |
+| `plot_NNNN.png` | Every `plot_interval` steps (none by default) | Map: plate polygons, boundary types, velocity vectors, continents, seafloor tracers coloured by age, seamounts (red triangles) |
 | `tracers_NNNN.csv` | Every `csv_save_interval` steps | Active seafloor tracer lon/lat/age |
 | `boundaries_NNNN.geojson` | Every `csv_save_interval` steps | Boundary arc segments with divergence (km/Myr = mm/yr), boundary type, plate IDs, and downgoing/overriding plates for subduction zones |
 | `earthquakes_NNNN.geojson` | Every `csv_save_interval` steps | Synthetic earthquake locations with depth, boundary type, plate IDs |
@@ -396,7 +396,7 @@ params:
   spreading_rate_km_per_myr:   50.0    # assumed spreading rate for initial age estimation
 
   csv_save_interval:           5       # save outputs every N timesteps
-  plot_interval:               1       # make plots every N timesteps; set to null to disable
+  plot_interval:               null    # draw plot_NNNN.png every N timesteps (~8 s each, slower than a step); null: none (draw saved steps later with diagnose_run.py)
   random_seed:                 null    # hotspots, seamounts, earthquakes, terrain noise; null: drawn, in run_info.yaml
 ```
 
@@ -671,6 +671,8 @@ python diagnose_run.py ./output_a ./output_b --labels simple physical [--out fig
 - `timeseries.png`: RMS speed and fastest plate, net rotation, number of plates, seconds per step.
 - `maps_NNNN.png`: seafloor age, boundaries by type and plate velocity arrows.
 
+This draws a map of any saved step after the run, in about 3 s, from the saved grids and tables. A map drawn during the run (`plot_interval`) takes about 8 s, longer than a model step of the `physical` preset (about 3 s), so the run waits for it: with a map at every step, the 1000-Myr default run spent 77% of its time waiting. `config.yaml` therefore draws no maps during the run.
+
 ### `regression_check.py`
 
 Compares two output folders file by file (grids, CSVs, GeoJSONs, rotation files) and exits with status 1 if anything differs:
@@ -716,11 +718,11 @@ stage D).
 
 ### Async output worker
 
-Plotting and file I/O are handled by a background daemon thread so the main simulation loop is never blocked waiting for a PNG to render or a NetCDF to be written. The worker (`_output_worker` in `run_SDP.py`) consumes from `_output_queue` (a `queue.Queue(maxsize=3)`). At plot intervals the main loop enqueues a `('plot', payload)` task and at save intervals a `('save', payload)` task, then immediately proceeds to the next timestep.
+Plotting and file I/O are handled by a background daemon thread, so the main simulation loop does not wait for a PNG to render or a NetCDF to be written unless the worker falls behind (see below). The worker (`_output_worker` in `run_SDP.py`) consumes from `_output_queue` (a `queue.Queue(maxsize=3)`). At plot intervals the main loop enqueues a `('plot', payload)` task and at save intervals a `('save', payload)` task, then immediately proceeds to the next timestep.
 
 Each output file is written independently: if one fails (for example the seafloor age grid), the error is printed with a full traceback and the other outputs for that step are still written. The run ends with a list of failed outputs and a non-zero exit code. The queue is drained even if the main loop stops with an error or Ctrl-C.
 
-The `maxsize=3` limit applies backpressure: if the worker falls more than 3 tasks behind (e.g. when saving very large mantle temperature grids) the main loop pauses briefly rather than accumulating unbounded state. At the end of the run, `_output_queue.join()` ensures all queued tasks are fully written before the process exits.
+The `maxsize=3` limit applies backpressure: if the worker falls more than 3 tasks behind, the main loop waits rather than accumulating unbounded state. Whenever the outputs take longer than the steps, the run goes at the worker's pace: a map at every step (about 8 s each) made the default run wait 77% of its time. `seconds_outputs_enqueue` in `step_stats.csv` records the wait. At the end of the run, `_output_queue.join()` ensures all queued tasks are fully written before the process exits.
 
 Mutable state is snapshotted before enqueueing: `polarity_dict` and `rotation_records` are shallow-copied; `cmb_heat` and `slab_tracers` are copied with `.copy()`; cratons are converted from pygplates FeatureCollection to GeoDataFrame in the main thread before being passed to the worker.
 
