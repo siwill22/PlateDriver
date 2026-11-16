@@ -494,7 +494,11 @@ def _do_save(i, active_tracers, rasters, boundaries_gdf, polarity_dict,
         _try('topo_bathy', lambda: _save_grid(sdp.generate_topo_bathy_grid(
             age_grid, topography_raster=topo), _out('topo_bathy_{:04d}.nc'), params))
 
-    _try('rotations', lambda: sdp.write_rotation_file(rotation_records, _out('rotations_{:04d}.rot')))
+    # rotation_time: before_snapshot (default) counts time back from this step, which is then
+    # "present day" in GPlates; elapsed writes elapsed model time (the form before Nov 2026)
+    _present = None if params.get('rotation_time', 'before_snapshot') == 'elapsed' else i * delta_time
+    _try('rotations', lambda: sdp.write_rotation_file(rotation_records, _out('rotations_{:04d}.rot'),
+                                                      present_time=_present))
 
     _active_seamounts = seamounts[seamounts.active.astype(bool)]
     if len(_active_seamounts):

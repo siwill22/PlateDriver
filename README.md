@@ -102,7 +102,7 @@ grids back, so the format does not change a run.
 | `init_trials.csv` | Every step (`subduction_init: log`) | One row per passive-margin stretch tested: plate, stretch size and centre, ocean age along it (median, min, max), plate share on the ocean side, whether the cut crosses the plate once, traction across the cut (negative: compression), strength along the cut and of the stretch, and the share of the cut along which the free halves would converge |
 | `rift_events.csv` | Each rift (`rifting: trial`) | Time, parent plate, new plate and kind of cut (`sweep`, `suture` or `tear`) of every rift split |
 | `run_info.yaml` | Start of run | The config used, the resolved force modes and the git commit |
-| `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file with finite rotations for all plates up to step NNNN. The time column is elapsed model time (see [Rotation file format](#rotation-file-format)) |
+| `rotations_NNNN.rot` | Every `csv_save_interval` steps | GPlates rotation file for the plates of step NNNN, with step NNNN as present day and time counted back from it (see [Rotation file format](#rotation-file-format)) |
 
 ## Key parameters (`config.yaml`)
 
@@ -862,9 +862,11 @@ GPlates `.rot` format:
 ```
 plate_id   time   euler_lat   euler_lon   angle_deg   000
 ```
-Fixed plate is `000` (absolute frame). Each plate gets a `t=0` identity line. Sorted by plate ID then time.
+Fixed plate is `000` (absolute frame: the model's fixed mantle grid). Each plate gets a zero-age identity line. Sorted by plate ID then time.
 
-The `time` column is **elapsed model time** in Myr since the starting snapshot, not "Ma before present". The finite rotation at time `t` moves the step-0 plate geometry to its position at step `t / delta_time`. To use the file in GPlates, treat the starting configuration as "present day" (0 Ma) and the simulated future as increasing "age". Plates created by fragmentation carry their parent's rotations up to the split.
+By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` treats step NNNN as **present day** (0 Ma) and counts time back from it, as GPlates does: the rotation at age `a` moves a plate from its position at step NNNN to its position `a` Myr earlier. Load it with that step's outputs (plate polygons, boundaries, seafloor age, all in present-day positions) and GPlates reconstructs them back through the run; seafloor of age `a` formed at reconstruction time `a`. Plates that no longer exist at step NNNN are left out, and plates created by a split carry their parent's rotations from before the split.
+
+`rotation_time: elapsed` writes the form used before November 2026: the time column is elapsed model time since the starting snapshot and the rotation at time `t` moves the step-0 geometry forward to step `t / delta_time`, so GPlates plays the run backwards.
 
 ---
 

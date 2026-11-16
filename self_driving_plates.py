@@ -3928,25 +3928,48 @@ def generate_topo_bathy_grid(seafloor_age_grid, topography_raster=None,
                         attrs={'units': 'meters', 'long_name': 'topography-bathymetry'})
 
 
-def write_rotation_file(rotation_records, path, fixed_plate_id=0):
+def write_rotation_file(rotation_records, path, fixed_plate_id=0, present_time=None):
     """Write accumulated finite rotations to a GPlates .rot file.
 
-    rotation_records is a list of (time_myr, plate_id, FiniteRotation) tuples
-    produced by accumulating stage poles across timesteps.  A t=0 identity
-    entry is written automatically for every plate that appears in the records.
+    rotation_records is a list of (time_myr, plate_id, FiniteRotation) tuples produced by
+    accumulating stage poles across timesteps: each rotation moves the step-0 geometry of
+    its plate to its position at elapsed model time time_myr.
+
+    present_time None (rotation_time: elapsed): the time column is elapsed model time, as
+    recorded.
+
+    present_time t_N (rotation_time: before_snapshot): the step at t_N is "present day"
+    (0 Ma) and the time column counts back from it, as GPlates expects, so the file
+    reconstructs that step's outputs (plate polygons, boundaries, seafloor ages, all in
+    present-day positions) back through the run: the rotation at age a = t_N - t is
+    F(t) F(t_N)^-1, which moves a plate from its position at t_N to its position at t. Plates
+    no longer present at t_N are left out. A zero-age identity line is written for every plate.
     """
     from collections import defaultdict
 
     by_plate = defaultdict(list)
     for time_myr, pid, rot in rotation_records:
         by_plate[pid].append((time_myr, rot))
+    if present_time is not None:
+        back = {}
+        for pid, recs in by_plate.items():
+            recs = dict(recs)
+            if not any(abs(t - present_time) < 1e-9 for t in recs):
+                continue
+            now_inv = recs[min(recs, key=lambda t: abs(t - present_time))].get_inverse()
+            recs.setdefault(0.0, pygplates.FiniteRotation.create_identity_rotation())
+            back[pid] = [(round(present_time - t, 9), rot * now_inv)
+                         for t, rot in recs.items() if t <= present_time + 1e-9]
+        by_plate = back
 
     lines = []
     for pid in sorted(by_plate.keys()):
-        # t=0 identity line (required by GPlates)
+        # zero-age identity line (required by GPlates)
         lines.append('{:d}   {:8.4f}   {:9.4f}   {:10.4f}   {:9.4f}   {:d}'.format(
             pid, 0.0, 0.0, 0.0, 0.0, fixed_plate_id))
         for time_myr, rot in sorted(by_plate[pid], key=lambda x: x[0]):
+            if present_time is not None and time_myr == 0:
+                continue                      # the identity line above is the present day
             if rot.represents_identity_rotation():
                 lat, lon, angle = 0.0, 0.0, 0.0
             else:
