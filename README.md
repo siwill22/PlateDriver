@@ -671,7 +671,7 @@ python diagnose_run.py ./output_a ./output_b --labels simple physical [--out fig
 - `timeseries.png`: RMS speed and fastest plate, net rotation, number of plates, seconds per step.
 - `maps_NNNN.png`: seafloor age, boundaries by type and plate velocity arrows.
 
-This draws a map of any saved step after the run, in about 3 s, from the saved grids and tables. A map drawn during the run (`plot_interval`) takes about 8 s, longer than a model step of the `physical` preset (about 3 s), so the run waits for it: with a map at every step, the 1000-Myr default run spent 77% of its time waiting. `config.yaml` therefore draws no maps during the run.
+This draws a map of any saved step after the run, in about 3 s, from the saved grids and tables. A map drawn during the run (`plot_interval`) takes about 8 s, longer than a model step of the `physical` preset (about 3 s), so the run waits for it: with a map at every step, a 1000-Myr run of `config.yaml` spent 77% of its time waiting. `config.yaml` therefore draws no maps during the run.
 
 ### `regression_check.py`
 
@@ -925,7 +925,7 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
   colliding continents stop with up to about 100 km of ocean still between them.
 - **Hidden continent is lost at a rift.** After a rift, the parent's continents are rebuilt
   from the raster, which only holds the visible continent, so any continent hidden under
-  another is deleted. Without the stiff contact this adds up: `config.yaml` run to its 1000 Myr
+  another is deleted. Without the stiff contact this adds up: `config.yaml` run to 1000 Myr
   (the `physical` preset, with up to 4% of continent hidden) lost 10.8% of its continent, 10.6%
   of it in six rift steps and one other step, up to 3.3% at once. The current model (stiff
   contact) loses 2–5% in 1000 Myr (November 2026).
@@ -945,7 +945,7 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
     the current model's full 1000 Myr: in three of four seeds the continents shatter from about
     400 Myr, and the mean plate count over 750–1000 Myr is 35–51, with 13–23 plates smaller than
     0.5% of the sphere (November 2026). The plain `physical` preset does the same (13 plates at 500
-    Myr, 37 at 700 Myr). `min_child_area_deg2: 400` stops most of it but brings back a giant plate
+    Myr, 37 at 700 Myr), so `config.yaml` stops at 500 Myr. `min_child_area_deg2: 400` stops most of it but brings back a giant plate
     (37–48% of the sphere) and old ocean; `merge_max_area_frac: 0.05` does not stop it.
   - With `rifting: none`, nothing breaks a continent.
 - **Collision settings are not calibrated.** `collision_stiff_factor` (100) and
