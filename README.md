@@ -904,8 +904,9 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
   `delta_time: 1`, `raster_spacing: 0.25` and `physics_grid_deg: 1`. In runs of the current model
   (November 2026, `show-me/2026-11-17-numerical_sensitivity/`), a 0.5- or 0.25-Myr step left about
   11% of the ocean at 200 Myr as starting ocean that never subducted, against 4.9% (0.5–9.6%, eleven
-  seeds) at the default 1 Myr and 3% at 2 Myr, so part of the defaults' consumption of old ocean is
-  numerical. A 0.125° or a 0.5° plate grid also left more (10–12%). A 0.5-Myr step or a 0.5° plate grid also left more plates by 300 Myr (24–27
+  seeds) at the default 1 Myr and 3% at 2 Myr. The trenches consume the right area at every step
+  (98–99% of convergence × length); what changes is which ocean they consume. A 0.125° or a 0.5°
+  plate grid also left more (10–12%). The share of old ocean is therefore not converged. A 0.5-Myr step or a 0.5° plate grid also left more plates by 300 Myr (24–27
   against 13–23) and twice as many slivers. The force grid is converged at 1°: 0.5° changed
   nothing beyond the spread of seeds. Keep the defaults unless the change is what is being studied.
 - **Boundaries snap to meridians and parallels** with `plate_rebuild: lonlat` (`simple`); see `plate_rebuild`.
