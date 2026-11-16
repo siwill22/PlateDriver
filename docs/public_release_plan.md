@@ -103,7 +103,7 @@ table. (The A1 gate supports this for the giant plate but not for the old ocean;
 | Ridge push, `body` against `boundary` torque (1,887 plate-steps) | Median angle 14°. 19 % of the torque (weighted) is more than 30° apart. Median magnitude ratio 0.61. The two modes differ by design where flanks are incomplete, so this bounds the lon/lat-gradient error rather than measuring it. |
 | Step time, current model | Median 3.7 s, about 1 h for 1000 Myr. Of this, 3.1 s is in `compute_timestep` (rebuild, forces, rift test), 0.17 s in seafloor tracers and 0.04 s in slab tracers. The mantle is cheap; the rebuild and the rift test are the cost. |
 | What the default forces need from slablet | `MantleParams`, `initial_slab_columns`, `seed_slabs`, `sink_slabs`, `slab_depth_near`, all in slablet's core. |
-| PlateDriver's input paths | `config.yaml` and `configs/current_model.yaml` point to `/Users/simon/GIT/octopus/Atlantis3`, which is public, MIT-licensed and 616 kB. Four archived notebooks have absolute paths too. |
+| PlateDriver's input paths | `config.yaml` and `configs/current_model.yaml` point to `/Users/simon/GIT/octopus/Atlantis3` (616 kB). octopus is public and MIT-licensed, but `Atlantis3/` is untracked there, so the starting map is not public yet. Four archived notebooks have absolute paths too. |
 | PlateDriver's tests | Three files: the slablet adapter, the sphere helpers and `plate_step`. None runs the model. |
 | slablet's state | Private, with no licence. `main` is 28 commits behind `asthenosphere-layer`. 33 files hold another session's uncommitted work (stage 0 of the S40RTS plan). 40 tracked files name local paths, mostly tomography models under `~/Data/SeismicTomography`. The scoring tools need these models, and not all of them can be redistributed. Its docs discuss IPV and defamation, which stay private. |
 
@@ -242,8 +242,8 @@ subduction initiation is no longer the priority; otherwise v3 resumes at S1.
 1. **slablet required.** PlateDriver requires slablet at the tagged release, installed with pip from GitHub. Out go
    `require_slablet`, the optional imports, and the copied sphere helpers with their test. The gate tools' check
    against an uncommitted slablet stays, for development.
-2. **Bundled starting map.** `examples/atlantis/` gets the starting map from octopus (MIT), and the configs use
-   relative paths. The archived notebooks get relative paths, or the folder is dropped.
+2. **Bundled starting map.** `examples/atlantis/` gets the Atlantis starting map, if Simon agrees to publish it,
+   and the configs use relative paths. The archived notebooks get relative paths, or the folder is dropped.
 3. **Smoke tests.** Each runs 20 steps of `simple`, and 20 of `physical`, from the bundled map. One more checks the
    torque on a spherical-cap plate against its analytic value.
 
