@@ -45,7 +45,9 @@ Present-day Earth (oldest ocean about 180 Myr, the Pacific about 20% of the sphe
 
 ## Inputs
 
-Input files are in GPlates format, specified in `config.yaml`:
+Input files are in GPlates format, specified in `config.yaml`. Relative paths are read from the PlateDriver
+folder. The repository includes one starting map, Atlantis (`examples/atlantis/`), which `config.yaml` and
+`configs/current_model.yaml` use; any GPlates topological model can be used instead.
 
 | Key | Purpose |
 |---|---|

@@ -43,11 +43,11 @@ forces:
   slab_suction: 6
   slab_suction_deep: 3
 input_files:
-  continents: /Users/simon/GIT/octopus/Atlantis3/atlantis66_cratons.geojson
+  continents: examples/atlantis/atlantis66_continents.geojson
   dynamic_polygons:
-  - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topologies.gpml
-  - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topological_polygons.gpml
-  rotation_model: /Users/simon/GIT/octopus/Atlantis3/atlantis3_rotations.rot
+  - examples/atlantis/atlantis66_topologies.gpml
+  - examples/atlantis/atlantis66_topological_polygons.gpml
+  rotation_model: examples/atlantis/atlantis3_rotations.rot
 output_dir: ./output/current_model
 params:
   belt_strength_factor: 0.5

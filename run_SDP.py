@@ -52,6 +52,19 @@ for _old, _new in sdp.RENAMED_PARAMS.items():
         params[_new] = params.pop(_old)
         print('note: params.{} is now called params.{}'.format(_old, _new))
 
+# Relative input paths are read from the PlateDriver folder, so a config works from any working
+# directory and wherever a copy of it is written (gate.py writes one per seed).
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _input_path(path):
+    path = os.path.expanduser(path)
+    return path if os.path.isabs(path) else os.path.join(REPO_DIR, path)
+
+
+files = {key: [_input_path(f) for f in value] if isinstance(value, list) else _input_path(value)
+         for key, value in files.items()}
+
 reconstruction_time = run_cfg['reconstruction_time']
 delta_time          = run_cfg['delta_time']
 total_time          = run_cfg['total_time']

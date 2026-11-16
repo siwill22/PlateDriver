@@ -2,11 +2,11 @@
 # Pass to run_SDP.py with:  python run_SDP.py --config config.yaml
 
 input_files:
-  rotation_model: /Users/simon/GIT/octopus/Atlantis3/atlantis3_rotations.rot
+  rotation_model: examples/atlantis/atlantis3_rotations.rot
   dynamic_polygons:
-    - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topologies.gpml
-    - /Users/simon/GIT/octopus/Atlantis3/atlantis66_topological_polygons.gpml
-  continents: /Users/simon/GIT/octopus/Atlantis3/atlantis66_cratons.geojson
+    - examples/atlantis/atlantis66_topologies.gpml
+    - examples/atlantis/atlantis66_topological_polygons.gpml
+  continents: examples/atlantis/atlantis66_continents.geojson
 
 output_dir: ./output
 
