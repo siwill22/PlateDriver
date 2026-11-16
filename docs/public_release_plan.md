@@ -79,8 +79,9 @@ paths are relative to the PlateDriver folder.
   continents shatter from about 400 Myr (35-51 plates over 750-1000 Myr, 13-23 of them slivers): merging holds
   the small-plate rifting for 500 Myr, not for 1000. This belongs with v3's questions about plate size.
 - **Numerical sensitivity** (`show-me/2026-11-17-numerical_sensitivity/`): the force grid is converged at 1 deg. The time
-  step and the plate grid are not: a finer step or plate grid leaves more starting ocean unsubducted, so part of the
-  defaults' consumption of old ocean is numerical. Two gate-tool faults with time steps other than 1 Myr are fixed
+  step is not: at 0.5 or 0.25 Myr about twice as much starting ocean survives to 200 Myr as at 1 Myr (11% against
+  5%), so part of the defaults' consumption of old ocean is numerical, which bears on v3's case. The plate grid's
+  default (0.25 deg) also leaves less than 0.125 or 0.5 deg. Two gate-tool faults with time steps other than 1 Myr are fixed
   (`741e72b`), and the least-cost rift cut now scales with the force grid (`a815951`).
 
 **Still open:**
