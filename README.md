@@ -314,6 +314,17 @@ listed is `simple`'s):
     grid) next to the plate's own continent and at least `init_boundary_gap_cells` cells from
     the plate's edge. The cut is the stretch's best-fit great circle across the whole plate,
     and the traction across it is worked out as in the rift test (negative: compression).
+- **`overlap`** (not a force; which plate keeps the cells where moved plates overlap):
+  - `plate_id` (both presets): the lower plate ID, whatever the polarity. Where the
+    downgoing plate has the lower ID, it keeps the overlap, the trench moves with it, and the
+    overriding plate's edge is consumed instead. In the three current-model gate runs this
+    held for 32–41% of the subduction flux at trenches away from continents, rising to 62% by
+    500 Myr, and the lowest-ID plate (111) became the largest plate in every seed
+    (`docs/public_release_plan.md`).
+  - `polarity`: each pair's downgoing plate is drawn into the raster before its overriding
+    plate, so the overriding plate keeps the overlap. Where polarities form a cycle, the
+    highest plate ID is drawn first, and `step_stats.csv` counts the pairs drawn the wrong
+    way round (`overlap_conflicts`).
 
 The modes that read seafloor age or slab depth build them only when selected. The
 age grid is on the `physics_grid_deg` grid: each cell takes the nearest seafloor
@@ -857,7 +868,7 @@ The `time` column is **elapsed model time** in Myr since the starting snapshot, 
 
 ## Known issues and TODO
 
-- **Overlap priority**: where moved plates overlap, the lower PLATEID wins (the plates are burnt into the raster highest ID first). A physically based rule, for example letting the overriding plate win at trenches, is not implemented.
+- **Overlap priority**: with `overlap: plate_id` (both presets), where moved plates overlap the lower PLATEID wins, so at many trenches the overriding plate is consumed instead of the downgoing one. `overlap: polarity` lets the overriding plate win; it is on trial (`docs/public_release_plan.md`, stage A).
 - **Boundaries snap to meridians and parallels** with `plate_rebuild: lonlat` (`simple`); see `plate_rebuild`.
 - **Ridge push points mostly exactly N–S or E–W** (`ridge_push: body`): the age grid is piecewise constant (nearest tracer) and its gradient is taken along lon and lat. The effect on plate motion is not measured.
 - **Boundaries on the antimeridian**: a boundary that runs exactly along ±180° is not extracted, because the polygons are split at the dateline and the two sides are not recognised as a shared edge.

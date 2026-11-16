@@ -75,6 +75,7 @@ params['continent_strength_mode'] = modes['continent_strength']
 params['collision_tear_mode'] = modes['collision_tear']
 params['rebuild_tiles_mode'] = modes['rebuild_tiles']
 params['subduction_init_mode'] = modes['subduction_init']
+params['overlap_mode'] = modes['overlap']
 if modes['subduction_init'] != 'off' and modes['rifting'] != 'trial':
     raise SystemExit('subduction_init tests passive margins inside the rifting trial split, so it needs rifting: trial')
 if modes['collision_tear'] == 'on' and modes['rifting'] != 'trial':
@@ -626,6 +627,9 @@ def _record_step_stats(i, step_times=None, previous_poles=None):
         # continents are rigid polygons; where two overlap the grids show only one
         step_row['continent_area_km2'] = _ov['continent_area_km2']
         step_row['continent_hidden_km2'] = _ov['continent_hidden_km2']
+    if 'overlap_conflicts' in force_diag:
+        # overlap: polarity -- pairs whose overriding plate was drawn before its downgoing plate
+        step_row['overlap_conflicts'] = force_diag['overlap_conflicts']
     step_row['speed_scale_k'] = last.get('k_used', np.nan)
     step_row['rms_speed_unscaled_km_per_myr'] = last.get('rms_unscaled', np.nan)
     step_row['speed_capped'] = bool(last.get('capped', False))

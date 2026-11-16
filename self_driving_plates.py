@@ -425,6 +425,37 @@ def plate_polygons_to_wrapped_gdf(polygons):
     return gpd.GeoDataFrame(rows, crs=rp_gdf.crs).reset_index(drop=True)
 
 
+def burn_order(plate_ids, polarity_dict):
+    """The order in which plates are drawn into the plate-ID raster with overlap: polarity.
+
+    The raster keeps the last plate drawn where moved plates overlap. At a trench the
+    overriding plate should keep the overlap, so each pair in polarity_dict ((lo, hi) ->
+    downgoing plate) with both plates present asks for its downgoing plate to be drawn
+    before its overriding plate. Plates free to go next are taken highest ID first (the
+    overlap: plate_id order). If none is free, because the polarities form a cycle (A beneath
+    B beneath C beneath A), the highest remaining ID goes next and breaks the cycle.
+
+    Returns (order, conflicts): the plate IDs in drawing order, and the number of pairs whose
+    overriding plate is drawn before its downgoing plate (only possible in a cycle).
+    """
+    ids = sorted({int(p) for p in plate_ids}, reverse=True)
+    present = set(ids)
+    pairs = [(down, hi if down == lo else lo) for (lo, hi), down in (polarity_dict or {}).items()
+             if lo in present and hi in present and down in (lo, hi)]
+    before = {p: set() for p in ids}          # plates that must be drawn before p
+    for down, over in pairs:
+        before[over].add(down)
+    order, placed = [], set()
+    while len(order) < len(ids):
+        free = [p for p in ids if p not in placed and before[p] <= placed]
+        nxt = free[0] if free else next(p for p in ids if p not in placed)
+        order.append(nxt)
+        placed.add(nxt)
+    position = {p: k for k, p in enumerate(order)}
+    conflicts = sum(1 for down, over in pairs if position[down] > position[over])
+    return order, conflicts
+
+
 def update_plate_id_raster(clipped_polygons, raster_spacing=1, tie_break='hash',
                            previous_plate_id=None, tie_break_seed=0):
     valid = clipped_polygons.dropna(subset=['geometry'])
@@ -2635,9 +2666,19 @@ def compute_timestep(rpolygons, forces, stage_pole_dict, delta_time=1, cratons=N
     rp_gdf = plate_polygons_to_wrapped_gdf(new_features)
     _ct['wrap_polygons'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
-    # Where moved plates overlap, the lower plate ID keeps the area: the plates are burnt
-    # into the raster highest ID first, so the lowest ID is burnt last and wins.
-    clipped_polygons = rp_gdf.sort_values('PLATEID1', ascending=False, kind='stable')
+    # Where moved plates overlap, the plate burnt into the raster last keeps the area.
+    # overlap: plate_id burns the highest ID first, so the lowest ID wins whatever the
+    # polarity; overlap: polarity burns each pair's downgoing plate before its overriding
+    # plate (burn_order), so at a trench the overriding plate keeps the overlap.
+    if params.get('overlap_mode', 'plate_id') == 'polarity':
+        _order, _conflicts = burn_order(rp_gdf['PLATEID1'].values, polarity_dict)
+        _rank = {p: k for k, p in enumerate(_order)}
+        clipped_polygons = (rp_gdf.assign(_burn=rp_gdf['PLATEID1'].astype(int).map(_rank))
+                            .sort_values('_burn', kind='stable').drop(columns='_burn'))
+        if force_diag is not None:
+            force_diag['overlap_conflicts'] = _conflicts
+    else:
+        clipped_polygons = rp_gdf.sort_values('PLATEID1', ascending=False, kind='stable')
     _ct['resolve_overlaps'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
     plate_id_raster = update_plate_id_raster(clipped_polygons, raster_spacing=raster_spacing,

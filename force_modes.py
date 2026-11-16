@@ -27,6 +27,7 @@ MODE_CHOICES = {
     'collision_tear':      ('off', 'on'),
     'rebuild_tiles':       ('off', 'on'),
     'subduction_init':     ('off', 'log'),
+    'overlap':             ('plate_id', 'polarity'),
 }
 
 PRESETS = {
@@ -51,6 +52,7 @@ PRESETS = {
         'collision_tear':      'off',
         'rebuild_tiles':       'off',
         'subduction_init':     'off',
+        'overlap':             'plate_id',
     },
     'physical': {
         'drag':                'area_edge',
@@ -73,6 +75,7 @@ PRESETS = {
         'collision_tear':      'off',
         'rebuild_tiles':       'off',
         'subduction_init':     'off',
+        'overlap':             'plate_id',   # polarity is on trial (public_release_plan.md, stage A)
     },
 }
 
@@ -98,6 +101,7 @@ IMPLEMENTED = {
     'collision_tear':      {'off', 'on'},
     'rebuild_tiles':       {'off', 'on'},
     'subduction_init':     {'off', 'log'},
+    'overlap':             {'plate_id', 'polarity'},
 }
 
 DEFAULT_PRESET = 'physical'
