@@ -408,6 +408,8 @@ subduction initiation is no longer the priority; otherwise v3 resumes at S1.
 12. **Evidence for README statements:** the README no longer cites `show-me/` folders; the five tests it relied
     on are written out as text in `docs/evidence.md` (E1–E5), for LLM readers more than human ones, and the plans
     say their `show-me/` paths are local (Simon, 17 Nov).
+13. **The asthenosphere viewer of 7-10 November** (uncommitted in `viewer/`) is stashed, not committed: slablet's
+    Earth viewer replaced it (Simon, 17 Nov).
 
 ## Budgets
 
