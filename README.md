@@ -472,18 +472,6 @@ params:
 
 The `cmb_surface_coupling` parameter implements an instantaneous dynamic pressure coupling: surface slablets suppress CMB heat with weight `surface_coupling`, deep slablets with weight up to 1.0 (linearly interpolated with depth). This allows the CMB field to respond to surface subduction from the first timestep, without waiting for material to physically reach the base of the mantle.
 
-### Tomographic smoothing
-
-Blurs the final dVs field to simulate the resolution limits of real seismic tomography.
-
-```yaml
-params:
-  tomo_smooth_horiz_deg:  5.0    # horizontal Gaussian sigma (degrees; 0 = off)
-  tomo_smooth_depth_km:   150.0  # vertical Gaussian sigma (km; 0 = off)
-```
-
-Typical global tomography models have horizontal resolution ~500 km (~5°) and vertical resolution ~150 km.
-
 ### Plate fragmentation
 
 Plates with a thin neck can be split at their narrowest point. Both fragmentation and merging are off unless enabled; the shipped `config.yaml` turns fragmentation on.
@@ -834,7 +822,7 @@ This is spherically correct and has no polar singularity.
 - **Sinking**: upper mantle (0–670 km): rate = `min(slab_sink_rate_factor × |divergence|, max_sink_rate)` km/Myr; lower mantle: rate / `slab_slowing_factor`. Slablets are removed on reaching the CMB (~2890 km)
 - **Thermal fading**: `dT = T₀ × weight × exp(-age / slab_thermal_tau_myr)` where `T₀ = -500 K`
 - **dVs conversion**: `dVs = dT × dVs_per_K` (-0.001 %/K) → cold slab = positive dVs (fast waves)
-- **Final field**: spherical Gaussian horizontally, Gaussian in depth. Each depth level has zero area-weighted mean. It can optionally be blurred by `tomo_smooth_horiz_deg` / `tomo_smooth_depth_km`
+- **Final field**: spherical Gaussian horizontally, Gaussian in depth. Each depth level has zero area-weighted mean
 
 ### Synthetic earthquake generation
 

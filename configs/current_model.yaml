@@ -131,8 +131,6 @@ params:
   tessellation_deg: 0.2
   tie_break: previous_owner
   tie_break_seed: 2
-  tomo_smooth_depth_km: 150.0
-  tomo_smooth_horiz_deg: 5.0
   topo_andean_arc_dist_deg: 4.5
   topo_andean_max_dist_deg: 11.0
   topo_andean_peak_m: 3000

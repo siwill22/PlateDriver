@@ -104,8 +104,6 @@ params:
   cmb_max_heat:                3.0      # cap on heat accumulation units
   cmb_dVs_scale:               -0.5     # dVs % per heat unit injected into 3D field (negative = warm)
   cmb_decay_km:                400.0    # Gaussian decay length upward from CMB (km)
-  tomo_smooth_horiz_deg:       5.0      # tomographic blurring: horizontal Gaussian sigma (degrees; 0 = off)
-  tomo_smooth_depth_km:        150.0    # tomographic blurring: vertical Gaussian sigma (km; 0 = off)
 
   # --- Plate resistance and speed scale (force_modes.drag / speed_normalisation) ---
   continent_drag_factor:       3.0     # basal drag under continents relative to ocean (drag: area, area_edge)
