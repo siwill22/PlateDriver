@@ -920,7 +920,10 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
   colliding continents stop with up to about 100 km of ocean still between them.
 - **Hidden continent is lost at a rift.** After a rift, the parent's continents are rebuilt
   from the raster, which only holds the visible continent, so any continent hidden under
-  another is deleted.
+  another is deleted. Without the stiff contact this adds up: `config.yaml` run to its 1000 Myr
+  (the `physical` preset, with up to 4% of continent hidden) lost 10.8% of its continent, 10.6%
+  of it in six rift steps and one other step, up to 3.3% at once. The current model (stiff
+  contact) loses 2–5% in 1000 Myr (November 2026).
 - **Terrain noise is fixed to the grid**: continents move over a stationary noise pattern rather than carrying their texture with them.
 - **Rifting** (`rifting: trial`):
   - With the default straight cuts and one continental strength, most rifts split off
