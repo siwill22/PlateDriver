@@ -342,7 +342,7 @@ subduction initiation is no longer the priority; otherwise v3 resumes at S1.
    - `collision_weld_scope: plate`, which collapses the world;
    - `collision_tear`, which never passes;
    - `slab_pull: ramp`.
-6. **Name:** OldDriver (GitHub) or PlateDriver.
+6. **Name:** PlateDriver (Simon, 16 Nov). The GitHub repository OldDriver is renamed at the release.
 7. **slablet's docs in public:**
    - **Recommended:** publish the README, `CONTEXT.md`, the ADRs, and the plans about slablet's own physics. Keep the
      cross-repo register and the status page private until reviewed, because they discuss IPV, defamation and

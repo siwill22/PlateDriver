@@ -1,14 +1,14 @@
-# OldDriver — Self-Driving Plate Tectonics Simulation
+# PlateDriver: self-driving plate tectonics
 
 ## Inspiration
 
-The core approach — computing forces on plate boundaries and integrating them forward to derive stage rotations — is inspired by the [Tectonic Explorer](https://github.com/concord-consortium/tectonic-explorer) project by the Concord Consortium. OldDriver extends that idea into a full simulation pipeline built on [GPlates](https://www.gplates.org) / pygplates, with raster-based plate tracking, tracer advection, mantle structure synthesis, and output compatible with GPlates workflows.
+The core approach — computing forces on plate boundaries and integrating them forward to derive stage rotations — is inspired by the [Tectonic Explorer](https://github.com/concord-consortium/tectonic-explorer) project by the Concord Consortium. PlateDriver extends that idea into a full simulation pipeline built on [GPlates](https://www.gplates.org) / pygplates, with raster-based plate tracking, tracer advection, mantle structure synthesis, and output compatible with GPlates workflows.
 
 PlateDriver was written for teaching. It makes the synthetic datasets of Earth-like planets used in the Southern Ocean Marine Geosciences course at OUC Qingdao, and it shows how the forces on plates shape their motions. Teaching remains its purpose, so it is kept simple, cheap to run (about 3 s per 1-Myr step) and readable. Its synthetic plate histories also serve research, through [slablet](https://github.com/siwill22/slablet), which models the mantle and the asthenosphere beneath any plate history, synthetic or reconstructed. Where the work is going is in `docs/public_release_plan.md`.
 
 ## What this is
 
-OldDriver is a forward model of plate tectonic evolution. Starting from an initial set of tectonic plates (defined in GPlates format), the model computes the forces acting on each plate at every timestep, derives stage rotations, and evolves the plate geometry forward in time. The plates "drive themselves" — no prescribed rotation model is needed after the initial snapshot.
+PlateDriver is a forward model of plate tectonic evolution. Starting from an initial set of tectonic plates (defined in GPlates format), the model computes the forces acting on each plate at every timestep, derives stage rotations, and evolves the plate geometry forward in time. The plates "drive themselves" — no prescribed rotation model is needed after the initial snapshot.
 
 The model tracks:
 - **Plate polygons** — boundaries evolve through each timestep driven by slab pull, ridge push, and collision forces
