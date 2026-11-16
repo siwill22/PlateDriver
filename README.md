@@ -248,7 +248,7 @@ listed is `simple`'s):
     comparison.
 - **`rebuild_tiles`** (not a force; how plates are turned into polygons each step):
   - `off`: each plate is polygonised whole on the lon/lat grid.
-  - `on`: each plate is polygonised in pieces of at most 90° longitude × 45° latitude, which then
+  - `on` (`physical` since November 2026): each plate is polygonised in pieces of at most 90° longitude × 45° latitude, which then
     get their plate ID back. A plate that touches both edges of the lon/lat map and a pole (one
     reaching from pole to pole) is otherwise turned inside out by the dateline wrap: it is
     replaced by its complement and its cells go to its neighbours, with no error
@@ -934,7 +934,7 @@ By default (`params: rotation_time: before_snapshot`), `rotations_NNNN.rot` trea
 - **Collision settings are not calibrated.** `collision_stiff_factor` (100) and
   `weld_accrete_max_frac` (3% of the sphere) are order-of-magnitude choices; the convergence
   left at a stiff contact has not been measured.
-- **Edge drag along the dateline** with `rebuild_tiles: off`: a plate crossing ±180° is split into
+- **Edge drag along the dateline** with `rebuild_tiles: off` (`simple`): a plate crossing ±180° is split into
   two polygons there, and the seam between them counts as plate boundary in the edge drag
   (`drag: area_edge`). `rebuild_tiles: on` drops it, which changes the calibrated speed scale by
   about 5% (k 1.68 → 1.60).

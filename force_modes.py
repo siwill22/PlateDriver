@@ -73,7 +73,7 @@ PRESETS = {
         'rift_path':           'straight',   # physical default decided at the R4 gate
         'continent_strength':  'uniform',    # physical default decided at the R5 gate
         'collision_tear':      'off',
-        'rebuild_tiles':       'off',
+        'rebuild_tiles':       'on',      # the dateline seam is not a boundary (release plan, stage A2)
         'subduction_init':     'off',
         'overlap':             'plate_id',   # polarity is on trial (public_release_plan.md, stage A)
     },
