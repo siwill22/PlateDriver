@@ -92,10 +92,6 @@ paths are relative to the PlateDriver folder.
   (`741e72b`), and the least-cost rift cut now scales with the force grid (`a815951`).
 
 **Still open:**
-- **slablet's seafloor cache** does not record where tracking started, so a new user who follows a 250-Ma config
-  gets a 50-km lithosphere lid up to 3% dVs different from runs made on a cache tracked from 1000 Ma (everything
-  deeper is identical; slablet `docs/status.md`). Put the start in the cache key, or make the tracker always start
-  from the model's oldest time, before the release.
 - **`show-me/` references.** The README cites six `show-me/` folders as evidence, and `show-me/` is not in the
   repository. Before the release, either publish the folders it cites (for example under `docs/results/`) or drop
   the references.
@@ -401,6 +397,14 @@ subduction initiation is no longer the priority; otherwise v3 resumes at S1.
 6. **Name:** PlateDriver (Simon, 16 Nov). The GitHub repository OldDriver is renamed at the release.
 7. **slablet's docs in public:** everything is published as it is, with the full git history (Simon, 16 Nov). The
    recommendation had been to keep the cross-repo register and the status page private until reviewed.
+8. **Maps during the run:** none by default (`plot_interval: null`); each took 8 s and the default run waited 77% of
+   its time for them. Saved steps are drawn afterwards with `diagnose_run.py` (Simon, 17 Nov).
+9. **Late shattering:** release with the known issue, and `config.yaml` runs 500 Myr, not 1000; a remedy (for
+   example strength that grows as plates shrink) belongs with force model v3 (Simon, 17 Nov).
+10. **Hidden continent lost at rifts:** release with the known issue (3.2% of the continent by 500 Myr in
+    `config.yaml`); F3 fixes it after the release (Simon, 17 Nov).
+11. **slablet's seafloor cache:** each tracking start has its own seafloor and lithosphere caches (slablet
+    `310e58d`, Simon, 17 Nov); the existing caches were renamed to their starts.
 
 ## Budgets
 
