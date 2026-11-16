@@ -27,25 +27,44 @@ PlateDriver).
   32–34 %. Plate counts and old ocean are alike.
 - **Decision:** the rift test does not replace neck splitting, so it stays on, as a shape rule.
 
-**Defaults after A:** `overlap` waits on decision 1. Every other default is as the plan says.
+**Decision 1, tried and assessed (Simon: "let's try your recommendation"):**
+- **`physical`:** `overlap: polarity` (`f150b35`), as in A1.
+- **`simple`:** tried with `polarity` (`show-me/2026-11-16-simple_overlap/`) and returned to `plate_id`.
+  - `simple` has no drag and no speed calibration (RMS 140 mm/yr at the start). In 500-Myr runs it ended as one plate
+    in 1 of 3 seeds with `plate_id` and 2 of 3 with `polarity`.
+  - With `polarity` its speeds ran away, up to 490 mm/yr.
+  - A one-plate world hung the run; runs now end at that step with a message.
+  - The README says `simple` is for runs of up to about 200 Myr.
 
-**C, done (C1–C3; C4, pruning, waits on decision 5):**
+**C, done (C1–C4):**
 - rotation files count time back from the saved step (`42a14ed`);
 - the README states the purpose, which plate-map changes are force-driven and which are rules, and how Earth values
   are used (`ad800a0`);
 - the names users see say "continents", not "cratons", and old names are still read (`407a908`);
-- the v1 plan's claim about flat geometry is corrected (`c31d640`).
+- the v1 plan's claim about flat geometry is corrected (`c31d640`);
+- four unused modes are removed (`1c63261`), and old configs that name the remaining behaviour still run;
+- the name is PlateDriver (`103d7cd`). The GitHub repository is renamed at the release, after asking Simon.
+
+**B2, done:** the Atlantis starting map is in `examples/atlantis/`, which Simon agreed to publish (`48e8da7`). Input
+paths are relative to the PlateDriver folder.
 
 **B3, done:** smoke tests and a test of the drag tensor on a spherical cap (`2b412ba`, `0bfb67a`).
 
-**S, partly done:**
-- **Done:** slablet has an MIT licence (`16dcc83`), and its contract test passes on a fresh clone (`2ce084f`).
-  From a clean clone with no local data, 148 tests pass and 2 are skipped.
+**S, done except S4 and S5:**
+- **Licence and tests:** slablet has an MIT licence (`16dcc83`), and its contract test passes on a fresh clone
+  (`2ce084f`).
+- **S1:** the S40RTS stage-0 work is committed at Simon's request (slablet `3d98c18`, `5479451`; PlateDriver
+  `207d67c`). slablet's `main` is fast-forwarded to its working branch locally; nothing is pushed.
+- **S3:** config paths use `$SLABLET_DATA` and `$GPRM_CACHE` (`76dabf5`). The configs resolve to the same files as
+  before, and 151 tests pass.
 
-**Waiting on Simon:**
-- **B2:** whether the Atlantis starting map may be published. It is untracked in octopus, so it is not public now.
-- **S1 and S3:** what to do with the other session's uncommitted S40RTS stage-0 work in slablet. Most configs are
-  among those 33 files.
+**Still open:**
+- **S4, docs (decision 7):** Simon decided nothing is held back, so slablet goes public with its full history, the
+  register and the status page included. What remains is to check that the README and the status page describe the
+  current code.
+- **B1:** PlateDriver requires a tagged slablet, once slablet is public.
+- **Release:** tag slablet; merge `mantle-extract` into PlateDriver's `master`; rename the GitHub repository. Each
+  outward step waits for Simon.
 
 ## Why
 
@@ -233,7 +252,7 @@ subduction initiation is no longer the priority; otherwise v3 resumes at S1.
      and analysis scripts read it instead of `/Users/simon/Data`.
    - The model and the real driver run with no local data beyond what gprm downloads.
    - Each scoring tool says which data it needs and where to get it.
-4. **Docs.** What goes public from `docs/plans/` and `docs/status.md` is settled by decision 7. The AAD paper draft
+4. **Docs.** All of `docs/plans/` and `docs/status.md` go public (decision 7). The AAD paper draft
    stays out; it is local to PlateDriver's `show-me/`.
 5. **Clean clone.** Tests pass from a clean clone, and a release is tagged (for example v0.1).
 
@@ -343,11 +362,8 @@ subduction initiation is no longer the priority; otherwise v3 resumes at S1.
    - `collision_tear`, which never passes;
    - `slab_pull: ramp`.
 6. **Name:** PlateDriver (Simon, 16 Nov). The GitHub repository OldDriver is renamed at the release.
-7. **slablet's docs in public:**
-   - **Recommended:** publish the README, `CONTEXT.md`, the ADRs, and the plans about slablet's own physics. Keep the
-     cross-repo register and the status page private until reviewed, because they discuss IPV, defamation and
-     uncommitted work.
-   - **Alternative:** publish everything as it is.
+7. **slablet's docs in public:** everything is published as it is, with the full git history (Simon, 16 Nov). The
+   recommendation had been to keep the cross-repo register and the status page private until reviewed.
 
 ## Budgets
 

@@ -994,9 +994,14 @@ try:
                 geometry='geometry').set_crs(epsg=4326, allow_override=True)
         _step_times['seamounts'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
+        # A world of one plate has no boundaries left and cannot go on (in long simple runs
+        # the fastest plates consume their neighbours); the run ends at this step.
+        _pids = rasters['plate_id'].values
+        _one_plate = len(np.unique(_pids[np.isfinite(_pids)])) <= 1
+
         # Plot / save (non-blocking; the worker writes files in the background, but
         # this waits when the queue is full).  The last step is always saved.
-        _enqueue_outputs(i, force_save=(i == n_steps))
+        _enqueue_outputs(i, force_save=(i == n_steps or _one_plate))
         _step_times['outputs_enqueue'] = time.perf_counter() - _t0; _t0 = time.perf_counter()
 
         _stats_t0 = time.perf_counter()
@@ -1009,6 +1014,10 @@ try:
         print('  --- step timing (step {:d}, {:.1f}s total) ---'.format(i, total))
         for _name, _dt in sorted(_step_times.items(), key=lambda x: -x[1]):
             print('  {:20s}  {:5.1f}s  ({:4.1f}%)'.format(_name, _dt, 100 * _dt / total))
+        if _one_plate:
+            print('\nOne plate is left at t = {:.1f} Myr: the world has no plate boundaries, so the run '
+                  'ends here (step {} is saved).'.format(t, i))
+            break
 
 finally:
     # Drain output queue (also after an error or Ctrl-C in the main loop)

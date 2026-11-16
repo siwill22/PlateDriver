@@ -48,7 +48,7 @@ PRESETS = {
         'continent_strength':  'uniform',
         'rebuild_tiles':       'off',
         'subduction_init':     'off',
-        'overlap':             'polarity',   # the overriding plate keeps the overlap (Nov 2026)
+        'overlap':             'plate_id',   # the original rule; polarity made simple's speeds run away (Nov 2026)
     },
     'physical': {
         'drag':                'area_edge',
