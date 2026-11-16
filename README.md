@@ -4,7 +4,7 @@
 
 The core approach — computing forces on plate boundaries and integrating them forward to derive stage rotations — is inspired by the [Tectonic Explorer](https://github.com/concord-consortium/tectonic-explorer) project by the Concord Consortium. OldDriver extends that idea into a full simulation pipeline built on [GPlates](https://www.gplates.org) / pygplates, with raster-based plate tracking, tracer advection, mantle structure synthesis, and output compatible with GPlates workflows.
 
-The code is only intended for teaching, specifically to generate learning materials (synthetic datasets for Earth-like planets) used during the 'Southern Ocean Marine Geosciences' course at OUC Qingdao.
+PlateDriver was written for teaching. It makes the synthetic datasets of Earth-like planets used in the Southern Ocean Marine Geosciences course at OUC Qingdao, and it shows how the forces on plates shape their motions. Teaching remains its purpose, so it is kept simple, cheap to run (about 3 s per 1-Myr step) and readable. Its synthetic plate histories also serve research, through [slablet](https://github.com/siwill22/slablet), which models the mantle and the asthenosphere beneath any plate history, synthetic or reconstructed. Where the work is going is in `docs/public_release_plan.md`.
 
 ## What this is
 
@@ -22,6 +22,26 @@ The model tracks:
 - **Finite rotations** — accumulated from stage poles, written to a GPlates-compatible `.rot` file
 - **Plate fragmentation** — plates with a thin neck can be split at their narrowest point; off unless `fragmentation_enabled: true` (the shipped `config.yaml` turns it on)
 - **Plate merging** — plates with persistently near-zero relative motion can be absorbed into their neighbour; disabled by default
+
+### What the forces decide, and what rules decide
+
+The forces decide how fast each plate moves and about which pole it turns. The plate map itself changes by rules, each with its own trigger, and only the rift test reads the forces:
+
+| Change to the plate map | Trigger | From the forces? |
+|---|---|---|
+| A plate splits along a cut (`rifting: trial`) | the tension across the cut beats the strength along it for `rift_persist_myr` | yes |
+| A plate splits at a thin neck (`fragmentation_enabled`) | the plate's shape | no |
+| Which plate of a converging pair subducts (`polarity`) | older ocean, continents overriding; decided when the pair first converges | no |
+| Which plate keeps the cells where moved plates overlap (`overlap`) | the lower plate ID, or the pair's polarity | no |
+| A slab detaches (`collision: breakoff`) | `breakoff_delay_myr` of continental collision | no |
+| Colliding continents join (`collision_weld`) | `weld_after_myr` of continental collision | no |
+| Two plates merge (`merging_enabled`) | near-zero relative motion for `merge_min_steps` | no |
+| A plate enclosed by one other is absorbed | the plate map | no |
+| Gaps between moved plates are filled | the nearest plate, ties by `tie_break` | no |
+
+### Earth values
+
+Present-day Earth (oldest ocean about 180 Myr, the Pacific about 20% of the sphere, median ocean age about 60 Myr) is a reference for PlateDriver's outcomes, not a target to tune towards: Earth today is one snapshot, and other times may have been quite different. The model is calibrated to Earth in two places, though. With `speed_normalisation: calibrate_once` (the `physical` preset) the common scale of the forces is set at step 0 so that the RMS plate speed is `target_rms_speed` (50 mm/yr), and that is what makes a model Myr a Myr. And several time constants are Earth's: slab pull, ridge push and oceanic strength saturate at an ocean age of 80 Myr, and bathymetry follows GDH1.
 
 ## Inputs
 
@@ -44,7 +64,7 @@ All configuration is in the YAML file given by `--config` (default `config.yaml`
 
 ### The current model
 
-`config.yaml` keeps every optional mode off, so the plain `physical` preset is what it runs.
+`config.yaml` runs the plain `physical` preset (no `force_modes` overrides), with neck fragmentation on.
 The model used for teaching material (October 2026) is `configs/current_model.yaml`: the
 `physical` preset with continental rifting along random-strength belts, accretion of colliding
 continents with a stiff collision contact, tiled plate rebuild, and merging of small plates;
