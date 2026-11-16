@@ -22,18 +22,8 @@ except ImportError:
 from shapely.geometry import Point, Polygon
 from sklearn.neighbors import BallTree
 
-from sphere_geometry import lonlat_to_xyz, xyz_to_lonlat, spherical_kernel
-try:
-    import slablet          # the mantle model: needed only for slab tracking and mantle outputs
-except ImportError:        # slablet is private; PlateDriver runs without it when no mantle option is on
-    slablet = None
-
-
-def require_slablet(what):
-    """Stop with a clear message when an option needs slablet and it is not installed."""
-    if slablet is None:
-        raise ImportError('{} needs the slablet mantle model, which is not installed '
-                          '(~/GIT/slablet, private); turn that option off or install slablet'.format(what))
+import slablet              # the mantle model, and the sphere helpers below
+from slablet.sphere import lonlat_to_xyz, xyz_to_lonlat, spherical_kernel
 
 
 # Velocities throughout this module come from pygplates.calculate_velocities (or the
@@ -45,7 +35,7 @@ EARTH_RADIUS_KM = pygplates.Earth.mean_radius_in_kms
 # Small spherical helpers shared by the functions below
 # ---------------------------------------------------------------------------
 
-# lonlat_to_xyz and xyz_to_lonlat live in sphere_geometry.py (copies of slablet's) and are imported above.
+# lonlat_to_xyz and xyz_to_lonlat come from slablet.sphere (imported above).
 
 
 class SphereTree:
@@ -1156,7 +1146,6 @@ def polygons_to_stage_poles(polygons_gdf, plate_id_raster, forces,
                 and slab_tracers is not None and subduct.any():
             # the slab lies on the overriding side: outward from the downgoing plate
             side = np.where(is_down[:, None], outward, -outward)
-            require_slablet('slab_pull: slab_length / slab_suction: depth_split')
             slab_depth[subduct] = slablet.slab_depth_near(
                 mid_lon[subduct], mid_lat[subduct], side[subduct],
                 slab_tracers['lon'].values, slab_tracers['lat'].values,
@@ -3272,7 +3261,6 @@ def plate_step(t, delta_time, plate_id_raster, stage_pole_dict, boundaries_gdf, 
     trench lines     the 2-vertex arcs of the converging boundaries
     """
     from slablet import plate_history as PH
-    require_slablet('the plate-history contract (plate_step)')
     R = PH.RADIUS_KM
 
     def plate_id_at(lon, lat):

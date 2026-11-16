@@ -2,7 +2,6 @@
 #
 #   conda env create -f environment.yml
 #   conda activate platedriver
-#   pip install -e /path/to/slablet          # the mantle model (github.com/siwill22/slablet)
 #   python -m pytest tests
 #
 # Developed in the pygmt17 environment (Python 3.12, pygplates 1.0).
@@ -36,3 +35,4 @@ dependencies:
   - pip
   - pip:
       - git+https://github.com/siwill22/GPlatesReconstructionModel
+      - git+https://github.com/siwill22/slablet@v0.1.0      # the mantle model, a required dependency

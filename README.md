@@ -86,7 +86,6 @@ Python ≥ 3.10 with pygplates (≥ 0.36; developed with 1.0), [gprm](https://gi
 
     conda env create -f environment.yml
     conda activate platedriver
-    pip install /path/to/slablet
     python -m pytest tests
 
 The tests pass in it (Python 3.12, pandas 3, numpy 2.5; November 2026) and in the `pygmt17` environment the model was developed in (pandas 2.3, numpy 1.26). Build it with `PYTHONPATH` unset if that points at other copies of gprm or PlateTectonicTools, or pip takes those as installed.
@@ -448,9 +447,9 @@ Hotspot positions are fixed in the mantle frame (not reconstructed). Seamounts a
 
 Tracks subducted material vertically through the mantle and synthesises a 3D seismic velocity anomaly field.
 
-The code is in the separate package **slablet** (`~/GIT/slablet`, github.com/siwill22/slablet; install with `conda run -n pygmt17 pip install -e ~/GIT/slablet`), which never imports PlateDriver code. Every mantle parameter and its default is in `slablet/params.py` (`MantleParams`); the config keys below are its field names. PlateDriver hands it trench samples through `self_driving_plates.trench_samples`, and records slablet's version and commit in each run's `run_info.yaml`. The same model runs on real reconstructions from slablet (`python -m slablet.gplates.run_mantle <config>`, configs in slablet's `configs/`), with the same `mantle:` keys; its outputs still go to `runs_real/` here. Where the shared work stands across PlateDriver, slablet, IPV and defamation (what exists, what is uncommitted, what is planned, known issues) is in slablet's `docs/status.md`.
+The code is in the separate package **slablet** ([github.com/siwill22/slablet](https://github.com/siwill22/slablet); `environment.yml` installs release v0.1.0, and for development `pip install -e` a clone of it), which never imports PlateDriver code. Every mantle parameter and its default is in `slablet/params.py` (`MantleParams`); the config keys below are its field names. PlateDriver hands it trench samples through `self_driving_plates.trench_samples`, and records slablet's version and commit in each run's `run_info.yaml`. The same model runs on real reconstructions from slablet (`python -m slablet.gplates.run_mantle <config>`, configs in slablet's `configs/`), with the same `mantle:` keys. Where the shared work stands across PlateDriver, slablet, IPV and defamation (what exists, what is uncommitted, what is planned, known issues) is in slablet's `docs/status.md`.
 
-slablet is private and optional. PlateDriver imports it only when an option needs the mantle model (`slab_tracers_enabled`, `slab_pull: slab_length`, `slab_suction: depth_split`) and otherwise runs without it, stopping with a message that names those options if one is on and slablet is missing. The generic sphere helpers PlateDriver used from slablet are copied in `sphere_geometry.py`, and `tests/test_sphere_geometry.py` checks they still match slablet's. `gate.py` and `regression_check.py` refuse runs made on a slablet with uncommitted changes; an ordinary run on one gets a warning in its `run_info.yaml`.
+slablet is required. PlateDriver uses it for the mantle model (`slab_tracers_enabled`, `slab_pull: slab_length`, `slab_suction: depth_split` and the mantle outputs) and for its sphere helpers (`slablet.sphere`); `simple` runs with no mantle option on cost nothing extra. `gate.py` and `regression_check.py` refuse runs made on a slablet with uncommitted changes; an ordinary run on one gets a warning in its `run_info.yaml`.
 
 ```yaml
 params:
@@ -702,7 +701,7 @@ stage D).
 | File | Role |
 |---|---|
 | `self_driving_plates.py` | Library — all simulation logic as importable functions |
-| `tests/` | `test_slablet_adapter.py`: PlateDriver's trench-sample adapter still makes the samples of slablet's golden test (`tests/data/golden_samples.npz`); `test_sphere_geometry.py`: the sphere helpers in `sphere_geometry.py` still match slablet's |
+| `tests/` | `test_slablet_adapter.py`: PlateDriver's trench-sample adapter still makes the samples of slablet's golden test (`tests/data/golden_samples.npz`) |
 | `runs_real/` | Outputs and caches of slablet's real-reconstruction runs (gitignored; slablet's `runs_real` links here) |
 | `run_SDP.py` | Driver script — config loading, bootstrapping, main loop, plotting, output |
 | `plate_driver.py` | Torque helpers: segment torque, torque → stage rotation, and the bootstrap torques from the GPlates boundary feature types |

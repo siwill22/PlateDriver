@@ -21,7 +21,7 @@ import plate_driver as pdriver
 import self_driving_plates as sdp
 import step_stats
 
-slablet = sdp.slablet          # the mantle model, or None when it is not installed (it is private)
+slablet = sdp.slablet          # the mantle model
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ def _git_commit():
 # Record exactly what this run used (rewritten after step 0 with the speed scale)
 run_info = {'config_file': os.path.abspath(args.config),
             'git_commit': _git_commit(),
-            'slablet': slablet.version_info() if slablet is not None else 'not installed',
+            'slablet': slablet.version_info(),
             'started': time.strftime('%Y-%m-%d %H:%M:%S'),
             'force_model': force_preset,
             'force_modes_resolved': modes,
@@ -157,7 +157,7 @@ run_info['random_seed_used'] = (int(np.random.SeedSequence().entropy) if params.
 
 # A run on a slablet with uncommitted changes cannot be reproduced from a slablet commit: say so
 # (gate.py and regression_check.py refuse such runs outright).
-if slablet is not None and str(run_info['slablet'].get('git', '')).endswith('-dirty'):
+if str(run_info['slablet'].get('git', '')).endswith('-dirty'):
     run_info['warnings'] = ['slablet has uncommitted changes ({}); this run cannot be reproduced from a '
                             'slablet commit'.format(run_info['slablet']['git'])]
     print('WARNING: ' + run_info['warnings'][0])
@@ -241,10 +241,7 @@ _params_step0 = {**params, 'fragmentation_enabled': False}
 
 _slab_enabled = params.get('slab_tracers_enabled', False)   # mantle outputs (CMB heat, mantle_temp)
 _slab_track = _slab_enabled or _needs['slab']                # slab tracers kept (outputs or forces)
-if _slab_track and slablet is None:
-    raise SystemExit('slab tracking (slab_tracers_enabled, slab_pull: slab_length or slab_suction: depth_split) '
-                     'needs the slablet mantle model, which is not installed; turn those options off')
-mantle_p = slablet.MantleParams.from_config(params) if slablet is not None else None   # every mantle parameter
+mantle_p = slablet.MantleParams.from_config(params)   # every mantle parameter
 slab_tracers = pd.DataFrame(columns=slablet.SLAB_COLUMNS) if _slab_track else None
 
 

@@ -229,10 +229,7 @@ def check_slablet_committed(runs_dir, name, seeds, no_run):
     """Stop the gate when its results would rest on uncommitted slablet code."""
     from regression_check import dirty_slablet
     if not no_run:
-        try:
-            import slablet
-        except ImportError:
-            return                       # PlateDriver without the mantle model: nothing to check
+        import slablet
         git = str(slablet.version_info().get('git', ''))
         if git.endswith('-dirty'):
             raise SystemExit('gate stopped: slablet has uncommitted changes ({}); commit them first'.format(git))
